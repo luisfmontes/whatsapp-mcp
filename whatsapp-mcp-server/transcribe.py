@@ -38,7 +38,7 @@ import requests
 CDN_EXPIRY = timedelta(days=21)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-API_BASE = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
+API_BASE = os.environ.get("WHATSAPP_API_BASE_URL", f"http://localhost:{os.environ.get('WHATSAPP_BRIDGE_PORT', '8080')}/api")
 
 # --- Transcription engine configuration (all via env so the repo is portable) ---
 #
