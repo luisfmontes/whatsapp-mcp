@@ -3,6 +3,7 @@ set -euo pipefail
 
 # WhatsApp MCP — one-line installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash
+#        curl -fsSL … | bash -s -- [--service] [--codex]
 
 REPO_URL="https://github.com/rodrigopg/whatsapp-mcp.git"
 INSTALL_DIR="${WHATSAPP_MCP_DIR:-$HOME/.whatsapp-mcp}"
@@ -14,6 +15,18 @@ info()    { echo -e "${CYAN}▸ $*${NC}"; }
 success() { echo -e "${GREEN}✓ $*${NC}"; }
 warn()    { echo -e "${YELLOW}⚠ $*${NC}"; }
 die()     { echo -e "${RED}✗ $*${NC}" >&2; exit 1; }
+
+# ── flags ────────────────────────────────────────────────────────────────────
+# Works with: curl … | bash -s -- --service --codex
+WITH_SERVICE=0
+WITH_CODEX=0
+for arg in "$@"; do
+  case "$arg" in
+    --service) WITH_SERVICE=1 ;;
+    --codex)   WITH_CODEX=1 ;;
+    *)         die "Unknown flag: $arg. Usage: install.sh [--service] [--codex]" ;;
+  esac
+done
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════╗"
@@ -175,25 +188,153 @@ LAUNCH
 chmod +x "$LAUNCH_SCRIPT"
 success "Launch script: $LAUNCH_SCRIPT"
 
+# ── service helpers (--service) ──────────────────────────────────────────────
+bridge_already_running() {
+  curl -s --max-time 2 "http://localhost:$BRIDGE_PORT/qr" &>/dev/null && return 0
+  pgrep -f '/whatsapp-bridge$' &>/dev/null && return 0
+  return 1
+}
+
+install_service_linux() {
+  if bridge_already_running; then
+    warn "bridge already running (existing install?) — skipping service setup"
+    return 0
+  fi
+  if ! systemctl --user show-environment &>/dev/null; then
+    warn "systemctl --user unavailable (no user bus) — skipping service setup"
+    return 0
+  fi
+
+  UNIT_PATH="$HOME/.config/systemd/user/whatsapp-bridge.service"
+  UNIT_CONTENT="[Unit]
+Description=WhatsApp MCP bridge
+
+[Service]
+ExecStart=$INSTALL_DIR/start-bridge.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"
+  if [[ -f "$UNIT_PATH" ]] && [[ "$(cat "$UNIT_PATH")" != "$(printf '%s' "$UNIT_CONTENT")" ]]; then
+    warn "existing $UNIT_PATH differs from generated unit — not touching it"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$UNIT_PATH")"
+  printf '%s' "$UNIT_CONTENT" > "$UNIT_PATH"
+  systemctl --user daemon-reload
+  systemctl --user enable --now whatsapp-bridge
+  success "systemd user service enabled: whatsapp-bridge (logs: journalctl --user -u whatsapp-bridge)"
+
+  if ! loginctl enable-linger "${USER:-$(id -un)}" &>/dev/null; then
+    warn "loginctl enable-linger failed — service will stop when you log out"
+  fi
+}
+
+install_service_macos() {
+  if bridge_already_running; then
+    warn "bridge already running (existing install?) — skipping service setup"
+    return 0
+  fi
+  if launchctl print "gui/$(id -u)/com.whatsapp-mcp.bridge" &>/dev/null; then
+    warn "launchd service already loaded — skipping"
+    return 0
+  fi
+  if [[ -f "$PLIST_PATH" ]]; then
+    # Only overwrite a plist we would have generated ourselves — either variant
+    # (inert from a no-flag install, or active) — same rule as the Linux unit.
+    local expected
+    expected="$(mktemp)"
+    write_plist true "$expected"
+    if ! cmp -s "$expected" "$PLIST_PATH"; then
+      write_plist false "$expected"
+      if ! cmp -s "$expected" "$PLIST_PATH"; then
+        rm -f "$expected"
+        warn "existing $PLIST_PATH differs from generated plist — not touching it"
+        return 0
+      fi
+    fi
+    rm -f "$expected"
+  fi
+  write_plist true "$PLIST_PATH"
+  launchctl load "$PLIST_PATH"
+  success "launchd service loaded (auto-starts at login): com.whatsapp-mcp.bridge"
+}
+
 # ── macOS launchd (optional auto-start) ──────────────────────────────────────
-if [[ "$PLATFORM" == "macos" ]]; then
-  PLIST_PATH="$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist"
-  if [[ ! -f "$PLIST_PATH" ]]; then
-    cat > "$PLIST_PATH" <<PLIST
+write_plist() {
+  local bool_tag="<false/>" out="${2:-$PLIST_PATH}"
+  [[ "$1" == "true" ]] && bool_tag="<true/>"
+  cat > "$out" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>             <string>com.whatsapp-mcp.bridge</string>
   <key>ProgramArguments</key>  <array><string>$INSTALL_DIR/start-bridge.sh</string></array>
-  <key>RunAtLoad</key>         <false/>
-  <key>KeepAlive</key>         <false/>
+  <key>RunAtLoad</key>         $bool_tag
+  <key>KeepAlive</key>         $bool_tag
   <key>StandardOutPath</key>   <string>$INSTALL_DIR/bridge.log</string>
   <key>StandardErrorPath</key> <string>$INSTALL_DIR/bridge.log</string>
 </dict>
 </plist>
 PLIST
+}
+
+if [[ "$PLATFORM" == "macos" ]]; then
+  PLIST_PATH="$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist"
+  if [[ $WITH_SERVICE -eq 1 ]]; then
+    install_service_macos
+  elif [[ ! -f "$PLIST_PATH" ]]; then
+    write_plist false
     success "launchd plist written (not loaded — use 'launchctl load $PLIST_PATH' to auto-start)"
+  fi
+fi
+
+# ── Linux systemd user service (--service) ───────────────────────────────────
+if [[ "$PLATFORM" == "linux" && $WITH_SERVICE -eq 1 ]]; then
+  install_service_linux
+fi
+
+# ── Codex CLI registration (--codex) ─────────────────────────────────────────
+if [[ $WITH_CODEX -eq 1 ]]; then
+  CODEX_SNIPPET="[mcp_servers.whatsapp]
+command = \"$UV_PATH\"
+args = [\"--directory\", \"$INSTALL_DIR/whatsapp-mcp-server\", \"run\", \"main.py\"]
+env = { WHATSAPP_BRIDGE_PORT = \"$BRIDGE_PORT\" }"
+  CODEX_CONFIG="$HOME/.codex/config.toml"
+  if [[ ! -d "$HOME/.codex" ]]; then
+    warn "Codex CLI not found (~/.codex missing) — add this to its config.toml manually:"
+    echo ""
+    echo "$CODEX_SNIPPET"
+    echo ""
+  elif [[ ! -f "$CODEX_CONFIG" ]]; then
+    if echo "$CODEX_SNIPPET" > "$CODEX_CONFIG" 2>/dev/null; then
+      success "Codex config created: $CODEX_CONFIG"
+    else
+      warn "Could not write $CODEX_CONFIG — add this manually:"
+      echo ""
+      echo "$CODEX_SNIPPET"
+      echo ""
+    fi
+  elif grep -q 'mcp_servers' "$CODEX_CONFIG"; then
+    # Any mcp_servers form (table, dotted key, inline table) — appending a second
+    # [mcp_servers.whatsapp] table could corrupt the TOML, so hand off to the user.
+    warn "mcp_servers already configured in $CODEX_CONFIG — not touching it. Merge manually if needed:"
+    echo ""
+    echo "$CODEX_SNIPPET"
+    echo ""
+  else
+    if { echo ""; echo "$CODEX_SNIPPET"; } >> "$CODEX_CONFIG" 2>/dev/null; then
+      success "Codex config updated: $CODEX_CONFIG (appended [mcp_servers.whatsapp])"
+    else
+      warn "Could not append to $CODEX_CONFIG — add this manually:"
+      echo ""
+      echo "$CODEX_SNIPPET"
+      echo ""
+    fi
   fi
 fi
 

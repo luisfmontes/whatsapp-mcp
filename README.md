@@ -76,6 +76,8 @@ Optional: `TRANSCRIPTION_PROMPT` biases both engines toward correct punctuation 
 
 Once an engine is configured: new voice messages become searchable within ~5 minutes, and **`list_messages` matches their transcribed text** like any other message.
 
+When installed as a Claude Code plugin, run the backfill/recovery scripts from `~/.whatsapp-mcp` (the runtime install), not from the plugin directory.
+
 The backfill/recovery scripts are separate processes that read the engine vars from *their own* shell — so `source ~/.whatsapp-mcp/transcription.env` (or re-`export` the vars) in the shell you run them from; the `transcription.env` you set up for the bridge does not reach them automatically. Then, from `whatsapp-mcp-server/`:
 - **`python3 transcribe.py`** — backfill existing audios that are still downloadable.
 - **`python3 recover_audios.py`** — for audios that expired from WhatsApp's CDN (shown as `[áudio indisponível…]`); requires your **phone online**. This one scrapes the bridge's log to confirm each re-upload, so the bridge must be logging to a *file* and `WHATSAPP_BRIDGE_LOG` must point at it (a foreground `go run main.go` logs to the terminal, not a file). With the `install.sh` launchd setup the log is at `~/.whatsapp-mcp/bridge.log`, so run `WHATSAPP_BRIDGE_LOG=~/.whatsapp-mcp/bridge.log python3 recover_audios.py`.
@@ -89,6 +91,19 @@ The backfill/recovery scripts are separate processes that read the engine vars f
 ---
 
 ## Installation
+
+### Install as a Claude Code plugin
+
+The fastest path for Claude Code users:
+
+```
+/plugin marketplace add rodrigopg/claude-plugins
+/plugin install whatsapp-mcp@rodrigopg
+```
+
+Then run `/whatsapp-mcp:setup` for guided onboarding: it checks dependencies (Go 1.25+, uv, git), builds and installs the bridge as a service, and walks you through QR pairing. The plugin installs from this repo's `main` branch. The first tool call after install/update may be slow while `uv` resolves dependencies.
+
+---
 
 ### One-line install (macOS / Linux / WSL)
 
@@ -105,6 +120,27 @@ The script:
 - on macOS: writes a launchd plist for optional auto-start
 
 After install, run `~/.whatsapp-mcp/start-bridge.sh`, open **http://localhost:8080/qr** in your browser, scan the QR, then restart Claude Desktop or Cursor.
+
+Optional flags (`bash -s -- --service --codex`):
+- `--service` — installs the bridge as a systemd **user** service on Linux (`whatsapp-bridge`, auto-restart, survives logout via linger) or loads the launchd plist with KeepAlive on macOS. If a bridge is already running, service setup is skipped.
+- `--codex` — registers the MCP server with the Codex CLI (see below).
+
+---
+
+### Codex CLI
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash -s -- --codex
+```
+
+This writes `[mcp_servers.whatsapp]` into `~/.codex/config.toml`. The write is append-safe: if the key already exists, the file is left untouched and the snippet is printed for manual merge. To configure manually:
+
+```toml
+[mcp_servers.whatsapp]
+command = "uv"
+args = ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"]
+env = { WHATSAPP_BRIDGE_PORT = "8080" }
+```
 
 ---
 
@@ -220,6 +256,7 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 - **LID contacts not found**: happens when WhatsApp hasn't yet synced the LID→PN mapping locally. Reconnect to trigger a fresh sync.
 - **Out of sync / re-pairing**: deleting `whatsapp-bridge/store/whatsapp.db` (or re-scanning the QR for any reason) forces WhatsApp to re-deliver up to a year of history. **This destroys your audio transcriptions** — the re-sync re-inserts every audio row with empty `content`, overwriting transcribed text (the writes use `INSERT OR REPLACE`). Before re-pairing, **back up `whatsapp-bridge/store/messages.db`**. Deleting only `messages.db` does *not* protect transcriptions either: the next sync still arrives empty. After re-pairing you must re-run `transcribe.py` / `recover_audios.py` to rebuild them.
 - **Device limit**: WhatsApp limits linked devices. Remove one via Settings → Linked Devices on your phone.
+- **Dev clone or custom port**: point the MCP server at your setup via the `WHATSAPP_MESSAGES_DB`, `WHATSAPP_BRIDGE_PORT`, or `WHATSAPP_API_BASE_URL` env vars.
 
 ---
 

@@ -8,12 +8,12 @@ import os.path
 import requests
 import json
 import audio
+from db_path import resolve_messages_db
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 # whatsapp.db (whatsmeow session/lid_map/contacts) is no longer read from Python.
 # Contact/LID resolution goes through the bridge REST API (see _resolve_phone_to_jids,
 # search_contacts). This decouples the MCP server from the whatsmeow internal schema.
-WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
+WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", f"http://localhost:{os.environ.get('WHATSAPP_BRIDGE_PORT', '8080')}/api")
 
 
 def _strip_accents(text: Optional[str]) -> Optional[str]:
@@ -25,8 +25,11 @@ def _strip_accents(text: Optional[str]) -> Optional[str]:
 
 
 def _connect_messages_db() -> sqlite3.Connection:
-    """Open the messages DB with an `unaccent` SQL function registered."""
-    conn = sqlite3.connect(MESSAGES_DB_PATH)
+    """Open the messages DB with an `unaccent` SQL function registered.
+
+    Resolves DB path lazily at connection time, not module import.
+    """
+    conn = sqlite3.connect(resolve_messages_db())
     conn.create_function("unaccent", 1, _strip_accents, deterministic=True)
     return conn
 
@@ -114,7 +117,7 @@ class MessageContext:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         
         # First try matching by exact JID
@@ -299,7 +302,7 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         
         # Get the target message first
@@ -498,7 +501,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -543,7 +546,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -592,7 +595,7 @@ def get_last_interaction(jid: str) -> str:
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         
         query = """
@@ -641,7 +644,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number (handles LID contacts)."""
     jids = _resolve_phone_to_jids(sender_phone_number)
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         placeholders = ','.join('?' * len(jids))
         cursor.execute(f"""
