@@ -19,13 +19,13 @@ It connects to your **personal WhatsApp account** directly via the WhatsApp web 
 - **PNG QR fallback** — QR code is saved to `/tmp/whatsapp-qr.png` and opened automatically on macOS if the terminal rendering is hard to scan.
 
 ### Security
-- **REST API bound to `127.0.0.1` by default** — the upstream bound to `0.0.0.0`, meaning anyone on the same LAN could send messages as you. Set `BIND_ADDR=0.0.0.0` to opt back into LAN exposure.
+- **REST API bound to `127.0.0.1` by default** — the upstream bound to `0.0.0.0`, meaning anyone on the same LAN could send messages as you. Set `BIND_ADDR=<ip>` to opt into wider exposure (`0.0.0.0`, or a specific interface like a Tailscale address). If `BIND_ADDR` is not loopback, `API_AUTH_TOKEN` becomes mandatory — the bridge refuses to start without it, and every `/api/*` request must send `Authorization: Bearer <token>`.
 
 ### Contact name resolution (LID migration)
 WhatsApp has been migrating contacts from phone-based JIDs (`+55...@s.whatsapp.net`) to internal LID JIDs (`xxx@lid`) for privacy. This broke contact search, `get_direct_chat_by_contact`, and `list_messages` in the upstream. Fixed with:
-- `_resolve_phone_to_jids` — looks up all JID variants (PN + LID) for a phone number via `whatsapp.db`
-- `search_contacts` now searches `whatsmeow_contacts` in `whatsapp.db` first (real names + LID contacts), falling back to `messages.db`
-- `get_direct_chat_by_contact` resolves LID JIDs to phone numbers correctly
+- `resolvePhoneToJIDs` (Go bridge) — looks up all JID variants (PN + LID) for a phone number via `whatsapp.db`, exposed to the MCP server through `POST /api/chat/by_contact`
+- `POST /api/contacts/search` searches `whatsmeow_contacts` in `whatsapp.db` first (real names + LID contacts), falling back to `messages.db`
+- `get_direct_chat_by_contact` resolves LID JIDs to phone numbers correctly (bridge-side, via the endpoint above)
 - `resolveToPN` in the Go bridge normalizes LID→PN at write time so the same contact never splits across two `chat_jid` values
 - `migrateLIDChats` runs at startup and merges any existing `@lid` chat rows into their `@s.whatsapp.net` equivalents (transactional, idempotent)
 
@@ -83,8 +83,16 @@ The backfill/recovery scripts are separate processes that read the engine vars f
 ### Configuration
 - `WHATSAPP_BRIDGE_PORT` env var — change the REST API port (default `8080`)
 - `WHATSAPP_API_BASE_URL` env var — point the Python MCP server at a non-default bridge URL
-- `BIND_ADDR` env var — change the bind address of the REST API
+- `WHATSAPP_API_AUTH_TOKEN` env var — bearer token the MCP server sends as `Authorization: Bearer <token>`; required if the bridge's `API_AUTH_TOKEN` is set
+- `BIND_ADDR` env var — change the bind address of the REST API (see [Security](#security) above for the auth requirement this triggers)
+- `API_AUTH_TOKEN` env var (bridge) — bearer token required on all `/api/*` requests once `BIND_ADDR` is non-loopback
 - Transcription env vars — see [Audio transcription](#audio-transcription-opt-in) above
+
+**Running the MCP server against a remote bridge** (e.g. the bridge lives on a VPS/home
+server, Claude Code runs on your laptop): the MCP server talks to the bridge over HTTP only —
+it doesn't read any local SQLite file — so pointing `WHATSAPP_API_BASE_URL` at a remote host is
+enough. Don't bind the bridge's REST API to a public IP without `API_AUTH_TOKEN` set; a private
+network (Tailscale, WireGuard, SSH tunnel) plus the token is the recommended setup.
 
 ---
 
