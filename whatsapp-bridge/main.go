@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -20,10 +21,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 	goqr "github.com/skip2/go-qrcode"
+	"golang.org/x/text/unicode/norm"
 
 	"bytes"
 
@@ -1109,6 +1112,853 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// ---------------------------------------------------------------------------
+// Read-only REST endpoints (mirrors of whatsapp-mcp-server/whatsapp.py SQLite
+// reads) so a remote MCP server can consume message/chat/contact history over
+// HTTP instead of opening the SQLite files directly.
+// ---------------------------------------------------------------------------
+
+// unaccentSQLiteDriver is a copy of the "sqlite3" driver with an extra
+// "unaccent" SQL scalar function registered on every new connection, mirroring
+// the Python side's conn.create_function("unaccent", 1, _strip_accents).
+// Registered once via init() so `sql.Open("sqlite3_unaccent", ...)` works
+// anywhere in this file without disturbing the existing messageStore.db handle.
+func init() {
+	sql.Register("sqlite3_unaccent", &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			return conn.RegisterFunc("unaccent", stripAccents, true)
+		},
+	})
+}
+
+// stripAccents lowercases a string and strips Unicode diacritics (NFD
+// decomposition, drop Mn category), matching Python's _strip_accents exactly
+// so LIKE-based search behaves the same regardless of accents/case.
+func stripAccents(s string) string {
+	t := norm.NFD.String(s)
+	var b strings.Builder
+	b.Grow(len(t))
+	for _, r := range t {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToLower(b.String())
+}
+
+// APIMessage is the wire shape for a message row (Message is already taken by
+// the whatsmeow event struct above).
+type APIMessage struct {
+	Timestamp time.Time `json:"timestamp"`
+	Sender    string    `json:"sender"`
+	ChatName  *string   `json:"chat_name"`
+	Content   string    `json:"content"`
+	IsFromMe  bool      `json:"is_from_me"`
+	ChatJID   string    `json:"chat_jid"`
+	ID        string    `json:"id"`
+	MediaType *string   `json:"media_type"`
+}
+
+// APIChat is the wire shape for a chat row.
+type APIChat struct {
+	JID             string  `json:"jid"`
+	Name            *string `json:"name"`
+	LastMessageTime *string `json:"last_message_time"`
+	LastMessage     *string `json:"last_message"`
+	LastSender      *string `json:"last_sender"`
+	LastIsFromMe    *bool   `json:"last_is_from_me"`
+}
+
+// APIContact is the wire shape for a contact search result.
+type APIContact struct {
+	PhoneNumber string  `json:"phone_number"`
+	Name        *string `json:"name"`
+	JID         string  `json:"jid"`
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+// openUnaccentMessagesDB opens a second connection to messages.db using the
+// unaccent-enabled driver, for the read endpoints below. Kept separate from
+// messageStore.db (which uses the plain "sqlite3" driver) to avoid touching
+// the existing write path.
+func openUnaccentMessagesDB() (*sql.DB, error) {
+	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on")
+}
+
+// openStoreDBReadOnly opens a read-only connection to whatsmeow's own
+// session/contacts database (store/whatsapp.db). whatsmeow's sqlstore.Container
+// doesn't expose raw SQL access, so reads needed for LID/contact resolution use
+// their own handle here. mode=ro avoids interfering with whatsmeow's writes;
+// _busy_timeout tolerates brief lock contention instead of failing immediately.
+func openStoreDBReadOnly() (*sql.DB, error) {
+	return sql.Open("sqlite3", "file:store/whatsapp.db?mode=ro&_busy_timeout=5000")
+}
+
+func normalizePhone(phone string) string {
+	r := strings.NewReplacer("+", "", " ", "", "-", "")
+	return r.Replace(phone)
+}
+
+// resolvePhoneToJIDs mirrors _resolve_phone_to_jids: returns every JID form
+// (regular + LID) that could refer to this phone number. Degrades to just the
+// plain-JID guess if whatsapp.db can't be opened or queried, mirroring
+// Python's `except Exception: pass`.
+func resolvePhoneToJIDs(phone string) []string {
+	phone = normalizePhone(phone)
+	jids := []string{phone + "@s.whatsapp.net"}
+
+	db, err := openStoreDBReadOnly()
+	if err != nil {
+		return jids
+	}
+	defer db.Close()
+
+	var lid, pn string
+	row := db.QueryRow("SELECT lid, pn FROM whatsmeow_lid_map WHERE pn = ?", phone)
+	err = row.Scan(&lid, &pn)
+	if err != nil && len(phone) > 10 {
+		suffix := phone[len(phone)-10:]
+		row = db.QueryRow("SELECT lid, pn FROM whatsmeow_lid_map WHERE pn LIKE ?", "%"+suffix)
+		err = row.Scan(&lid, &pn)
+	}
+	if err == nil {
+		jids = append(jids, lid+"@lid")
+		if pn != phone {
+			jids = append(jids, pn+"@s.whatsapp.net")
+		}
+	}
+	return jids
+}
+
+// getContactNameFromStore mirrors _get_contact_name: look up a contact's
+// display name in whatsapp.db by phone number.
+func getContactNameFromStore(phone string) string {
+	phone = normalizePhone(phone)
+	db, err := openStoreDBReadOnly()
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+
+	var fullName, pushName sql.NullString
+	err = db.QueryRow(
+		`SELECT full_name, push_name FROM whatsmeow_contacts WHERE their_jid = ? OR their_jid LIKE ?`,
+		phone+"@s.whatsapp.net", phone+"%",
+	).Scan(&fullName, &pushName)
+	if err != nil {
+		return ""
+	}
+	if fullName.Valid && fullName.String != "" {
+		return fullName.String
+	}
+	if pushName.Valid && pushName.String != "" {
+		return pushName.String
+	}
+	return ""
+}
+
+// nullTimeToPtr renders a sql.NullTime as an RFC3339 string pointer, or nil.
+func nullTimeToPtr(t sql.NullTime) *string {
+	if !t.Valid {
+		return nil
+	}
+	// Keep the original offset (matches messages.timestamp's own tz, and how
+	// time.Time.MarshalJSON renders APIMessage.Timestamp) instead of forcing
+	// UTC — consistent RFC3339 with offset, not a mix of offset and "Z".
+	s := t.Time.Format(time.RFC3339)
+	return &s
+}
+
+func nullStringToPtr(s sql.NullString) *string {
+	if !s.Valid {
+		return nil
+	}
+	v := s.String
+	return &v
+}
+
+func nullBoolToPtr(b sql.NullBool) *bool {
+	if !b.Valid {
+		return nil
+	}
+	v := b.Bool
+	return &v
+}
+
+// scanAPIChatRow scans one row shaped like the list_chats/get_chat/etc.
+// queries below: jid, name, last_message_time, last_message, last_sender, last_is_from_me.
+func scanAPIChatRow(rows interface {
+	Scan(dest ...interface{}) error
+}) (APIChat, error) {
+	var jid string
+	var name, lastMessage, lastSender sql.NullString
+	var lastMessageTime sql.NullTime
+	var lastIsFromMe sql.NullBool
+	err := rows.Scan(&jid, &name, &lastMessageTime, &lastMessage, &lastSender, &lastIsFromMe)
+	if err != nil {
+		return APIChat{}, err
+	}
+	return APIChat{
+		JID:             jid,
+		Name:            nullStringToPtr(name),
+		LastMessageTime: nullTimeToPtr(lastMessageTime),
+		LastMessage:     nullStringToPtr(lastMessage),
+		LastSender:      nullStringToPtr(lastSender),
+		LastIsFromMe:    nullBoolToPtr(lastIsFromMe),
+	}, nil
+}
+
+// scanAPIMessageRow scans one row shaped like: timestamp, sender, chat_name,
+// content, is_from_me, chat_jid, id, media_type.
+func scanAPIMessageRow(rows interface {
+	Scan(dest ...interface{}) error
+}) (APIMessage, error) {
+	var timestamp time.Time
+	var sender, content, chatJID, id string
+	var chatName, mediaType sql.NullString
+	var isFromMe bool
+	err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType)
+	if err != nil {
+		return APIMessage{}, err
+	}
+	return APIMessage{
+		Timestamp: timestamp,
+		Sender:    sender,
+		ChatName:  nullStringToPtr(chatName),
+		Content:   content,
+		IsFromMe:  isFromMe,
+		ChatJID:   chatJID,
+		ID:        id,
+		MediaType: nullStringToPtr(mediaType),
+	}, nil
+}
+
+// ---- /api/chats ----
+
+type ChatsRequest struct {
+	Query              *string `json:"query"`
+	Limit              int     `json:"limit"`
+	Page               int     `json:"page"`
+	IncludeLastMessage *bool   `json:"include_last_message"`
+	SortBy             string  `json:"sort_by"`
+}
+
+type ChatsResponse struct {
+	Chats []APIChat `json:"chats"`
+}
+
+func listChats(db *sql.DB, req ChatsRequest) (ChatsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	includeLastMessage := true
+	if req.IncludeLastMessage != nil {
+		includeLastMessage = *req.IncludeLastMessage
+	}
+
+	queryParts := []string{`
+		SELECT
+			chats.jid,
+			chats.name,
+			chats.last_message_time,
+			messages.content as last_message,
+			messages.sender as last_sender,
+			messages.is_from_me as last_is_from_me
+		FROM chats
+	`}
+	if includeLastMessage {
+		queryParts = append(queryParts, `
+			LEFT JOIN messages ON chats.jid = messages.chat_jid
+			AND chats.last_message_time = messages.timestamp
+		`)
+	}
+
+	var whereClauses []string
+	var params []interface{}
+	if req.Query != nil && *req.Query != "" {
+		whereClauses = append(whereClauses, "(unaccent(chats.name) LIKE unaccent(?) OR chats.jid LIKE ?)")
+		params = append(params, "%"+*req.Query+"%", "%"+*req.Query+"%")
+	}
+	if len(whereClauses) > 0 {
+		queryParts = append(queryParts, "WHERE "+strings.Join(whereClauses, " AND "))
+	}
+
+	orderBy := "chats.name"
+	if req.SortBy != "name" {
+		orderBy = "chats.last_message_time DESC"
+	}
+	queryParts = append(queryParts, "ORDER BY "+orderBy)
+
+	offset := req.Page * limit
+	queryParts = append(queryParts, "LIMIT ? OFFSET ?")
+	params = append(params, limit, offset)
+
+	rows, err := db.Query(strings.Join(queryParts, " "), params...)
+	if err != nil {
+		return ChatsResponse{}, err
+	}
+	defer rows.Close()
+
+	chats := []APIChat{}
+	for rows.Next() {
+		chat, err := scanAPIChatRow(rows)
+		if err != nil {
+			return ChatsResponse{}, err
+		}
+		chats = append(chats, chat)
+	}
+	return ChatsResponse{Chats: chats}, rows.Err()
+}
+
+// ---- /api/messages ----
+
+type MessagesRequest struct {
+	After             *string `json:"after"`
+	Before            *string `json:"before"`
+	SenderPhoneNumber *string `json:"sender_phone_number"`
+	ChatJID           *string `json:"chat_jid"`
+	Query             *string `json:"query"`
+	Limit             int     `json:"limit"`
+	Page              int     `json:"page"`
+}
+
+type MessagesResponse struct {
+	Messages []APIMessage `json:"messages"`
+}
+
+// errInvalidRequest marks errors that should surface as 400 (bad input) to
+// callers, as opposed to unwrapped errors from db.Query/Scan which mean a
+// genuine internal/DB failure and should surface as 500.
+type errInvalidRequest struct{ msg string }
+
+func (e *errInvalidRequest) Error() string { return e.msg }
+
+// isoDateLayouts covers the subset of Python's datetime.fromisoformat that the
+// old whatsapp.py callers could plausibly send: full offset-aware RFC3339,
+// naive date+time, and date-only. Tried in order, first match wins.
+var isoDateLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// parseISODate mirrors Python's datetime.fromisoformat leniency: accepts an
+// offset (kept as-is) or a naive timestamp/date (interpreted in the same
+// local timezone the bridge stores messages.timestamp in, since messages.db
+// timestamps carry a -03:00-style offset, not UTC).
+func parseISODate(s string) (time.Time, error) {
+	for _, layout := range isoDateLayouts {
+		if layout == time.RFC3339 {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t, nil
+			}
+			continue
+		}
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, &errInvalidRequest{msg: fmt.Sprintf("invalid date format: %s", s)}
+}
+
+func listMessages(db *sql.DB, req MessagesRequest) (MessagesResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	queryParts := []string{
+		`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages`,
+		`JOIN chats ON messages.chat_jid = chats.jid`,
+	}
+	var whereClauses []string
+	var params []interface{}
+
+	if req.After != nil && *req.After != "" {
+		t, err := parseISODate(*req.After)
+		if err != nil {
+			return MessagesResponse{}, &errInvalidRequest{msg: fmt.Sprintf("invalid date format for 'after': %s", *req.After)}
+		}
+		whereClauses = append(whereClauses, "messages.timestamp > ?")
+		params = append(params, t)
+	}
+	if req.Before != nil && *req.Before != "" {
+		t, err := parseISODate(*req.Before)
+		if err != nil {
+			return MessagesResponse{}, &errInvalidRequest{msg: fmt.Sprintf("invalid date format for 'before': %s", *req.Before)}
+		}
+		whereClauses = append(whereClauses, "messages.timestamp < ?")
+		params = append(params, t)
+	}
+	if req.SenderPhoneNumber != nil && *req.SenderPhoneNumber != "" {
+		jids := resolvePhoneToJIDs(*req.SenderPhoneNumber)
+		placeholders := make([]string, len(jids))
+		for i, jid := range jids {
+			placeholders[i] = "?"
+			params = append(params, jid)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(messages.chat_jid IN (%s) AND messages.chat_jid NOT LIKE '%%@g.us')",
+			strings.Join(placeholders, ","),
+		))
+	}
+	if req.ChatJID != nil && *req.ChatJID != "" {
+		whereClauses = append(whereClauses, "messages.chat_jid = ?")
+		params = append(params, *req.ChatJID)
+	}
+	if req.Query != nil && *req.Query != "" {
+		whereClauses = append(whereClauses, "unaccent(messages.content) LIKE unaccent(?)")
+		params = append(params, "%"+*req.Query+"%")
+	}
+	if len(whereClauses) > 0 {
+		queryParts = append(queryParts, "WHERE "+strings.Join(whereClauses, " AND "))
+	}
+
+	offset := req.Page * limit
+	queryParts = append(queryParts, "ORDER BY messages.timestamp DESC", "LIMIT ? OFFSET ?")
+	params = append(params, limit, offset)
+
+	rows, err := db.Query(strings.Join(queryParts, " "), params...)
+	if err != nil {
+		return MessagesResponse{}, err
+	}
+	defer rows.Close()
+
+	messages := []APIMessage{}
+	for rows.Next() {
+		msg, err := scanAPIMessageRow(rows)
+		if err != nil {
+			return MessagesResponse{}, err
+		}
+		messages = append(messages, msg)
+	}
+	return MessagesResponse{Messages: messages}, rows.Err()
+}
+
+// ---- /api/message_context ----
+
+type MessageContextRequest struct {
+	MessageID string `json:"message_id"`
+	Before    int    `json:"before"`
+	After     int    `json:"after"`
+}
+
+type MessageContextResponse struct {
+	Message APIMessage   `json:"message"`
+	Before  []APIMessage `json:"before"`
+	After   []APIMessage `json:"after"`
+}
+
+func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextResponse, bool, error) {
+	before := req.Before
+	if before <= 0 {
+		before = 5
+	}
+	after := req.After
+	if after <= 0 {
+		after = 5
+	}
+
+	row := db.QueryRow(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.id = ?
+	`, req.MessageID)
+
+	var timestamp time.Time
+	var sender, content, chatJID, id, targetChatJID string
+	var chatName, mediaType sql.NullString
+	var isFromMe bool
+	err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &targetChatJID, &mediaType)
+	if err == sql.ErrNoRows {
+		return MessageContextResponse{}, false, nil
+	}
+	if err != nil {
+		return MessageContextResponse{}, false, err
+	}
+	target := APIMessage{
+		Timestamp: timestamp,
+		Sender:    sender,
+		ChatName:  nullStringToPtr(chatName),
+		Content:   content,
+		IsFromMe:  isFromMe,
+		ChatJID:   chatJID,
+		ID:        id,
+		MediaType: nullStringToPtr(mediaType),
+	}
+
+	beforeRows, err := db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp < ?
+		ORDER BY messages.timestamp DESC
+		LIMIT ?
+	`, targetChatJID, timestamp, before)
+	if err != nil {
+		return MessageContextResponse{}, false, err
+	}
+	defer beforeRows.Close()
+	beforeMessages := []APIMessage{}
+	for beforeRows.Next() {
+		msg, err := scanAPIMessageRow(beforeRows)
+		if err != nil {
+			return MessageContextResponse{}, false, err
+		}
+		beforeMessages = append(beforeMessages, msg)
+	}
+	if err := beforeRows.Err(); err != nil {
+		return MessageContextResponse{}, false, err
+	}
+
+	afterRows, err := db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp > ?
+		ORDER BY messages.timestamp ASC
+		LIMIT ?
+	`, targetChatJID, timestamp, after)
+	if err != nil {
+		return MessageContextResponse{}, false, err
+	}
+	defer afterRows.Close()
+	afterMessages := []APIMessage{}
+	for afterRows.Next() {
+		msg, err := scanAPIMessageRow(afterRows)
+		if err != nil {
+			return MessageContextResponse{}, false, err
+		}
+		afterMessages = append(afterMessages, msg)
+	}
+	if err := afterRows.Err(); err != nil {
+		return MessageContextResponse{}, false, err
+	}
+
+	return MessageContextResponse{Message: target, Before: beforeMessages, After: afterMessages}, true, nil
+}
+
+// ---- /api/contacts/search ----
+
+type ContactsSearchRequest struct {
+	Query string `json:"query"`
+}
+
+type ContactsSearchResponse struct {
+	Contacts []APIContact `json:"contacts"`
+}
+
+func searchContacts(messagesDB *sql.DB, query string) ContactsSearchResponse {
+	pattern := "%" + query + "%"
+	result := []APIContact{}
+	seen := map[string]bool{}
+
+	// Search whatsapp.db first (has real names + LID contacts).
+	if storeDB, err := openStoreDBReadOnly(); err == nil {
+		func() {
+			defer storeDB.Close()
+			rows, err := storeDB.Query(`
+				SELECT their_jid, full_name, push_name
+				FROM whatsmeow_contacts
+				WHERE (LOWER(full_name) LIKE LOWER(?)
+				       OR LOWER(push_name) LIKE LOWER(?)
+				       OR their_jid LIKE ?)
+				  AND their_jid NOT LIKE '%@g.us'
+				ORDER BY full_name, push_name
+				LIMIT 50
+			`, pattern, pattern, pattern)
+			if err != nil {
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var jid string
+				var fullName, pushName sql.NullString
+				if err := rows.Scan(&jid, &fullName, &pushName); err != nil {
+					continue
+				}
+				name := fullName.String
+				if name == "" {
+					name = pushName.String
+				}
+				raw := strings.SplitN(jid, "@", 2)[0]
+				phone := raw
+				if strings.HasSuffix(jid, "@lid") {
+					var pn string
+					if err := storeDB.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", raw).Scan(&pn); err == nil {
+						phone = pn
+					}
+				}
+				if !seen[jid] {
+					seen[jid] = true
+					var namePtr *string
+					if name != "" {
+						namePtr = &name
+					}
+					result = append(result, APIContact{PhoneNumber: phone, Name: namePtr, JID: jid})
+				}
+			}
+		}()
+	}
+
+	// Fallback: messages.db chats (catches contacts not in whatsmeow's own store).
+	rows, err := messagesDB.Query(`
+		SELECT DISTINCT jid, name FROM chats
+		WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+		  AND jid NOT LIKE '%@g.us'
+		ORDER BY name, jid LIMIT 50
+	`, pattern, pattern)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var jid string
+			var name sql.NullString
+			if err := rows.Scan(&jid, &name); err != nil {
+				continue
+			}
+			if !seen[jid] {
+				seen[jid] = true
+				result = append(result, APIContact{
+					PhoneNumber: strings.SplitN(jid, "@", 2)[0],
+					Name:        nullStringToPtr(name),
+					JID:         jid,
+				})
+			}
+		}
+	}
+
+	return ContactsSearchResponse{Contacts: result}
+}
+
+// ---- /api/contacts/chats ----
+
+type ContactChatsRequest struct {
+	JID   string `json:"jid"`
+	Limit int    `json:"limit"`
+	Page  int    `json:"page"`
+}
+
+func getContactChats(db *sql.DB, req ContactChatsRequest) (ChatsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := db.Query(`
+		SELECT DISTINCT
+			c.jid,
+			c.name,
+			c.last_message_time,
+			m.content as last_message,
+			m.sender as last_sender,
+			m.is_from_me as last_is_from_me
+		FROM chats c
+		JOIN messages m ON c.jid = m.chat_jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY c.last_message_time DESC
+		LIMIT ? OFFSET ?
+	`, req.JID, req.JID, limit, req.Page*limit)
+	if err != nil {
+		return ChatsResponse{}, err
+	}
+	defer rows.Close()
+
+	chats := []APIChat{}
+	for rows.Next() {
+		chat, err := scanAPIChatRow(rows)
+		if err != nil {
+			return ChatsResponse{}, err
+		}
+		chats = append(chats, chat)
+	}
+	return ChatsResponse{Chats: chats}, rows.Err()
+}
+
+// ---- /api/contacts/last_interaction ----
+
+type LastInteractionRequest struct {
+	JID string `json:"jid"`
+}
+
+type LastInteractionResponse struct {
+	Message *APIMessage `json:"message"`
+}
+
+func getLastInteraction(db *sql.DB, jid string) (LastInteractionResponse, error) {
+	row := db.QueryRow(`
+		SELECT
+			m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type
+		FROM messages m
+		JOIN chats c ON m.chat_jid = c.jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY m.timestamp DESC
+		LIMIT 1
+	`, jid, jid)
+
+	msg, err := scanAPIMessageRow(row)
+	if err == sql.ErrNoRows {
+		return LastInteractionResponse{Message: nil}, nil
+	}
+	if err != nil {
+		return LastInteractionResponse{}, err
+	}
+	return LastInteractionResponse{Message: &msg}, nil
+}
+
+// ---- /api/chat ----
+
+type ChatRequest struct {
+	ChatJID            string `json:"chat_jid"`
+	IncludeLastMessage *bool  `json:"include_last_message"`
+}
+
+type ChatResponse struct {
+	Chat *APIChat `json:"chat"`
+}
+
+func getChat(db *sql.DB, req ChatRequest) (ChatResponse, error) {
+	includeLastMessage := true
+	if req.IncludeLastMessage != nil {
+		includeLastMessage = *req.IncludeLastMessage
+	}
+
+	query := `
+		SELECT
+			c.jid,
+			c.name,
+			c.last_message_time,
+			m.content as last_message,
+			m.sender as last_sender,
+			m.is_from_me as last_is_from_me
+		FROM chats c
+	`
+	if includeLastMessage {
+		query += `
+			LEFT JOIN messages m ON c.jid = m.chat_jid
+			AND c.last_message_time = m.timestamp
+		`
+	}
+	query += " WHERE c.jid = ?"
+
+	row := db.QueryRow(query, req.ChatJID)
+	chat, err := scanAPIChatRow(row)
+	if err == sql.ErrNoRows {
+		return ChatResponse{Chat: nil}, nil
+	}
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	return ChatResponse{Chat: &chat}, nil
+}
+
+// ---- /api/chat/by_contact ----
+
+type ChatByContactRequest struct {
+	SenderPhoneNumber string `json:"sender_phone_number"`
+}
+
+func getDirectChatByContact(db *sql.DB, req ChatByContactRequest) (ChatResponse, error) {
+	jids := resolvePhoneToJIDs(req.SenderPhoneNumber)
+	placeholders := make([]string, len(jids))
+	params := make([]interface{}, len(jids))
+	for i, jid := range jids {
+		placeholders[i] = "?"
+		params[i] = jid
+	}
+
+	query := fmt.Sprintf(`
+		SELECT c.jid, c.name, c.last_message_time,
+		       m.content, m.sender, m.is_from_me
+		FROM chats c
+		LEFT JOIN messages m ON c.jid = m.chat_jid
+			AND c.last_message_time = m.timestamp
+		WHERE c.jid IN (%s) AND c.jid NOT LIKE '%%@g.us'
+		LIMIT 1
+	`, strings.Join(placeholders, ","))
+
+	row := db.QueryRow(query, params...)
+	chat, err := scanAPIChatRow(row)
+	if err == sql.ErrNoRows {
+		return ChatResponse{Chat: nil}, nil
+	}
+	if err != nil {
+		return ChatResponse{}, err
+	}
+
+	// Mirror Python: if the resolved name is empty or all-digits (after
+	// stripping "@lid"), fall back to the contact name from whatsapp.db.
+	nameEmpty := chat.Name == nil || *chat.Name == ""
+	nameAllDigits := false
+	if chat.Name != nil {
+		stripped := strings.ReplaceAll(*chat.Name, "@lid", "")
+		nameAllDigits = stripped != "" && isAllDigits(stripped)
+	}
+	if nameEmpty || nameAllDigits {
+		if contactName := getContactNameFromStore(req.SenderPhoneNumber); contactName != "" {
+			chat.Name = &contactName
+		}
+	}
+
+	return ChatResponse{Chat: &chat}, nil
+}
+
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- /api/sender_name ----
+
+type SenderNameRequest struct {
+	SenderJID string `json:"sender_jid"`
+}
+
+type SenderNameResponse struct {
+	Name string `json:"name"`
+}
+
+func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
+	var name sql.NullString
+	err := db.QueryRow("SELECT name FROM chats WHERE jid = ? LIMIT 1", senderJID).Scan(&name)
+	if err != nil && err != sql.ErrNoRows {
+		return SenderNameResponse{}, err
+	}
+	if err == nil && name.Valid && name.String != "" {
+		return SenderNameResponse{Name: name.String}, nil
+	}
+
+	phonePart := senderJID
+	if idx := strings.Index(senderJID, "@"); idx >= 0 {
+		phonePart = senderJID[:idx]
+	}
+	err = db.QueryRow("SELECT name FROM chats WHERE jid LIKE ? LIMIT 1", "%"+phonePart+"%").Scan(&name)
+	if err != nil && err != sql.ErrNoRows {
+		return SenderNameResponse{}, err
+	}
+	if err == nil && name.Valid && name.String != "" {
+		return SenderNameResponse{Name: name.String}, nil
+	}
+
+	return SenderNameResponse{Name: senderJID}, nil
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// /qr — serves the current QR code as PNG (during pairing) or a status page (when connected).
@@ -1307,6 +2157,38 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// Handler for getting group info (name + participants)
+	http.HandleFunc("/api/group_info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jid, err := types.ParseJID(r.URL.Query().Get("jid"))
+		if err != nil {
+			http.Error(w, "Invalid JID", http.StatusBadRequest)
+			return
+		}
+		groupInfo, err := client.GetGroupInfo(context.Background(), jid)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			return
+		}
+		participants := make([]map[string]string, 0, len(groupInfo.Participants))
+		for _, p := range groupInfo.Participants {
+			participants = append(participants, map[string]string{
+				"jid":          p.JID.String(),
+				"phone_number": p.PhoneNumber.User,
+				"lid":          p.LID.String(),
+				"display_name": p.DisplayName,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true, "name": groupInfo.Name, "participants": participants,
+		})
+	})
+
 	// Handler for leaving a group
 	http.HandleFunc("/api/leave_group", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1415,8 +2297,211 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Chat %s marked as unread", req.ChatJID)})
 	})
 
+	// Read-only endpoints below query messages.db through a second connection
+	// (unaccent-enabled driver) rather than messageStore.db, so search filters
+	// (list_chats/list_messages/search_contacts) can use the unaccent() SQL
+	// function without touching the existing write path's driver.
+	readDB, err := openUnaccentMessagesDB()
+	if err != nil {
+		fmt.Printf("Failed to open read-only messages.db handle: %v\n", err)
+	} else {
+		http.HandleFunc("/api/chats", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req ChatsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			resp, err := listChats(readDB, req)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req MessagesRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			resp, err := listMessages(readDB, req)
+			if err != nil {
+				var invalid *errInvalidRequest
+				if errors.As(err, &invalid) {
+					writeJSONError(w, http.StatusBadRequest, err.Error())
+				} else {
+					writeJSONError(w, http.StatusInternalServerError, err.Error())
+				}
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/message_context", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req MessageContextRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.MessageID == "" {
+				writeJSONError(w, http.StatusBadRequest, "message_id is required")
+				return
+			}
+			resp, found, err := getMessageContext(readDB, req)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !found {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Message with ID %s not found", req.MessageID))
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/contacts/search", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req ContactsSearchRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.Query == "" {
+				writeJSONError(w, http.StatusBadRequest, "query is required")
+				return
+			}
+			writeJSON(w, searchContacts(readDB, req.Query))
+		})
+
+		http.HandleFunc("/api/contacts/chats", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req ContactChatsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.JID == "" {
+				writeJSONError(w, http.StatusBadRequest, "jid is required")
+				return
+			}
+			resp, err := getContactChats(readDB, req)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/contacts/last_interaction", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req LastInteractionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.JID == "" {
+				writeJSONError(w, http.StatusBadRequest, "jid is required")
+				return
+			}
+			resp, err := getLastInteraction(readDB, req.JID)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req ChatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.ChatJID == "" {
+				writeJSONError(w, http.StatusBadRequest, "chat_jid is required")
+				return
+			}
+			resp, err := getChat(readDB, req)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/chat/by_contact", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req ChatByContactRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.SenderPhoneNumber == "" {
+				writeJSONError(w, http.StatusBadRequest, "sender_phone_number is required")
+				return
+			}
+			resp, err := getDirectChatByContact(readDB, req)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+
+		http.HandleFunc("/api/sender_name", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+				return
+			}
+			var req SenderNameRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Invalid request format")
+				return
+			}
+			if req.SenderJID == "" {
+				writeJSONError(w, http.StatusBadRequest, "sender_jid is required")
+				return
+			}
+			resp, err := getSenderName(readDB, req.SenderJID)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
+		})
+	}
+
 	// Bind to loopback only — no auth on REST API, anyone on LAN could send messages.
-	// Set BIND_ADDR=0.0.0.0 to opt into LAN exposure.
+	// Set BIND_ADDR=0.0.0.0 (or a specific interface IP, e.g. a Tailscale address) to opt into wider exposure.
 	bindAddr := os.Getenv("BIND_ADDR")
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1"
@@ -1424,12 +2509,45 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 	serverAddr := fmt.Sprintf("%s:%d", bindAddr, port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
+	// If BIND_ADDR is not loopback, an auth token is required — the /api/* routes
+	// can send messages and read message history, so anyone who can reach the port
+	// must present a bearer token. /qr and /qr.png stay open (that's the pairing flow itself).
+	authToken := os.Getenv("API_AUTH_TOKEN")
+	if bindAddr != "127.0.0.1" && bindAddr != "localhost" && authToken == "" {
+		fmt.Println("FATAL: BIND_ADDR is set to a non-loopback address but API_AUTH_TOKEN is not set. Refusing to start exposed without auth.")
+		os.Exit(1)
+	}
+
+	handler := http.DefaultServeMux
+	var finalHandler http.Handler = handler
+	if authToken != "" {
+		finalHandler = requireBearerToken(authToken, handler)
+	}
+
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.ListenAndServe(serverAddr, finalHandler); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
+}
+
+// requireBearerToken wraps a handler so every /api/* request must present
+// "Authorization: Bearer <token>". /qr and /qr.png stay open since that's
+// the initial pairing flow, not an authenticated API call.
+func requireBearerToken(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		expected := "Bearer " + token
+		if got := r.Header.Get("Authorization"); got != expected {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
@@ -2088,9 +3206,10 @@ func requestMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, mes
 // Stable log contract consumed by recover_audios.py. Every terminal outcome
 // emits exactly one of these tags so the recovery orchestrator can classify it
 // without guessing — keep these in sync with the regexes in recover_audios.py.
-//   MEDIA RETRY <id>: SUCCESS recovered <n> bytes -> <path>
-//   MEDIA RETRY <id>: NOTONPHONE <result>   (phone no longer has the file)
-//   MEDIA RETRY <id>: ERROR <reason>        (terminal local/decrypt failure)
+//
+//	MEDIA RETRY <id>: SUCCESS recovered <n> bytes -> <path>
+//	MEDIA RETRY <id>: NOTONPHONE <result>   (phone no longer has the file)
+//	MEDIA RETRY <id>: ERROR <reason>        (terminal local/decrypt failure)
 func handleMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, evt *events.MediaRetry, logger waLog.Logger) {
 	// consume() evicts the entry so a duplicate response can't re-run the
 	// download and the key material is freed on every path below.
