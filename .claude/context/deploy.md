@@ -1,19 +1,27 @@
 # Contexto: Deploy / Operação
 
-## launchd (serviço persistente — macOS)
+## Bridge remota (bridge e MCP em máquinas diferentes)
 
-- Agent: `~/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist`. **`RunAtLoad=true` + `KeepAlive=true`** (arranca no login, reinicia se cair, ThrottleInterval 10s).
-- Roda do clone real `/Users/rodrigo/git/whatsapp-mcp/whatsapp-bridge` (NÃO de `~/.whatsapp-mcp`). Executa `start-bridge.sh`.
-- **launchd NÃO herda `export` do shell** → env de transcrição vem de `transcription.env` (sourced por start-bridge.sh). Plist seta `WHATSAPP_BRIDGE_LOG` → `bridge.log`.
-- Controle:
-  - Parar: `launchctl bootout gui/$(id -u)/com.whatsapp-mcp.bridge`
-  - Iniciar: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist`
-  - Status: `launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge`
+Desde 2026-07-30 a bridge suporta rodar numa máquina diferente do MCP server (ex: bridge numa
+VPS/home server, MCP local no laptop) — o server ficou 100% stateless (ver `mcp-python.md`),
+então isso passou a ser suportado sem inventar nada além do que já existia:
 
-## start-bridge.sh
-
-- `cd` próprio dir, source `transcription.env` opcional, `WHATSAPP_BRIDGE_PORT=8081 exec ./whatsapp-bridge`.
-- `transcription.env` é **gitignored** (path pessoal + prompt).
+- **Bind**: por padrão `127.0.0.1` (só a própria máquina). Pra expor pra outra rede, `BIND_ADDR=<ip>`
+  (endereço de uma VPN/rede privada — Tailscale, WireGuard, etc — nunca `0.0.0.0` direto pra
+  internet pública).
+- **Auth obrigatória** quando não-loopback: `API_AUTH_TOKEN` — a bridge **recusa subir** se
+  `BIND_ADDR` não é loopback e o token está vazio (fail-closed). Toda `/api/*` exige
+  `Authorization: Bearer <token>`; `/qr`/`/qr.png` continuam sem auth (é o próprio fluxo de
+  pareamento). MCP server lê o token equivalente via `WHATSAPP_API_AUTH_TOKEN`.
+- **Múltiplas contas na mesma VPS**: rodar duas (ou mais) instâncias da bridge é só questão de
+  diretório + porta (`WHATSAPP_BRIDGE_PORT`) + token diferentes por instância — cada uma seu
+  próprio `store/`, sem interferência entre sessões.
+- **Rede privada é sua escolha** (Tailscale, WireGuard, SSH tunnel, VPN da nuvem que você usa) —
+  a bridge só precisa que `BIND_ADDR` aponte pra uma interface alcançável pelo MCP client.
+  Cuidado com ordem de boot: se a bridge sobe **antes** da VPN/interface estar pronta, o bind
+  falha silenciosamente (`bind: cannot assign requested address`, só logado, não fatal) e o
+  processo fica "active" no systemd/launchd **sem porta nenhuma aberta** — checar `ss -tln`
+  além do status do serviço. Se usar systemd, adicionar `After=`/`Wants=` pro serviço da sua VPN.
 
 ## Build
 
@@ -28,7 +36,8 @@
 
 ## QR / auth
 
-- `http://localhost:8081/qr` no browser. macOS salva `/tmp/whatsapp-qr.png` e abre no Preview.
+- Local (install.sh default): `http://localhost:8081/qr` no browser. macOS salva `/tmp/whatsapp-qr.png` e abre no Preview.
+- Bridge remota: `/qr`/`/qr.png` ficam **sempre sem auth** mesmo com `API_AUTH_TOKEN` setado (é o próprio fluxo de pareamento) — acessar via túnel SSH (`ssh -L 8081:<bind-addr>:8081 <host>`) ou direto pela rede privada se sua máquina já estiver nela.
 
 ## DNS GitHub (rede do Rodrigo)
 
