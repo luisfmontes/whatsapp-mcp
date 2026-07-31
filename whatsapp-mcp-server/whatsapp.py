@@ -1,3 +1,4 @@
+import logging
 import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
@@ -7,6 +8,12 @@ import os.path
 import requests
 import json
 import audio
+
+# This server runs over MCP's stdio transport, where stdout carries JSON-RPC
+# framing — a stray print() either corrupts that stream or is silently
+# discarded, so it's not a usable diagnostic channel. logging defaults to
+# stderr, which stdio-transport MCP servers can safely use for diagnostics.
+logger = logging.getLogger(__name__)
 
 WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
 WHATSAPP_API_AUTH_TOKEN = os.environ.get("WHATSAPP_API_AUTH_TOKEN", "")
@@ -31,18 +38,25 @@ def _api_post(path: str, payload: dict, timeout: int = REQUEST_TIMEOUT) -> Optio
     try:
         url = f"{WHATSAPP_API_BASE_URL}{path}"
         response = requests.post(url, json=payload, headers=_auth_headers(), timeout=timeout)
+        if response.status_code == 401:
+            logger.warning(
+                "API auth error on %s: HTTP 401 - check WHATSAPP_API_AUTH_TOKEN "
+                "matches the bridge's API_AUTH_TOKEN (%s)",
+                path, response.text,
+            )
+            return None
         if response.status_code != 200:
-            print(f"API error: HTTP {response.status_code} - {response.text}")
+            logger.warning("API error on %s: HTTP %s - %s", path, response.status_code, response.text)
             return None
         return response.json()
     except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+        logger.warning("Request error on %s: %s", path, e)
         return None
     except json.JSONDecodeError:
-        print("Error parsing response as JSON")
+        logger.warning("Error parsing response as JSON from %s", path)
         return None
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.warning("Unexpected error on %s: %s", path, e)
         return None
 
 
@@ -162,7 +176,7 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
-        print(f"Error formatting message: {e}")
+        logger.warning("Error formatting message %s: %s", message.id, e)
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
@@ -220,6 +234,7 @@ def list_messages(
 
     if include_context and messages:
         messages_with_context = []
+        context_failures = []
         for msg in messages:
             try:
                 context = get_message_context(msg.id, context_before, context_after)
@@ -228,11 +243,22 @@ def list_messages(
                 messages_with_context.extend(context.after)
             except Exception as e:
                 # A single failed context lookup shouldn't sink the whole batch -
-                # fall back to the bare message (mirrors "never propagate" contract).
-                print(f"Error fetching context for message {msg.id}: {e}")
+                # fall back to the bare message. But unlike a genuine "not found"
+                # (which get_message_context itself distinguishes), any failure here
+                # silently degrades results the caller can't otherwise detect, so
+                # surface it in the response text instead of only a stdout print
+                # (this server runs over stdio, where stdout is the JSON-RPC channel,
+                # not a readable log).
+                context_failures.append(f"{msg.id} ({e})")
                 messages_with_context.append(msg)
 
-        return format_messages_list(messages_with_context, show_chat_info=True)
+        output = format_messages_list(messages_with_context, show_chat_info=True)
+        if context_failures:
+            output += (
+                f"\n[Warning: context lookup failed for {len(context_failures)} message(s), "
+                f"showing them without surrounding context: {'; '.join(context_failures)}]"
+            )
+        return output
 
     return format_messages_list(messages, show_chat_info=True)
 
@@ -504,23 +530,29 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             result = response.json()
             if result.get("success", False):
                 path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
+                logger.info("Media downloaded successfully: %s", path)
                 return path
             else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
+                logger.warning("Download failed: %s", result.get('message', 'Unknown error'))
                 return None
+        elif response.status_code == 401:
+            logger.warning(
+                "Download auth error: HTTP 401 - check WHATSAPP_API_AUTH_TOKEN "
+                "matches the bridge's API_AUTH_TOKEN (%s)", response.text,
+            )
+            return None
         else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
+            logger.warning("Download error: HTTP %s - %s", response.status_code, response.text)
             return None
 
     except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+        logger.warning("Download request error: %s", e)
         return None
     except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
+        logger.warning("Error parsing download response: %s", response.text)
         return None
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.warning("Unexpected download error: %s", e)
         return None
 
 
