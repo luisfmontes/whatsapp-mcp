@@ -1214,12 +1214,20 @@ func normalizePhone(phone string) string {
 // (regular + LID) that could refer to this phone number. Degrades to just the
 // plain-JID guess if whatsapp.db can't be opened or queried, mirroring
 // Python's `except Exception: pass`.
+// resolvePhoneToJIDs looks up LID/PN variants for a phone number in
+// whatsapp.db. The base "@s.whatsapp.net" JID is always included even if the
+// lookup fails — a missing/locked store degrades the *quality* of the match
+// (misses LID-only contacts) but callers can still search on the base JID.
+// Failures are logged (not returned as an error) because this is best-effort
+// enrichment used inline by several read endpoints, not something that
+// should fail the whole request.
 func resolvePhoneToJIDs(phone string) []string {
 	phone = normalizePhone(phone)
 	jids := []string{phone + "@s.whatsapp.net"}
 
 	db, err := openStoreDBReadOnly()
 	if err != nil {
+		fmt.Printf("resolvePhoneToJIDs: whatsapp.db unavailable (%v), falling back to base JID only for %s\n", err, phone)
 		return jids
 	}
 	defer db.Close()
@@ -1227,10 +1235,16 @@ func resolvePhoneToJIDs(phone string) []string {
 	var lid, pn string
 	row := db.QueryRow("SELECT lid, pn FROM whatsmeow_lid_map WHERE pn = ?", phone)
 	err = row.Scan(&lid, &pn)
+	if err != nil && err != sql.ErrNoRows && len(phone) > 10 {
+		fmt.Printf("resolvePhoneToJIDs: exact lid_map lookup failed for %s: %v\n", phone, err)
+	}
 	if err != nil && len(phone) > 10 {
 		suffix := phone[len(phone)-10:]
 		row = db.QueryRow("SELECT lid, pn FROM whatsmeow_lid_map WHERE pn LIKE ?", "%"+suffix)
 		err = row.Scan(&lid, &pn)
+		if err != nil && err != sql.ErrNoRows {
+			fmt.Printf("resolvePhoneToJIDs: suffix lid_map lookup failed for %s: %v\n", phone, err)
+		}
 	}
 	if err == nil {
 		jids = append(jids, lid+"@lid")
@@ -1242,11 +1256,14 @@ func resolvePhoneToJIDs(phone string) []string {
 }
 
 // getContactNameFromStore mirrors _get_contact_name: look up a contact's
-// display name in whatsapp.db by phone number.
+// display name in whatsapp.db by phone number. Empty string means "not
+// found" (a normal, expected outcome) or "lookup failed" (logged below) —
+// callers already treat both the same way (fall back to no enrichment).
 func getContactNameFromStore(phone string) string {
 	phone = normalizePhone(phone)
 	db, err := openStoreDBReadOnly()
 	if err != nil {
+		fmt.Printf("getContactNameFromStore: whatsapp.db unavailable (%v) for %s\n", err, phone)
 		return ""
 	}
 	defer db.Close()
@@ -1257,6 +1274,9 @@ func getContactNameFromStore(phone string) string {
 		phone+"@s.whatsapp.net", phone+"%",
 	).Scan(&fullName, &pushName)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			fmt.Printf("getContactNameFromStore: query failed for %s: %v\n", phone, err)
+		}
 		return ""
 	}
 	if fullName.Valid && fullName.String != "" {
@@ -1456,9 +1476,14 @@ var isoDateLayouts = []string{
 }
 
 // parseISODate mirrors Python's datetime.fromisoformat leniency: accepts an
-// offset (kept as-is) or a naive timestamp/date (interpreted in the same
-// local timezone the bridge stores messages.timestamp in, since messages.db
-// timestamps carry a -03:00-style offset, not UTC).
+// offset (kept as-is) or a naive timestamp/date. Naive input is interpreted
+// as UTC, matching what whatsmeow actually writes to messages.timestamp
+// (msg.Info.Timestamp is a protocol-level UTC value; there's no per-deploy
+// local-time conversion anywhere in the write path). Deliberately NOT
+// time.Local: that depends on the deploying machine/container's OS timezone
+// config, which has no relationship to the timezone messages were stored in
+// and would silently shift query windows by the offset on any host not
+// configured to the same zone (e.g. any VPS left at the common UTC default).
 func parseISODate(s string) (time.Time, error) {
 	for _, layout := range isoDateLayouts {
 		if layout == time.RFC3339 {
@@ -1467,7 +1492,7 @@ func parseISODate(s string) (time.Time, error) {
 			}
 			continue
 		}
-		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
 			return t, nil
 		}
 	}
@@ -1662,57 +1687,75 @@ type ContactsSearchResponse struct {
 	Contacts []APIContact `json:"contacts"`
 }
 
-func searchContacts(messagesDB *sql.DB, query string) ContactsSearchResponse {
+// searchContactsFromStore queries whatsapp.db for real names + LID contacts.
+// A missing/unopenable store (e.g. fresh pairing, whatsmeow hasn't written it
+// yet) is expected and returns no results with no error; any failure that
+// occurs once the DB is open (query, scan, iteration) is a real error and
+// propagates so the caller doesn't silently return partial data as success.
+func searchContactsFromStore(pattern string) ([]APIContact, error) {
+	storeDB, err := openStoreDBReadOnly()
+	if err != nil {
+		return nil, nil
+	}
+	defer storeDB.Close()
+
+	rows, err := storeDB.Query(`
+		SELECT their_jid, full_name, push_name
+		FROM whatsmeow_contacts
+		WHERE (LOWER(full_name) LIKE LOWER(?)
+		       OR LOWER(push_name) LIKE LOWER(?)
+		       OR their_jid LIKE ?)
+		  AND their_jid NOT LIKE '%@g.us'
+		ORDER BY full_name, push_name
+		LIMIT 50
+	`, pattern, pattern, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []APIContact
+	for rows.Next() {
+		var jid string
+		var fullName, pushName sql.NullString
+		if err := rows.Scan(&jid, &fullName, &pushName); err != nil {
+			return nil, err
+		}
+		name := fullName.String
+		if name == "" {
+			name = pushName.String
+		}
+		raw := strings.SplitN(jid, "@", 2)[0]
+		phone := raw
+		if strings.HasSuffix(jid, "@lid") {
+			var pn string
+			if err := storeDB.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", raw).Scan(&pn); err == nil {
+				phone = pn
+			}
+		}
+		var namePtr *string
+		if name != "" {
+			namePtr = &name
+		}
+		result = append(result, APIContact{PhoneNumber: phone, Name: namePtr, JID: jid})
+	}
+	return result, rows.Err()
+}
+
+func searchContacts(messagesDB *sql.DB, query string) (ContactsSearchResponse, error) {
 	pattern := "%" + query + "%"
 	result := []APIContact{}
 	seen := map[string]bool{}
 
-	// Search whatsapp.db first (has real names + LID contacts).
-	if storeDB, err := openStoreDBReadOnly(); err == nil {
-		func() {
-			defer storeDB.Close()
-			rows, err := storeDB.Query(`
-				SELECT their_jid, full_name, push_name
-				FROM whatsmeow_contacts
-				WHERE (LOWER(full_name) LIKE LOWER(?)
-				       OR LOWER(push_name) LIKE LOWER(?)
-				       OR their_jid LIKE ?)
-				  AND their_jid NOT LIKE '%@g.us'
-				ORDER BY full_name, push_name
-				LIMIT 50
-			`, pattern, pattern, pattern)
-			if err != nil {
-				return
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var jid string
-				var fullName, pushName sql.NullString
-				if err := rows.Scan(&jid, &fullName, &pushName); err != nil {
-					continue
-				}
-				name := fullName.String
-				if name == "" {
-					name = pushName.String
-				}
-				raw := strings.SplitN(jid, "@", 2)[0]
-				phone := raw
-				if strings.HasSuffix(jid, "@lid") {
-					var pn string
-					if err := storeDB.QueryRow("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", raw).Scan(&pn); err == nil {
-						phone = pn
-					}
-				}
-				if !seen[jid] {
-					seen[jid] = true
-					var namePtr *string
-					if name != "" {
-						namePtr = &name
-					}
-					result = append(result, APIContact{PhoneNumber: phone, Name: namePtr, JID: jid})
-				}
-			}
-		}()
+	storeContacts, err := searchContactsFromStore(pattern)
+	if err != nil {
+		return ContactsSearchResponse{}, err
+	}
+	for _, c := range storeContacts {
+		if !seen[c.JID] {
+			seen[c.JID] = true
+			result = append(result, c)
+		}
 	}
 
 	// Fallback: messages.db chats (catches contacts not in whatsmeow's own store).
@@ -1722,26 +1765,27 @@ func searchContacts(messagesDB *sql.DB, query string) ContactsSearchResponse {
 		  AND jid NOT LIKE '%@g.us'
 		ORDER BY name, jid LIMIT 50
 	`, pattern, pattern)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var jid string
-			var name sql.NullString
-			if err := rows.Scan(&jid, &name); err != nil {
-				continue
-			}
-			if !seen[jid] {
-				seen[jid] = true
-				result = append(result, APIContact{
-					PhoneNumber: strings.SplitN(jid, "@", 2)[0],
-					Name:        nullStringToPtr(name),
-					JID:         jid,
-				})
-			}
+	if err != nil {
+		return ContactsSearchResponse{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jid string
+		var name sql.NullString
+		if err := rows.Scan(&jid, &name); err != nil {
+			return ContactsSearchResponse{}, err
+		}
+		if !seen[jid] {
+			seen[jid] = true
+			result = append(result, APIContact{
+				PhoneNumber: strings.SplitN(jid, "@", 2)[0],
+				Name:        nullStringToPtr(name),
+				JID:         jid,
+			})
 		}
 	}
 
-	return ContactsSearchResponse{Contacts: result}
+	return ContactsSearchResponse{Contacts: result}, rows.Err()
 }
 
 // ---- /api/contacts/chats ----
@@ -2386,7 +2430,12 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 				writeJSONError(w, http.StatusBadRequest, "query is required")
 				return
 			}
-			writeJSON(w, searchContacts(readDB, req.Query))
+			resp, err := searchContacts(readDB, req.Query)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, resp)
 		})
 
 		http.HandleFunc("/api/contacts/chats", func(w http.ResponseWriter, r *http.Request) {
