@@ -31,6 +31,20 @@ def _auth_headers() -> Dict[str, str]:
     return {}
 
 
+def _api_request(method: str, path: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
+    """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
+    on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
+    functions below, which need the raw Response (they parse .json() and build their own
+    return tuple) rather than _api_post's Optional[dict] shape."""
+    url = f"{WHATSAPP_API_BASE_URL}{path}"
+    response = requests.request(method, url, headers=_auth_headers(), timeout=timeout, **kwargs)
+    if response.status_code == 401:
+        raise requests.RequestException(
+            f"HTTP 401 - check WHATSAPP_API_AUTH_TOKEN matches the bridge's API_AUTH_TOKEN ({response.text})"
+        )
+    return response
+
+
 def _api_post(path: str, payload: dict, timeout: int = REQUEST_TIMEOUT) -> Optional[dict]:
     """POST to the bridge REST API. Returns the parsed JSON dict on HTTP 200,
     or None on any failure (non-200 status, timeout, connection error, bad JSON).
@@ -597,8 +611,7 @@ def leave_group(jid: str) -> Tuple[bool, str]:
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required"
-        url = f"{WHATSAPP_API_BASE_URL}/leave_group"
-        response = requests.post(url, json={"jid": jid}, headers=_auth_headers())
+        response = _api_request("POST", "/leave_group", json={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -614,13 +627,12 @@ def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", 
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/mark_chat_read"
         payload: Dict[str, Any] = {"chat_jid": chat_jid, "message_ids": message_ids}
         if sender_jid:
             payload["sender_jid"] = sender_jid
         if timestamp:
             payload["timestamp"] = timestamp
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/mark_chat_read", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -636,8 +648,7 @@ def mark_chat_unread(chat_jid: str) -> Tuple[bool, str]:
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/mark_chat_unread"
-        response = requests.post(url, json={"chat_jid": chat_jid}, headers=_auth_headers())
+        response = _api_request("POST", "/mark_chat_unread", json={"chat_jid": chat_jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -653,8 +664,7 @@ def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required", None
-        url = f"{WHATSAPP_API_BASE_URL}/group_info"
-        response = requests.get(url, params={"jid": jid}, headers=_auth_headers())
+        response = _api_request("GET", "/group_info", params={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -677,8 +687,7 @@ def archive_chat(chat_jid: str, archive: bool) -> Tuple[bool, str]:
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/archive_chat"
-        response = requests.post(url, json={"chat_jid": chat_jid, "archive": archive}, headers=_auth_headers())
+        response = _api_request("POST", "/archive_chat", json={"chat_jid": chat_jid, "archive": archive})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -694,8 +703,7 @@ def resolve_contact(phone: str) -> Tuple[bool, str, List[str]]:
     try:
         if not phone or not phone.strip():
             return False, "phone is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/resolve_contact"
-        response = requests.get(url, params={"phone": phone}, headers=_auth_headers())
+        response = _api_request("GET", "/resolve_contact", params={"phone": phone})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -721,14 +729,13 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/react"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "emoji": emoji,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/react", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -751,14 +758,13 @@ def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = 
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/edit"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "new_text": new_text,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/edit", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -782,13 +788,12 @@ def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tupl
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/revoke"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/revoke", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -812,13 +817,12 @@ def update_group_participants(group_jid: str, participants: List[str], action: s
             return False, "group_jid is required", []
         if not participants:
             return False, "participants list is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/group_participants"
         payload = {
             "group_jid": group_jid,
             "participants": participants,
             "action": action,
         }
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/group_participants", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -843,13 +847,12 @@ def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/chat_presence"
         payload = {
             "chat_jid": chat_jid,
             "state": state,
             "media": media,
         }
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/chat_presence", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -870,9 +873,8 @@ def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
     try:
         if not phones:
             return False, "phones list is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/is_on_whatsapp"
         payload = {"phones": phones}
-        response = requests.post(url, json=payload, headers=_auth_headers())
+        response = _api_request("POST", "/is_on_whatsapp", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
