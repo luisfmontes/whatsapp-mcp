@@ -16,7 +16,16 @@ from whatsapp import (
     create_group as whatsapp_create_group,
     leave_group as whatsapp_leave_group,
     mark_chat_read as whatsapp_mark_chat_read,
-    mark_chat_unread as whatsapp_mark_chat_unread
+    mark_chat_unread as whatsapp_mark_chat_unread,
+    get_group_info as whatsapp_get_group_info,
+    archive_chat as whatsapp_archive_chat,
+    resolve_contact as whatsapp_resolve_contact,
+    react_to_message as whatsapp_react_to_message,
+    edit_message as whatsapp_edit_message,
+    delete_message as whatsapp_delete_message,
+    update_group_participants as whatsapp_update_group_participants,
+    send_chat_presence as whatsapp_send_chat_presence,
+    check_whatsapp as whatsapp_check_whatsapp
 )
 
 # Initialize FastMCP server
@@ -329,6 +338,204 @@ def mark_chat_as_unread(chat_jid: str) -> Dict[str, Any]:
     """
     success, message = whatsapp_mark_chat_unread(chat_jid)
     return {"success": success, "message": message}
+
+
+@mcp.tool()
+def get_group_info(jid: str) -> Dict[str, Any]:
+    """Get a WhatsApp group's name and participant list.
+
+    Args:
+        jid: The group JID (e.g. 120363012345678901@g.us)
+    """
+    success, message, info = whatsapp_get_group_info(jid)
+    result: Dict[str, Any] = {"success": success, "message": message}
+    if info:
+        result.update(info)
+    return result
+
+
+@mcp.tool()
+def archive_chat(chat_jid: str, archive: bool = True) -> Dict[str, Any]:
+    """Archive or unarchive a WhatsApp chat (app-state sync — affects WhatsApp app).
+
+    Args:
+        chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
+        archive: True to archive, False to unarchive
+    """
+    success, message = whatsapp_archive_chat(chat_jid, archive)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def resolve_contact(phone: str) -> Dict[str, Any]:
+    """Resolve a phone number to its WhatsApp JIDs (regular + LID, if any).
+
+    Args:
+        phone: Phone number to resolve (e.g. 5511999999999)
+    """
+    success, message, jids = whatsapp_resolve_contact(phone)
+    return {"success": success, "message": message, "jids": jids}
+
+
+@mcp.tool()
+def react_to_message(
+    chat_jid: str,
+    message_id: str,
+    emoji: str,
+    from_me: bool = True
+) -> Dict[str, Any]:
+    """React to a WhatsApp message with an emoji.
+
+    Passing an empty emoji string removes the existing reaction.
+
+    Args:
+        chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
+        message_id: The ID of the message to react to
+        emoji: The emoji to react with, or "" to remove the reaction
+        from_me: Whether the target message was sent by you (defaults True, your own
+            message). Setting from_me=False works only in direct chats; in group
+            chats it returns an error because the original sender's JID isn't available.
+    """
+    success, message = whatsapp_react_to_message(chat_jid, message_id, emoji, from_me=from_me)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def edit_message(
+    chat_jid: str,
+    message_id: str,
+    new_text: str,
+    from_me: bool = True
+) -> Dict[str, Any]:
+    """Edit the text of a previously sent WhatsApp message.
+
+    Args:
+        chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
+        message_id: The ID of the message to edit
+        new_text: The new message text
+        from_me: Accepted for API symmetry with react_to_message/delete_message but
+            ignored — WhatsApp only allows editing your own messages, and the bridge
+            never reads this param for /api/edit.
+    """
+    success, message = whatsapp_edit_message(chat_jid, message_id, new_text, from_me=from_me)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def delete_message(
+    chat_jid: str,
+    message_id: str,
+    from_me: bool = True
+) -> Dict[str, Any]:
+    """Delete a WhatsApp message for everyone (revoke).
+
+    Args:
+        chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
+        message_id: The ID of the message to delete
+        from_me: Whether the target message was sent by you (defaults True, your own
+            message). Setting from_me=False works only in direct chats; in group
+            chats it returns an error because the original sender's JID isn't available.
+    """
+    success, message = whatsapp_delete_message(chat_jid, message_id, from_me=from_me)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def update_group_participants(
+    group_jid: str,
+    participants: List[str],
+    action: str
+) -> Dict[str, Any]:
+    """Update WhatsApp group participants (add/remove/promote/demote).
+
+    Args:
+        group_jid: The JID of the group (must end with @g.us)
+        participants: List of phone numbers or JIDs to modify. International format recommended
+            (e.g., 5562123456789 or 5562123456789@s.whatsapp.net)
+        action: The action to perform: "add" (invite), "remove" (remove from group),
+            "promote" (make admin), or "demote" (remove admin). Requires you to be a
+            group admin for most actions.
+
+    Returns:
+        {
+            "success": bool (call accepted by WhatsApp, not all participants applied),
+            "message": str (summary),
+            "participants": [ {"jid": str, "is_admin": bool, "error": int, "add_request"?: bool}, ... ]
+        }
+
+    Note: Each participant in the response has error code 0 if applied, non-0 if rejected
+    (e.g. 403 privacy, 409 already member). add_request field is present when action="add"
+    and the target has privacy settings blocking group invites — the invitation becomes pending.
+    """
+    success, message, participants = whatsapp_update_group_participants(
+        group_jid, participants, action
+    )
+    return {
+        "success": success,
+        "message": message,
+        "participants": participants
+    }
+
+
+@mcp.tool()
+def send_chat_presence(
+    chat_jid: str,
+    state: str,
+    media: str = ""
+) -> Dict[str, Any]:
+    """Send typing or recording indicator in a WhatsApp chat (ephemeral, no persistence).
+
+    Args:
+        chat_jid: The JID of the chat (direct or group)
+        state: "composing" (typing indicator) or "paused" (stopped typing)
+        media: "" (text, default) or "audio" (recording indicator)
+
+    Guidance:
+        - Send "composing" before replying to show the recipient you're typing.
+        - Always send "paused" after you stop (or wait ~10 seconds for WhatsApp to auto-expire).
+        - If you send "composing" for "audio", the recipient sees a recording indicator.
+        - The indicator is ephemeral and not stored in the chat history.
+    """
+    success, message = whatsapp_send_chat_presence(chat_jid, state, media)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def check_whatsapp(phones: List[str]) -> Dict[str, Any]:
+    """Check if phone numbers are registered on WhatsApp.
+
+    Args:
+        phones: List of phone numbers to check (international format, with or without +).
+            Digits only after normalization (8-15 digits); max 50 numbers per call.
+            Small batches recommended to avoid rate-limiting.
+
+    Returns:
+        {
+            "success": bool,
+            "message": str (summary),
+            "results": [
+                {
+                    "query": str (normalized input),
+                    "jid": str (WhatsApp JID if found, empty otherwise),
+                    "is_in": bool (true if registered on WhatsApp),
+                    "verified_name"?: str (business name if business account)
+                },
+                ...
+            ]
+        }
+
+    Guidance:
+        - Always validate new recipient numbers before calling send_message.
+        - Numbers not on WhatsApp return is_in=false (no error).
+        - Business accounts include a verified_name field (company or brand name).
+        - Use small batches and avoid mass scanning to prevent rate-limiting or account restrictions.
+    """
+    success, message, results = whatsapp_check_whatsapp(phones)
+    return {
+        "success": success,
+        "message": message,
+        "results": results
+    }
 
 
 if __name__ == "__main__":
