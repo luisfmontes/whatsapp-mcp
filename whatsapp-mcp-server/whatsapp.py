@@ -647,3 +647,242 @@ def mark_chat_unread(chat_jid: str) -> Tuple[bool, str]:
         return False, f"Request error: {str(e)}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+
+def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
+    try:
+        if not jid or not jid.strip():
+            return False, "Group JID is required", None
+        url = f"{WHATSAPP_API_BASE_URL}/group_info"
+        response = requests.get(url, params={"jid": jid}, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", None
+        success = bool(result.get("success", False))
+        if not success:
+            return False, result.get("message", "Unknown response"), None
+        info = {
+            "name": result.get("name", ""),
+            "participants": result.get("participants", []),
+        }
+        return True, "Group info retrieved", info
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
+
+
+def archive_chat(chat_jid: str, archive: bool) -> Tuple[bool, str]:
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        url = f"{WHATSAPP_API_BASE_URL}/archive_chat"
+        response = requests.post(url, json={"chat_jid": chat_jid, "archive": archive}, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def resolve_contact(phone: str) -> Tuple[bool, str, List[str]]:
+    try:
+        if not phone or not phone.strip():
+            return False, "phone is required", []
+        url = f"{WHATSAPP_API_BASE_URL}/resolve_contact"
+        response = requests.get(url, params={"phone": phone}, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", []
+        success = bool(result.get("success", False))
+        jids = result.get("jids", []) or []
+        return success, result.get("message", "Contact resolved" if success else "Unknown response"), jids
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", []
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", []
+
+
+def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool = True) -> Tuple[bool, str]:
+    """React to a message with an emoji ("" removes the reaction).
+
+    from_me defaults True (your own message). from_me=False works only in direct
+    chats; in group chats the bridge returns an error because the original
+    sender's JID isn't available.
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        if not message_id or not message_id.strip():
+            return False, "message_id is required"
+        url = f"{WHATSAPP_API_BASE_URL}/react"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "emoji": emoji,
+            "from_me": from_me,
+        }
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = True) -> Tuple[bool, str]:
+    """Edit the text of a previously sent message.
+
+    from_me is accepted for API symmetry but ignored — WhatsApp (whatsmeow's
+    BuildEdit) only allows editing your own messages; the bridge never reads it.
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        if not message_id or not message_id.strip():
+            return False, "message_id is required"
+        url = f"{WHATSAPP_API_BASE_URL}/edit"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "new_text": new_text,
+            "from_me": from_me,
+        }
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tuple[bool, str]:
+    """Delete a message for everyone (revoke).
+
+    from_me defaults True (your own message). from_me=False works only in direct
+    chats; in group chats the bridge returns an error because the original
+    sender's JID isn't available.
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        if not message_id or not message_id.strip():
+            return False, "message_id is required"
+        url = f"{WHATSAPP_API_BASE_URL}/revoke"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "from_me": from_me,
+        }
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def update_group_participants(group_jid: str, participants: List[str], action: str) -> Tuple[bool, str, List[dict]]:
+    """Update group participants (add/remove/promote/demote).
+
+    Returns (success, message, participants_list). Each participant in the list
+    has jid, is_admin, error (0 = applied, non-0 = WhatsApp error code),
+    and optionally add_request (true if invitation pending).
+    """
+    try:
+        if not group_jid or not group_jid.strip():
+            return False, "group_jid is required", []
+        if not participants:
+            return False, "participants list is required", []
+        url = f"{WHATSAPP_API_BASE_URL}/group_participants"
+        payload = {
+            "group_jid": group_jid,
+            "participants": participants,
+            "action": action,
+        }
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", []
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("participants", []),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", []
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", []
+
+
+def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool, str]:
+    """Send chat presence (typing/paused).
+
+    state: 'composing' (typing) or 'paused' (stopped).
+    media: '' (text, default) or 'audio' (recording).
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        url = f"{WHATSAPP_API_BASE_URL}/chat_presence"
+        payload = {
+            "chat_jid": chat_jid,
+            "state": state,
+            "media": media,
+        }
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
+    """Check if phone numbers are on WhatsApp.
+
+    phones: list of phone numbers (with or without +). Each number is checked
+    and result includes query (normalized), jid, is_in, and optionally verified_name.
+    """
+    try:
+        if not phones:
+            return False, "phones list is required", []
+        url = f"{WHATSAPP_API_BASE_URL}/is_on_whatsapp"
+        payload = {"phones": phones}
+        response = requests.post(url, json=payload, headers=_auth_headers())
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", []
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("results", []),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", []
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", []
