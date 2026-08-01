@@ -1,19 +1,77 @@
-import sqlite3
+import logging
 import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import os
 import os.path
 import requests
 import json
 import audio
-from db_path import resolve_messages_db
 
-# whatsapp.db (whatsmeow session/lid_map/contacts) is no longer read from Python.
-# Contact/LID resolution goes through the bridge REST API (see _resolve_phone_to_jids,
-# search_contacts). This decouples the MCP server from the whatsmeow internal schema.
-WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", f"http://localhost:{os.environ.get('WHATSAPP_BRIDGE_PORT', '8080')}/api")
+# This server runs over MCP's stdio transport, where stdout carries JSON-RPC
+# framing — a stray print() either corrupts that stream or is silently
+# discarded, so it's not a usable diagnostic channel. logging defaults to
+# stderr, which stdio-transport MCP servers can safely use for diagnostics.
+logger = logging.getLogger(__name__)
+
+WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
+WHATSAPP_API_AUTH_TOKEN = os.environ.get("WHATSAPP_API_AUTH_TOKEN", "")
+
+REQUEST_TIMEOUT = 30
+
+# Cache of sender_jid -> resolved name, avoids one HTTP round trip per message
+# when formatting a batch of messages (format_message is called per-message).
+_sender_name_cache: Dict[str, str] = {}
+
+
+def _auth_headers() -> Dict[str, str]:
+    if WHATSAPP_API_AUTH_TOKEN:
+        return {"Authorization": f"Bearer {WHATSAPP_API_AUTH_TOKEN}"}
+    return {}
+
+
+def _api_request(method: str, path: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
+    """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
+    on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
+    functions below, which need the raw Response (they parse .json() and build their own
+    return tuple) rather than _api_post's Optional[dict] shape."""
+    url = f"{WHATSAPP_API_BASE_URL}{path}"
+    response = requests.request(method, url, headers=_auth_headers(), timeout=timeout, **kwargs)
+    if response.status_code == 401:
+        raise requests.RequestException(
+            f"HTTP 401 - check WHATSAPP_API_AUTH_TOKEN matches the bridge's API_AUTH_TOKEN ({response.text})"
+        )
+    return response
+
+
+def _api_post(path: str, payload: dict, timeout: int = REQUEST_TIMEOUT) -> Optional[dict]:
+    """POST to the bridge REST API. Returns the parsed JSON dict on HTTP 200,
+    or None on any failure (non-200 status, timeout, connection error, bad JSON).
+    Never raises — mirrors the old `except sqlite3.Error` behavior."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}{path}"
+        response = requests.post(url, json=payload, headers=_auth_headers(), timeout=timeout)
+        if response.status_code == 401:
+            logger.warning(
+                "API auth error on %s: HTTP 401 - check WHATSAPP_API_AUTH_TOKEN "
+                "matches the bridge's API_AUTH_TOKEN (%s)",
+                path, response.text,
+            )
+            return None
+        if response.status_code != 200:
+            logger.warning("API error on %s: HTTP %s - %s", path, response.status_code, response.text)
+            return None
+        return response.json()
+    except requests.RequestException as e:
+        logger.warning("Request error on %s: %s", path, e)
+        return None
+    except json.JSONDecodeError:
+        logger.warning("Error parsing response as JSON from %s", path)
+        return None
+    except Exception as e:
+        logger.warning("Unexpected error on %s: %s", path, e)
+        return None
 
 
 def _strip_accents(text: Optional[str]) -> Optional[str]:
@@ -24,59 +82,20 @@ def _strip_accents(text: Optional[str]) -> Optional[str]:
     return ''.join(c for c in decomposed if unicodedata.category(c) != 'Mn').lower()
 
 
-def _connect_messages_db() -> sqlite3.Connection:
-    """Open the messages DB with an `unaccent` SQL function registered.
-
-    Resolves DB path lazily at connection time, not module import.
-    """
-    conn = sqlite3.connect(resolve_messages_db())
-    conn.create_function("unaccent", 1, _strip_accents, deterministic=True)
-    return conn
-
 def _normalize_phone(phone: str) -> str:
     return phone.replace('+', '').replace(' ', '').replace('-', '')
 
-def _resolve_phone_to_jids(phone: str) -> List[str]:
-    """Return all JIDs (regular + LID) that match a phone number.
 
-    Delegates to the bridge (GET /api/resolve_contact), which owns whatsmeow and
-    resolves LID via the library API. No longer reads the internal whatsmeow_lid_map
-    table directly, so a whatsmeow schema change can't break resolution silently.
-
-    Behavior deltas vs the old direct-DB read: (a) resolution is exact-match only
-    (the old fuzzy suffix fallback is gone); (b) requires the bridge to be running —
-    if it's down, falls back to PN-only (no LID).
-    """
-    phone = _normalize_phone(phone)
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    """Parse an RFC3339/ISO-8601 timestamp coming from the bridge JSON.
+    Returns None for falsy input or unparseable strings (never raises)."""
+    if not value:
+        return None
     try:
-        r = requests.get(f"{WHATSAPP_API_BASE_URL}/resolve_contact",
-                         params={"phone": phone}, timeout=10)
-        if r.status_code == 200:
-            body = r.json()
-            if body.get("success") and body.get("jids"):
-                return body["jids"]
-    except (requests.RequestException, json.JSONDecodeError):
-        pass
-    # Fallback: bridge unreachable — return at least the PN JID so callers still work.
-    return [f"{phone}@s.whatsapp.net"]
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
 
-def _get_contact_name(phone: str) -> Optional[str]:
-    """Look up a contact name via the bridge search endpoint (by phone number).
-
-    Requires the bridge to be running; returns None if it's down (no local DB fallback).
-    """
-    phone = _normalize_phone(phone)
-    try:
-        r = requests.get(f"{WHATSAPP_API_BASE_URL}/search_contacts",
-                         params={"query": phone}, timeout=10)
-        if r.status_code == 200:
-            body = r.json()
-            for c in body.get("contacts", []):
-                if _normalize_phone(c.get("phone_number", "")) == phone and c.get("name"):
-                    return c["name"]
-    except (requests.RequestException, json.JSONDecodeError):
-        pass
-    return None
 
 @dataclass
 class Message:
@@ -115,68 +134,63 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+
+def _message_from_dict(d: dict) -> Message:
+    return Message(
+        timestamp=_parse_ts(d.get("timestamp")),
+        sender=d.get("sender"),
+        chat_name=d.get("chat_name"),
+        content=d.get("content"),
+        is_from_me=d.get("is_from_me", False),
+        chat_jid=d.get("chat_jid"),
+        id=d.get("id"),
+        media_type=d.get("media_type"),
+    )
+
+
+def _chat_from_dict(d: dict) -> Chat:
+    return Chat(
+        jid=d.get("jid"),
+        name=d.get("name"),
+        last_message_time=_parse_ts(d.get("last_message_time")),
+        last_message=d.get("last_message"),
+        last_sender=d.get("last_sender"),
+        last_is_from_me=d.get("last_is_from_me"),
+    )
+
+
 def get_sender_name(sender_jid: str) -> str:
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        # First try matching by exact JID
-        cursor.execute("""
-            SELECT name
-            FROM chats
-            WHERE jid = ?
-            LIMIT 1
-        """, (sender_jid,))
-        
-        result = cursor.fetchone()
-        
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if '@' in sender_jid:
-                phone_part = sender_jid.split('@')[0]
-            else:
-                phone_part = sender_jid
-                
-            cursor.execute("""
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """, (f"%{phone_part}%",))
-            
-            result = cursor.fetchone()
-        
-        if result and result[0]:
-            return result[0]
-        else:
-            return sender_jid
-        
-    except sqlite3.Error as e:
-        print(f"Database error while getting sender name: {e}")
+    if sender_jid in _sender_name_cache:
+        return _sender_name_cache[sender_jid]
+
+    result = _api_post("/sender_name", {"sender_jid": sender_jid})
+    if result is None:
+        # Transport failure: don't cache, so a later retry can still succeed.
         return sender_jid
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    name = result.get("name", sender_jid)
+    _sender_name_cache[sender_jid] = name
+    return name
 
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
-    
+    ts_str = f"{message.timestamp:%Y-%m-%d %H:%M:%S}" if message.timestamp else "unknown time"
+
     if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
+        output += f"[{ts_str}] Chat: {message.chat_name} "
     else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
+        output += f"[{ts_str}] "
+
     content_prefix = ""
     if hasattr(message, 'media_type') and message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
+
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
-        print(f"Error formatting message: {e}")
+        logger.warning("Error formatting message %s: %s", message.id, e)
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
@@ -184,7 +198,7 @@ def format_messages_list(messages: List[Message], show_chat_info: bool = True) -
     if not messages:
         output += "No messages to display."
         return output
-    
+
     for message in messages:
         output += format_message(message, show_chat_info)
     return output
@@ -202,97 +216,65 @@ def list_messages(
     context_after: int = 1
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        # Build base query
-        query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
-        query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        where_clauses = []
-        params = []
-        
-        # Add filters
-        if after:
-            try:
-                after = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-            
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+    # Validate date filters up front (same contract as before: invalid dates raise
+    # a ValueError that propagates to the caller, it is NOT swallowed like transport errors).
+    if after:
+        try:
+            datetime.fromisoformat(after)
+        except ValueError:
+            raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
 
-        if before:
-            try:
-                before = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-            
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+    if before:
+        try:
+            datetime.fromisoformat(before)
+        except ValueError:
+            raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
 
-        if sender_phone_number:
-            jids = _resolve_phone_to_jids(sender_phone_number)
-            jid_placeholders = ','.join('?' * len(jids))
-            where_clauses.append(
-                f"(messages.chat_jid IN ({jid_placeholders}) AND messages.chat_jid NOT LIKE '%@g.us')"
-            )
-            params.extend(jids)
-            
-        if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
-            params.append(chat_jid)
-            
-        if query:
-            where_clauses.append("unaccent(messages.content) LIKE unaccent(?)")
-            params.append(f"%{query}%")
-            
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add pagination
-        offset = page * limit
-        query_parts.append("ORDER BY messages.timestamp DESC")
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
-        
-        result = []
+    payload = {
+        "after": after,
+        "before": before,
+        "sender_phone_number": _normalize_phone(sender_phone_number) if sender_phone_number else None,
+        "chat_jid": chat_jid,
+        "query": query,
+        "limit": limit,
+        "page": page,
+    }
+
+    result = _api_post("/messages", payload)
+    if result is None:
+        return []
+
+    messages = [_message_from_dict(m) for m in result.get("messages", [])]
+
+    if include_context and messages:
+        messages_with_context = []
+        context_failures = []
         for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            )
-            result.append(message)
-            
-        if include_context and result:
-            # Add context for each message
-            messages_with_context = []
-            for msg in result:
+            try:
                 context = get_message_context(msg.id, context_before, context_after)
                 messages_with_context.extend(context.before)
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
-            
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+            except Exception as e:
+                # A single failed context lookup shouldn't sink the whole batch -
+                # fall back to the bare message. But unlike a genuine "not found"
+                # (which get_message_context itself distinguishes), any failure here
+                # silently degrades results the caller can't otherwise detect, so
+                # surface it in the response text instead of only a stdout print
+                # (this server runs over stdio, where stdout is the JSON-RPC channel,
+                # not a readable log).
+                context_failures.append(f"{msg.id} ({e})")
+                messages_with_context.append(msg)
+
+        output = format_messages_list(messages_with_context, show_chat_info=True)
+        if context_failures:
+            output += (
+                f"\n[Warning: context lookup failed for {len(context_failures)} message(s), "
+                f"showing them without surrounding context: {'; '.join(context_failures)}]"
+            )
+        return output
+
+    return format_messages_list(messages, show_chat_info=True)
 
 
 def get_message_context(
@@ -301,91 +283,30 @@ def get_message_context(
     after: int = 5
 ) -> MessageContext:
     """Get context around a specific message."""
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        # Get the target message first
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """, (message_id,))
-        msg_data = cursor.fetchone()
-        
-        if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
-            
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8]
-        )
-        
-        # Get messages before
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], before))
-        
-        before_messages = []
-        for msg in cursor.fetchall():
-            before_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
-        
-        # Get messages after
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], after))
-        
-        after_messages = []
-        for msg in cursor.fetchall():
-            after_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
-        
-        return MessageContext(
-            message=target_message,
-            before=before_messages,
-            after=after_messages
-        )
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        raise
-    finally:
-        if 'conn' in locals():
-            conn.close()
+    result = _api_post("/message_context", {
+        "message_id": message_id,
+        "before": before,
+        "after": after,
+    })
+
+    if result is None:
+        # Transport/server failure - mirror old `except ... raise` behavior for
+        # the DB-error path by not silently fabricating a context.
+        raise ValueError(f"Could not fetch context for message ID {message_id}")
+
+    msg_data = result.get("message")
+    if not msg_data:
+        raise ValueError(f"Message with ID {message_id} not found")
+
+    target_message = _message_from_dict(msg_data)
+    before_messages = [_message_from_dict(m) for m in result.get("before", [])]
+    after_messages = [_message_from_dict(m) for m in result.get("after", [])]
+
+    return MessageContext(
+        message=target_message,
+        before=before_messages,
+        after=after_messages
+    )
 
 
 def list_chats(
@@ -396,308 +317,129 @@ def list_chats(
     sort_by: str = "last_active"
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        # Build base query
-        query_parts = ["""
-            SELECT 
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
-            FROM chats
-        """]
-        
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid 
-                AND chats.last_message_time = messages.timestamp
-            """)
-            
-        where_clauses = []
-        params = []
-        
-        if query:
-            where_clauses.append("(unaccent(chats.name) LIKE unaccent(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
-            
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
-        query_parts.append(f"ORDER BY {order_by}")
-        
-        # Add pagination
-        offset = (page ) * limit
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    result = _api_post("/chats", {
+        "query": query,
+        "limit": limit,
+        "page": page,
+        "include_last_message": include_last_message,
+        "sort_by": sort_by,
+    })
+
+    if result is None:
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    return [_chat_from_dict(c) for c in result.get("chats", [])]
 
 
 def search_contacts(query: str) -> List[Contact]:
-    """Search contacts by name or phone number.
+    """Search contacts by name or phone number."""
+    result = _api_post("/contacts/search", {"query": query})
 
-    Delegates to the bridge (GET /api/search_contacts), which queries the three
-    sources it owns (whatsmeow contact store + senders + chats). No longer reads
-    whatsmeow_contacts/whatsmeow_lid_map directly, decoupling from the lib schema.
+    if result is None:
+        return []
 
-    Behavior deltas vs the old direct-DB read: (a) matching is exact-match via the
-    bridge (no fuzzy suffix fallback); (b) requires the bridge to be running —
-    returns an empty list if it's down.
-    """
-    try:
-        r = requests.get(f"{WHATSAPP_API_BASE_URL}/search_contacts",
-                         params={"query": query}, timeout=10)
-        if r.status_code == 200:
-            body = r.json()
-            if body.get("success"):
-                return [
-                    Contact(
-                        phone_number=c.get("phone_number", ""),
-                        name=c.get("name"),
-                        jid=c.get("jid", ""),
-                    )
-                    for c in body.get("contacts", [])
-                ]
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        print(f"search_contacts: bridge error: {e}")
-    return []
+    return [
+        Contact(
+            phone_number=c.get("phone_number"),
+            name=c.get("name"),
+            jid=c.get("jid"),
+        )
+        for c in result.get("contacts", [])
+    ]
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
     """Get all chats involving the contact.
-    
+
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY c.last_message_time DESC
-            LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
-        
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    result = _api_post("/contacts/chats", {
+        "jid": jid,
+        "limit": limit,
+        "page": page,
+    })
+
+    if result is None:
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    return [_chat_from_dict(c) for c in result.get("chats", [])]
 
 
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT 
-                m.timestamp,
-                m.sender,
-                c.name,
-                m.content,
-                m.is_from_me,
-                c.jid,
-                m.id,
-                m.media_type
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY m.timestamp DESC
-            LIMIT 1
-        """, (jid, jid))
-        
-        msg_data = cursor.fetchone()
-        
-        if not msg_data:
-            return None
-            
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7]
-        )
-        
-        return format_message(message)
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    result = _api_post("/contacts/last_interaction", {"jid": jid})
+
+    if result is None:
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    # interfaces.md documents this endpoint two ways (`formatted` string vs raw
+    # `message` object); accept either so a mismatch with the bridge implementation
+    # doesn't silently break this call.
+    if "formatted" in result and result.get("formatted") is not None:
+        return result["formatted"]
+
+    msg_data = result.get("message")
+    if not msg_data:
+        return None
+
+    message = _message_from_dict(msg_data)
+    return format_message(message)
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        
-        query = """
-            SELECT 
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-        """
-        
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
-            """
-            
-        query += " WHERE c.jid = ?"
-        
-        cursor.execute(query, (chat_jid,))
-        chat_data = cursor.fetchone()
-        
-        if not chat_data:
-            return None
-            
-        return Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5]
-        )
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    result = _api_post("/chat", {
+        "chat_jid": chat_jid,
+        "include_last_message": include_last_message,
+    })
+
+    if result is None:
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    chat_data = result.get("chat")
+    if not chat_data:
+        return None
+
+    return _chat_from_dict(chat_data)
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number (handles LID contacts)."""
-    jids = _resolve_phone_to_jids(sender_phone_number)
-    try:
-        conn = _connect_messages_db()
-        cursor = conn.cursor()
-        placeholders = ','.join('?' * len(jids))
-        cursor.execute(f"""
-            SELECT c.jid, c.name, c.last_message_time,
-                   m.content, m.sender, m.is_from_me
-            FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
-            WHERE c.jid IN ({placeholders}) AND c.jid NOT LIKE '%@g.us'
-            LIMIT 1
-        """, jids)
-        chat_data = cursor.fetchone()
-        if not chat_data:
-            return None
-        name = chat_data[1]
-        if not name or name.replace('@lid', '').isdigit():
-            name = _get_contact_name(sender_phone_number) or name
-        return Chat(
-            jid=chat_data[0],
-            name=name,
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5]
-        )
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    result = _api_post("/chat/by_contact", {"sender_phone_number": _normalize_phone(sender_phone_number)})
+
+    if result is None:
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+    chat_data = result.get("chat")
+    if not chat_data:
+        return None
+
+    return _chat_from_dict(chat_data)
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
-        
+
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "message": message,
         }
-        
-        response = requests.post(url, json=payload)
-        
+
+        response = requests.post(url, json=payload, headers=_auth_headers())
+
         # Check if the request was successful
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -710,28 +452,28 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
-        
+
         if not media_path:
             return False, "Media path must be provided"
-        
+
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
-        
+
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
         }
-        
-        response = requests.post(url, json=payload)
-        
+
+        response = requests.post(url, json=payload, headers=_auth_headers())
+
         # Check if the request was successful
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -744,10 +486,10 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
-        
+
         if not media_path:
             return False, "Media path must be provided"
-        
+
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
 
@@ -756,22 +498,22 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
                 media_path = audio.convert_to_opus_ogg_temp(media_path)
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-        
+
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
         }
-        
-        response = requests.post(url, json=payload)
-        
+
+        response = requests.post(url, json=payload, headers=_auth_headers())
+
         # Check if the request was successful
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -781,11 +523,11 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
-    
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
-    
+
     Returns:
         The local file path if download was successful, None otherwise
     """
@@ -795,30 +537,36 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "message_id": message_id,
             "chat_jid": chat_jid
         }
-        
-        response = requests.post(url, json=payload)
-        
+
+        response = requests.post(url, json=payload, headers=_auth_headers())
+
         if response.status_code == 200:
             result = response.json()
             if result.get("success", False):
                 path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
+                logger.info("Media downloaded successfully: %s", path)
                 return path
             else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
+                logger.warning("Download failed: %s", result.get('message', 'Unknown error'))
                 return None
-        else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
+        elif response.status_code == 401:
+            logger.warning(
+                "Download auth error: HTTP 401 - check WHATSAPP_API_AUTH_TOKEN "
+                "matches the bridge's API_AUTH_TOKEN (%s)", response.text,
+            )
             return None
-            
+        else:
+            logger.warning("Download error: HTTP %s - %s", response.status_code, response.text)
+            return None
+
     except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+        logger.warning("Download request error: %s", e)
         return None
     except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
+        logger.warning("Error parsing download response: %s", response.text)
         return None
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.warning("Unexpected download error: %s", e)
         return None
 
 
@@ -840,7 +588,7 @@ def create_group(
             "is_community": is_community,
             "community_parent_jid": community_parent_jid,
         }
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_auth_headers())
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -863,8 +611,7 @@ def leave_group(jid: str) -> Tuple[bool, str]:
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required"
-        url = f"{WHATSAPP_API_BASE_URL}/leave_group"
-        response = requests.post(url, json={"jid": jid})
+        response = _api_request("POST", "/leave_group", json={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -880,13 +627,12 @@ def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", 
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/mark_chat_read"
         payload: Dict[str, Any] = {"chat_jid": chat_jid, "message_ids": message_ids}
         if sender_jid:
             payload["sender_jid"] = sender_jid
         if timestamp:
             payload["timestamp"] = timestamp
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/mark_chat_read", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -902,8 +648,7 @@ def mark_chat_unread(chat_jid: str) -> Tuple[bool, str]:
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/mark_chat_unread"
-        response = requests.post(url, json={"chat_jid": chat_jid})
+        response = _api_request("POST", "/mark_chat_unread", json={"chat_jid": chat_jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -919,8 +664,7 @@ def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required", None
-        url = f"{WHATSAPP_API_BASE_URL}/group_info"
-        response = requests.get(url, params={"jid": jid})
+        response = _api_request("GET", "/group_info", params={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -943,8 +687,7 @@ def archive_chat(chat_jid: str, archive: bool) -> Tuple[bool, str]:
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/archive_chat"
-        response = requests.post(url, json={"chat_jid": chat_jid, "archive": archive})
+        response = _api_request("POST", "/archive_chat", json={"chat_jid": chat_jid, "archive": archive})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -960,8 +703,7 @@ def resolve_contact(phone: str) -> Tuple[bool, str, List[str]]:
     try:
         if not phone or not phone.strip():
             return False, "phone is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/resolve_contact"
-        response = requests.get(url, params={"phone": phone})
+        response = _api_request("GET", "/resolve_contact", params={"phone": phone})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -987,14 +729,13 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/react"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "emoji": emoji,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/react", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1017,14 +758,13 @@ def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = 
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/edit"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "new_text": new_text,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/edit", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1048,13 +788,12 @@ def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tupl
             return False, "chat_jid is required"
         if not message_id or not message_id.strip():
             return False, "message_id is required"
-        url = f"{WHATSAPP_API_BASE_URL}/revoke"
         payload = {
             "chat_jid": chat_jid,
             "message_id": message_id,
             "from_me": from_me,
         }
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/revoke", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1078,13 +817,12 @@ def update_group_participants(group_jid: str, participants: List[str], action: s
             return False, "group_jid is required", []
         if not participants:
             return False, "participants list is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/group_participants"
         payload = {
             "group_jid": group_jid,
             "participants": participants,
             "action": action,
         }
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/group_participants", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1109,13 +847,12 @@ def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        url = f"{WHATSAPP_API_BASE_URL}/chat_presence"
         payload = {
             "chat_jid": chat_jid,
             "state": state,
             "media": media,
         }
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/chat_presence", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1136,9 +873,8 @@ def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
     try:
         if not phones:
             return False, "phones list is required", []
-        url = f"{WHATSAPP_API_BASE_URL}/is_on_whatsapp"
         payload = {"phones": phones}
-        response = requests.post(url, json=payload)
+        response = _api_request("POST", "/is_on_whatsapp", json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:

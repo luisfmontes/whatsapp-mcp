@@ -1,13 +1,44 @@
 # Contexto: Deploy / Operação
 
+## Bridge remota (bridge e MCP em máquinas diferentes)
+
+Desde 2026-07-30 a bridge suporta rodar numa máquina diferente do MCP server (ex: bridge numa
+VPS/home server, MCP local no laptop) — o server ficou 100% stateless (ver `mcp-python.md`),
+então isso passou a ser suportado sem inventar nada além do que já existia:
+
+- **Bind**: por padrão `127.0.0.1` (só a própria máquina). Pra expor pra outra rede, `BIND_ADDR=<ip>`
+  (endereço de uma VPN/rede privada — Tailscale, WireGuard, etc — nunca `0.0.0.0` direto pra
+  internet pública).
+- **Auth obrigatória** quando não-loopback: `API_AUTH_TOKEN` — a bridge **recusa subir** se
+  `BIND_ADDR` não é loopback e o token está vazio (fail-closed). Toda `/api/*` exige
+  `Authorization: Bearer <token>`; `/qr`/`/qr.png` continuam sem auth (é o próprio fluxo de
+  pareamento). MCP server lê o token equivalente via `WHATSAPP_API_AUTH_TOKEN`.
+- **Múltiplas contas na mesma VPS**: rodar duas (ou mais) instâncias da bridge é só questão de
+  diretório + porta (`WHATSAPP_BRIDGE_PORT`) + token diferentes por instância — cada uma seu
+  próprio `store/`, sem interferência entre sessões.
+- **Rede privada é sua escolha** (Tailscale, WireGuard, SSH tunnel, VPN da nuvem que você usa) —
+  a bridge só precisa que `BIND_ADDR` aponte pra uma interface alcançável pelo MCP client.
+  Cuidado com ordem de boot: se a bridge sobe **antes** da VPN/interface estar pronta, o bind
+  falha silenciosamente (`bind: cannot assign requested address`, só logado, não fatal) e o
+  processo fica "active" no systemd/launchd **sem porta nenhuma aberta** — checar `ss -tln`
+  além do status do serviço. Se usar systemd, adicionar `After=`/`Wants=` pro serviço da sua VPN.
+
 ## Host Linux (VM de dev) vs macOS
 
-- Doc da seção launchd descreve o setup **macOS** do Rodrigo. Esta VM roda **Linux** — NÃO tem launchd.
-- Bridge roda como **systemd system-service**: `/etc/systemd/system/whatsapp-bridge-dev1.service` (enabled, `Restart=always`, `RestartSec=5`, `WHATSAPP_BRIDGE_PORT=8081`, ExecStart = binário direto).
-- **Reiniciar sem sudo:** `systemctl restart` precisa root (não temos). Workaround: `kill <pid>` do `/whatsapp-bridge` → systemd religa em ~5s sozinho. Confirmar: `pgrep -f '/whatsapp-bridge$'`. `systemctl --user` falha (é system-scope, não user).
-- Engine `local` (whisper.cpp) NÃO funciona aqui (paths `/Users/rodrigo/...` macOS, sem binário). Usar **engine `api` Groq** — ver transcription.env + `transcription.md`. Env vem de `transcription.systemd.env` (EnvironmentFile do systemd, gitignored, contém Groq key).
-- Porta é **8081** (service seta `WHATSAPP_BRIDGE_PORT=8081`). `transcribe.py` default 8080 → backfill manual precisa `WHATSAPP_API_BASE_URL=http://localhost:8081/api`.
-- Listen: `ss -ltnp | grep 8081`. Verificar processos: `pgrep -fa whatsapp-bridge`.
+- Doc da seção launchd descreve o setup **macOS**. VMs Linux não têm launchd — a bridge roda
+  como **systemd system-service** lá (ex: `/etc/systemd/system/whatsapp-bridge-dev1.service`,
+  `Restart=always`, `RestartSec=5`, `WHATSAPP_BRIDGE_PORT` explícito, ExecStart = binário direto).
+- **Reiniciar sem sudo** (se não tiver root no host): `systemctl restart` exige root; workaround é
+  `kill <pid>` do processo `whatsapp-bridge` — systemd com `Restart=always` religa sozinho em
+  ~5s. Confirmar com `pgrep -f '/whatsapp-bridge$'`. `systemctl --user` falha nesse caso (unit é
+  system-scope, não user).
+- Engine de transcrição `local` (whisper.cpp) só funciona se o binário/modelo existirem *nesse*
+  host — paths absolutos de outra máquina (ex: macOS) não existem lá. Nesse caso usar engine
+  `api` (Groq/OpenAI) via `transcription.env`/`transcription.systemd.env` (EnvironmentFile do
+  systemd, gitignored, contém a API key).
+- Porta não é sempre 8080 — `transcribe.py`/scripts de backfill usam esse default, então rodar
+  manual num host com porta diferente precisa `WHATSAPP_API_BASE_URL=http://localhost:<porta>/api`
+  explícito.
 
 ## launchd (serviço persistente — macOS)
 
@@ -39,12 +70,13 @@
 ## Plugin Claude Code
 
 - Repo também é distribuído como plugin: `.claude-plugin/plugin.json` + `commands/setup.md`, via marketplace `rodrigopg/claude-plugins` (`/plugin install whatsapp-mcp@rodrigopg`).
-- Coexistência nesta VM: `install.sh --service` cria unit systemd **user**, mas AQUI a bridge já roda como serviço **system** na porta 8081 — o guard do install.sh detecta bridge ativa e pula o setup de serviço (não duplica).
+- Coexistência com bridge já rodando como serviço system-scope (ex: setup de VM Linux acima): `install.sh --service` cria unit systemd **user**; se a bridge já roda como serviço **system** numa porta própria, o guard do install.sh detecta a bridge ativa e pula o setup de serviço (não duplica).
 
 ## QR / auth
 
-- `http://localhost:8081/qr` no browser (PNG raw em `/qr.png`). Salva `/tmp/whatsapp-qr.png`. QR renova a cada ~20s.
-- **Re-parear:** QR só é emitido no startup quando `client.Store.ID == nil` (sem sessão em `whatsapp.db`). Logout remoto apaga a sessão mas NÃO re-entra no loop de QR em runtime — `/qr` fica preso em "connected". Precisa reiniciar o processo (Linux: `kill <pid>`, systemd religa). Logout pelo celular já zera `whatsmeow_device`; aí o bridge sobe limpo e gera QR.
+- Local (install.sh default): `http://localhost:8081/qr` no browser (PNG raw em `/qr.png`). macOS salva `/tmp/whatsapp-qr.png` e abre no Preview. QR renova a cada ~20s.
+- Bridge remota: `/qr`/`/qr.png` ficam **sempre sem auth** mesmo com `API_AUTH_TOKEN` setado (é o próprio fluxo de pareamento) — acessar via túnel SSH (`ssh -L 8081:<bind-addr>:8081 <host>`) ou direto pela rede privada se sua máquina já estiver nela.
+- **Re-parear:** QR só é emitido no startup quando `client.Store.ID == nil` (sem sessão em `whatsapp.db`). Logout remoto apaga a sessão mas NÃO re-entra no loop de QR em runtime — `/qr` fica preso em "connected". Precisa reiniciar o processo (`kill <pid>`; systemd/launchd com restart automático religa sozinho). Logout pelo celular já zera `whatsmeow_device`; aí o bridge sobe limpo e gera QR.
 - History sync ao parear é limitado (poucas msgs/conversas recentes), não histórico completo — normal do multi-device. Backup `messages.db` antes (INSERT OR REPLACE pode sobrescrever).
 
 ## DNS GitHub (rede do Rodrigo)
