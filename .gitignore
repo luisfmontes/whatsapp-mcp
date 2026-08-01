@@ -12,5 +12,5 @@ whatsapp-bridge-personal/
 whatsapp-bridge/transcription.systemd.env
 
 # Reversa
-.reversa/config.user.toml
+.reversa/
 _reversa_sdd/

@@ -1,0 +1,56 @@
+# Contexto: Bridge Go
+
+Bridge Go (`whatsapp-bridge/main.go`) — conecta ao WhatsApp via whatsmeow, expõe REST API local, persiste em SQLite (`store/messages.db`).
+
+## Pontos críticos
+
+- **whatsmeow exige `context.Context`** em todas as chamadas de API (quebra que congelou o upstream). Versão pinada: `v0.0.0-20260516102357-8d3700152a69`. Go **1.25+** obrigatório (`go.mod`).
+- **REST API liga em `127.0.0.1` por padrão.** Upstream ligava `0.0.0.0` (qualquer um na LAN mandava mensagem como você). `BIND_ADDR=<ip>` (ex. `0.0.0.0`, ou um IP específico como um endereço Tailscale) reabre.
+- **Porta** via `WHATSAPP_BRIDGE_PORT` (default 8080; este setup usa 8081).
+- **`API_AUTH_TOKEN`**: se `BIND_ADDR` não é `127.0.0.1`/`localhost`, o processo **recusa subir**
+  sem essa env var setada (fail-closed, não fail-open). Quando setada, todo `/api/*` exige
+  header `Authorization: Bearer <token>` (middleware `requireBearerToken`, aplicado só em
+  `/api/*` — `/qr` e `/qr.png` ficam sempre abertos, é o próprio fluxo de pareamento).
+
+## Endpoints REST de leitura (`/api/chats`, `/api/messages`, etc.)
+
+- 9 endpoints somam-se aos de escrita já existentes: `/api/chats`, `/api/messages`,
+  `/api/message_context`, `/api/contacts/search`, `/api/contacts/chats`,
+  `/api/contacts/last_interaction`, `/api/chat`, `/api/chat/by_contact`, `/api/sender_name`.
+  Contrato completo em `.reversa/_reversa_forward/mcp-remote-hardening/interfaces.md`.
+- Motivo de existirem: o MCP Python lia esses dados via SQLite local direto; isso só funciona
+  quando MCP e bridge rodam na mesma máquina. Bridge remota (VPS) exige que essas leituras
+  também sejam REST — MCP server hoje é 100% stateless (ver `mcp-python.md`).
+- `whatsapp.db` (store do whatsmeow) não expõe `*sql.DB` cru via `sqlstore.Container` — esses
+  handlers abrem uma **segunda conexão SQLite read-only** própria só pra leituras de
+  `whatsmeow_contacts`/`whatsmeow_lid_map`, separada da conexão de escrita gerenciada pela lib.
+- Busca accent-insensitive (`unaccent`) migrou de Python pra um driver SQLite derivado
+  (`sqlite3_unaccent`, registrado via `sql.Register`), usado só na conexão de leitura — não
+  afeta a conexão de escrita principal.
+- Timestamps de resposta usam offset explícito (`-03:00`), não `Z`/UTC — deliberado, pra
+  compatibilizar com `datetime.fromisoformat` do Python <3.11.
+
+## Captura de conteúdo
+
+- `extractTextContent` retorna captions de image/video/document (`GetCaption()`). Bug original: caption era dropado na escrita → busca não achava texto que existia. Caminho live e caminho de history-sync compartilham a função (antes o sync tinha extractor inline duplicado com o mesmo bug).
+- Mensagens enviadas são persistidas localmente na hora (echo multi-device não dispara em conta single-device).
+
+## History sync
+
+- `store.DeviceProps.RequireFullSync = proto.Bool(true)` + `HistorySyncConfig{FullSyncDaysLimit:365,...}` **antes de `NewClient`**. Sem isso só vem histórico recente. Recupera ~1 ano.
+- **Armadilha:** `INSERT OR REPLACE INTO messages` (main.go:221) sobrescreve a linha inteira no sync. Re-parear/re-sync **apaga transcrições** (content volta a ''). COALESCE em messages ainda não existe (só em senders/chats). Backup `messages.db` antes de re-parear.
+
+## LID→PN
+
+- `resolveToPN` normaliza LID→PN na escrita (mesmo contato não racha em dois `chat_jid`).
+- `migrateLIDChats` roda no startup, mescla rows `@lid` legados nos `@s.whatsapp.net` (transacional, idempotente).
+
+## Mídia + segurança
+
+- **`safeMediaPath`** (main.go ~889): rejeita componentes crus com `/`, `\`, `..`, `.`, vazio (não sanitiza — surface o ataque). IDs reais do WhatsApp são hex/base64 sem separadores.
+- Path de mídia prefixado com message ID: filename derivado do sync-time colidia (571 áudios → 87 paths únicos), cache devolvia bytes errados.
+- **Media retry** (recuperação de mídia expirada): `SendMediaRetryReceipt` → `events.MediaRetry` → `DecryptMediaRetryNotification` → `DownloadMediaWithPath`. History sync NÃO recupera (re-entrega as mesmas URLs mortas do CDN). Endpoint `/api/mediaretry`. Log contract estável: `MEDIA RETRY <id>: SUCCESS|NOTONPHONE|ERROR`.
+
+## Testes
+
+- `main_test.go` — `TestSafeMediaPath` (traversal + colisão de filename). `go test ./...`.
