@@ -181,26 +181,56 @@ class FatalTranscriptionError(Exception):
     """A misconfiguration (e.g. bad API key) that retrying won't fix — abort the run."""
 
 
+API_MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _retry_after_seconds(retry_after_header, attempt):
+    """Groq/OpenAI send Retry-After in seconds on 429. Fall back to exponential
+    backoff (2^attempt) if the header is absent or not a plain number — never
+    let a malformed header crash the retry loop."""
+    if retry_after_header is not None:
+        try:
+            return float(retry_after_header)
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
 def _transcribe_api(ogg_path):
-    """OpenAI-compatible STT (/audio/transcriptions). Serves OpenAI or Groq via env."""
+    """OpenAI-compatible STT (/audio/transcriptions). Serves OpenAI or Groq via env.
+
+    Groq's free tier rate-limits aggressively enough that a backfill of a few
+    hundred audios hits 429 well before finishing. Respect Retry-After (Groq
+    sends it in seconds) and back off; this is the same audio retried, not the
+    next sweep, since a 429 says nothing about whether this specific file is OK.
+    """
     size = os.path.getsize(ogg_path)
     if size > API_MAX_BYTES:
         # Don't silently drop — voice notes are tiny, so this is rare; surface it.
         raise RuntimeError(f"audio {size} bytes exceeds API limit {API_MAX_BYTES}")
-    with open(ogg_path, "rb") as f:
-        r = requests.post(
-            f"{TRANSCRIPTION_API_BASE}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {TRANSCRIPTION_API_KEY}"},
-            files={"file": (os.path.basename(ogg_path), f, "audio/ogg")},
-            data={"model": TRANSCRIPTION_API_MODEL, "language": "pt", "prompt": WHISPER_PROMPT},
-            timeout=120,
-        )
-    # A rejected key fails every audio identically — don't loop on it forever.
-    if r.status_code in (401, 403):
-        raise FatalTranscriptionError(
-            f"transcription API rejected the key (HTTP {r.status_code}); check TRANSCRIPTION_API_KEY")
-    r.raise_for_status()
-    return (r.json().get("text") or "").strip()
+
+    for attempt in range(API_MAX_RATE_LIMIT_RETRIES + 1):
+        with open(ogg_path, "rb") as f:
+            r = requests.post(
+                f"{TRANSCRIPTION_API_BASE}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {TRANSCRIPTION_API_KEY}"},
+                files={"file": (os.path.basename(ogg_path), f, "audio/ogg")},
+                data={"model": TRANSCRIPTION_API_MODEL, "language": "pt", "prompt": WHISPER_PROMPT},
+                timeout=120,
+            )
+        # A rejected key fails every audio identically — don't loop on it forever.
+        if r.status_code in (401, 403):
+            raise FatalTranscriptionError(
+                f"transcription API rejected the key (HTTP {r.status_code}); check TRANSCRIPTION_API_KEY")
+        if r.status_code == 429:
+            if attempt == API_MAX_RATE_LIMIT_RETRIES:
+                r.raise_for_status()
+            wait = _retry_after_seconds(r.headers.get("Retry-After"), attempt)
+            log(f"  rate limited (429), waiting {wait:.0f}s before retry {attempt + 1}/{API_MAX_RATE_LIMIT_RETRIES}")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip()
 
 
 def write_content(message_id, chat_jid, content):

@@ -125,10 +125,12 @@ Either engine: ask once, optionally, if they want `TRANSCRIPTION_PROMPT` set (bi
 
 Write the resulting `export VAR=value` lines to `<INSTALL_DIR>/transcription.env` (create the file; `start-bridge.sh` already sources it if present — no other wiring needed). Tell the user transcription takes effect within ~5 minutes for new voice messages (the bridge's sweep interval).
 
-If there's any existing history synced (chats/messages already present — this is common, pairing pulls recent history), ask with AskUserQuestion whether to backfill transcriptions for existing audio now: "Yes, backfill now" / "Skip — I'll run it later". If yes, run it directly rather than just printing the command:
+If there's any existing history synced (chats/messages already present — this is common, pairing pulls recent history), ask with AskUserQuestion whether to backfill transcriptions for existing audio now: "Yes, backfill now" / "Skip — I'll run it later". If yes, run it directly rather than just printing the command — `transcribe.py` does NOT auto-load `transcription.env` (only the bridge's own `start-bridge.sh` sources it), and it needs to know this account's actual bridge port to download audio (its own default is 8080, wrong for any account not on that port):
 
 ```bash
-cd "<INSTALL_DIR>/whatsapp-mcp-server" && uv run python transcribe.py
+cd "<INSTALL_DIR>/whatsapp-mcp-server" && \
+  source "<INSTALL_DIR>/transcription.env" && \
+  WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" uv run transcribe.py
 ```
 
 Report how many audios were transcribed when it finishes. If skipped, mention the same command for later.
