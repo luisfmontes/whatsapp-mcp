@@ -14,9 +14,11 @@ Also ask sample size loosely: "How many of your own messages should I read? (mor
 
 ## 2. Pull messages
 
-Use `list_messages` (via the resolved `mcp__<server>__list_messages` tool) with `include_context: false` to keep the read light. If scoped to one chat, pass `chat_jid`. If general, call it without a chat filter and rely on `limit`/`page` to gather enough volume — you may need several pages.
+Use `list_messages` (via the resolved `mcp__<server>__list_messages` tool) with `include_context: false` to keep the read light. If scoped to one chat, pass `chat_jid`. If general, use a large `limit` per page (e.g. 100) rather than the tool's small default — small pages mean many round trips before enough `From: Me:` lines accumulate.
 
 Each returned line is formatted `[timestamp] Chat: X From: Y: content`. Keep only lines where the sender is the user (`From: Me:` — matches how `format_message` in this codebase marks the user's own messages). Discard everyone else's lines; they're context, not signal.
+
+Discard every line from `status@broadcast` outright, general sample or not — it's WhatsApp's status/stories feed, not a conversation, and it can dominate a general sample by sheer volume (contact status updates land there constantly) while carrying zero conversational-style signal. If a general sample is heavy on it and light on real "From: Me:" lines, that's the signal to keep paging rather than assume the account has little to learn from.
 
 Skip media placeholders (`[image - ...]`, `[audio - ...]`) and near-empty messages (single-word acks, reaction-forwards) — they don't carry style. Keep the actual sentences.
 
