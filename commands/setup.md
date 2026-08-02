@@ -45,6 +45,8 @@ grep -q -- '--service' /tmp/whatsapp-mcp-install.sh
 - If the grep matches: `WHATSAPP_MCP_DIR="<resolved INSTALL_DIR>" WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" bash /tmp/whatsapp-mcp-install.sh --service`
 - If it does NOT match: run without `--service` (same env vars), then start the bridge manually with `<INSTALL_DIR>/start-bridge.sh`, and warn the user that automatic service setup is not available until the published installer updates.
 
+Check the installer's output for `differs from generated plist/unit — not touching it` — this means a service already existed (e.g. from a prior install) and `--service` did NOT register a new one for this account, even though the flag was passed. Don't let this pass silently: tell the user explicitly that no service was created, the bridge is not yet running, and it needs to be started manually before continuing (`<INSTALL_DIR>/start-bridge.sh`, same command step 3 uses either way).
+
 If the installer reports this account's bridge port/process is already in use, that account's installation is already running — do not reinstall; continue to step 4.
 
 After the installer succeeds, pre-warm the MCP server's environment so the first tool call doesn't time out on dependency resolution:
@@ -55,9 +57,11 @@ uv --directory "<resolved INSTALL_DIR>/whatsapp-mcp-server" sync
 
 ## 3. Pair with WhatsApp
 
-Tell the user to open `http://localhost:<resolved BRIDGE_PORT>/qr` in a browser and scan the QR code with WhatsApp (Settings → Linked Devices → Link a Device). Wait for the user to confirm pairing before continuing.
+Open `http://localhost:<resolved BRIDGE_PORT>/qr` in the user's default browser yourself (`open <url>` on macOS, `xdg-open` on Linux) — don't just print the URL and wait for them to open it. The page there already auto-refreshes every 20s with a fresh QR, so there's no need to save/serve a static PNG separately.
 
-- The bridge listens on loopback only by design. On a headless/remote machine, tell the user to port-forward: `ssh -L <port>:localhost:<port> <host>` and open the URL locally.
+- The bridge listens on loopback only by design. On a headless/remote machine, `open`/`xdg-open` won't reach the user's actual browser — tell them to port-forward instead: `ssh -L <port>:localhost:<port> <host>` and open the URL locally themselves.
+
+Tell the user to scan it with WhatsApp (Settings → Linked Devices → Link a Device). Don't wait for them to say "done" — poll for it yourself: `curl -s http://localhost:<port>/qr` and check whether the response contains `WhatsApp connected` (the page's own success-state text) instead of the QR page. Poll every ~5s, up to the same 3-minute window the bridge itself waits before giving up on the pairing session (past that, tell the user the QR expired and to re-run this step — a fresh page load gets a new one).
 
 ## 4. Register the MCP server in Claude Code
 
@@ -86,4 +90,45 @@ If it fails:
 
 ## 6. Transcription (optional)
 
-Mention that audio transcription is opt-in and disabled by default; the user can enable it later following the "Audio transcription" section of the repository README.
+Audio transcription is opt-in — with nothing configured, voice messages stay unsearchable but the bridge works fine. Ask with AskUserQuestion: "Enable audio transcription for this account?" — options "Yes, set it up now" / "Skip for now".
+
+If skipped: stop here, mention `<INSTALL_DIR>/README.md`'s "Audio transcription" section covers enabling it later.
+
+If yes, ask which engine with AskUserQuestion — "API (OpenAI/Groq/compatible) (Recommended)" first (no local build, no multi-GB download, Groq has a generous free tier) / "Local (whisper.cpp)" second:
+
+**Local**: check if `whisper-cli` is already on `PATH` or at a path the user provides. If found (with a model file — ask for its path too, `.bin` under a `models/` dir is the usual layout), write both to `<INSTALL_DIR>/transcription.env`. If NOT found, do not attempt to build whisper.cpp — that's out of scope for this wizard (it's a multi-GB compile from source). Tell the user local requires building https://github.com/ggml-org/whisper.cpp manually first, then ask if they want to switch to the API option instead or skip transcription for now.
+
+```
+export TRANSCRIPTION_ENGINE=local
+export WHISPER_CLI=<path to whisper-cli>
+export WHISPER_MODEL=<path to .bin model>
+```
+
+**API**: ask which provider — "Groq (Recommended)" first (generous free tier) / "OpenAI" / "Other OpenAI-compatible endpoint". For Groq or "other", also ask for the base URL and model name (suggest Groq defaults if they pick Groq: `https://api.groq.com/openai/v1`, `whisper-large-v3`).
+
+Then ask "Already have an API key?" with AskUserQuestion:
+- **"No, help me create one"**: give the shortest real path to a working key for the chosen provider — Groq: https://console.groq.com/keys (sign up if needed, "Create API Key", copy it) — a couple of terse steps, not a tutorial. Then loop back to asking for the key.
+- **"Yes, I'll paste it"**: prompt for it directly.
+- Any secrets-manager skill/MCP tool visible in this session (e.g. a password manager) → add a third option offering to look it up there, worded generically ("Look it up in <tool name>") — don't hardcode a specific product name in this file, detect what's actually available in the running session.
+
+Whichever path, never echo the key back in full — confirm receipt by length/prefix only (e.g. "got a key starting with sk-...").
+
+```
+export TRANSCRIPTION_ENGINE=api
+export TRANSCRIPTION_API_KEY=<key>
+# only if Groq/other:
+export TRANSCRIPTION_API_BASE=<base url>
+export TRANSCRIPTION_API_MODEL=<model>
+```
+
+Either engine: ask once, optionally, if they want `TRANSCRIPTION_PROMPT` set (biases transcription toward correct punctuation/domain terms — e.g. product names, jargon they use often). If a global `CLAUDE.md` or similar user profile is visible in this session and names a specific stack/domain (technologies, tools, jargon they work with), offer that as one of the AskUserQuestion options pre-filled — most users don't have their own jargon list top of mind, but recognize it instantly when it's already drafted from what they told Claude about themselves. Skip if they don't have anything specific in mind, don't push for an answer.
+
+Write the resulting `export VAR=value` lines to `<INSTALL_DIR>/transcription.env` (create the file; `start-bridge.sh` already sources it if present — no other wiring needed). Tell the user transcription takes effect within ~5 minutes for new voice messages (the bridge's sweep interval).
+
+If there's any existing history synced (chats/messages already present — this is common, pairing pulls recent history), ask with AskUserQuestion whether to backfill transcriptions for existing audio now: "Yes, backfill now" / "Skip — I'll run it later". If yes, run it directly rather than just printing the command:
+
+```bash
+cd "<INSTALL_DIR>/whatsapp-mcp-server" && uv run python transcribe.py
+```
+
+Report how many audios were transcribed when it finishes. If skipped, mention the same command for later.
