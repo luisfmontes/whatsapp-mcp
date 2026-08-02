@@ -85,10 +85,10 @@ fi
 # ── clone or update ──────────────────────────────────────────────────────────
 echo ""
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  info "Updating existing install at $INSTALL_DIR…"
+  info "Updating existing install at ${INSTALL_DIR}…"
   git -C "$INSTALL_DIR" pull --ff-only
 else
-  info "Cloning into $INSTALL_DIR…"
+  info "Cloning into ${INSTALL_DIR}…"
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 success "Repository ready"
