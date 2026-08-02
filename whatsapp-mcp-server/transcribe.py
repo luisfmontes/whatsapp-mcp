@@ -20,6 +20,7 @@ Run:  python3 transcribe.py            # backfill every pending audio
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -181,26 +182,68 @@ class FatalTranscriptionError(Exception):
     """A misconfiguration (e.g. bad API key) that retrying won't fix — abort the run."""
 
 
+API_MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _retry_after_seconds(retry_after_header, attempt):
+    """Groq/OpenAI send Retry-After in seconds on 429. Fall back to exponential
+    backoff (2^attempt) if the header is absent, not a plain finite number, or
+    out of a sane range — never let a malformed/hostile header hang or crash
+    the retry loop (float() alone accepts "inf"/"nan"/negative values, which
+    would reach time.sleep as an OverflowError/ValueError or a no-op wait).
+    Clamped to 60s so a legitimate but huge Retry-After (e.g. daily quota
+    reset) doesn't stall a backfill for the full duration unnoticed."""
+    if retry_after_header is not None:
+        try:
+            value = float(retry_after_header)
+            if math.isfinite(value):
+                return max(0.0, min(value, 60.0))
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
 def _transcribe_api(ogg_path):
-    """OpenAI-compatible STT (/audio/transcriptions). Serves OpenAI or Groq via env."""
+    """OpenAI-compatible STT (/audio/transcriptions). Serves OpenAI or Groq via env.
+
+    Groq's free tier rate-limits aggressively enough that a backfill of a few
+    hundred audios hits 429 well before finishing. Respect Retry-After (Groq
+    sends it in seconds) and back off; this is the same audio retried, not the
+    next sweep, since a 429 says nothing about whether this specific file is OK.
+    """
     size = os.path.getsize(ogg_path)
     if size > API_MAX_BYTES:
         # Don't silently drop — voice notes are tiny, so this is rare; surface it.
         raise RuntimeError(f"audio {size} bytes exceeds API limit {API_MAX_BYTES}")
-    with open(ogg_path, "rb") as f:
-        r = requests.post(
-            f"{TRANSCRIPTION_API_BASE}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {TRANSCRIPTION_API_KEY}"},
-            files={"file": (os.path.basename(ogg_path), f, "audio/ogg")},
-            data={"model": TRANSCRIPTION_API_MODEL, "language": "pt", "prompt": WHISPER_PROMPT},
-            timeout=120,
-        )
-    # A rejected key fails every audio identically — don't loop on it forever.
-    if r.status_code in (401, 403):
-        raise FatalTranscriptionError(
-            f"transcription API rejected the key (HTTP {r.status_code}); check TRANSCRIPTION_API_KEY")
-    r.raise_for_status()
-    return (r.json().get("text") or "").strip()
+
+    for attempt in range(API_MAX_RATE_LIMIT_RETRIES + 1):
+        with open(ogg_path, "rb") as f:
+            r = requests.post(
+                f"{TRANSCRIPTION_API_BASE}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {TRANSCRIPTION_API_KEY}"},
+                files={"file": (os.path.basename(ogg_path), f, "audio/ogg")},
+                data={"model": TRANSCRIPTION_API_MODEL, "language": "pt", "prompt": WHISPER_PROMPT},
+                timeout=120,
+            )
+        # A rejected key fails every audio identically — don't loop on it forever.
+        if r.status_code in (401, 403):
+            raise FatalTranscriptionError(
+                f"transcription API rejected the key (HTTP {r.status_code}); check TRANSCRIPTION_API_KEY")
+        if r.status_code == 429:
+            if attempt == API_MAX_RATE_LIMIT_RETRIES:
+                # Still rate-limited after backing off — this isn't a bad audio,
+                # it's a still-active rate limit. Abort the whole run (same as a
+                # rejected key) instead of burning the rest of the queue one
+                # retry-and-fail cycle at a time against a limit that isn't lifting.
+                raise FatalTranscriptionError(
+                    f"still rate limited after {API_MAX_RATE_LIMIT_RETRIES} retries (HTTP 429); "
+                    "the API's rate limit isn't clearing — wait and re-run, or check your plan/quota")
+            wait = _retry_after_seconds(r.headers.get("Retry-After"), attempt)
+            log(f"  rate limited (429), waiting {wait:.0f}s before retry {attempt + 1}/{API_MAX_RATE_LIMIT_RETRIES}")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return (r.json().get("text") or "").strip()
 
 
 def write_content(message_id, chat_jid, content):
