@@ -20,6 +20,7 @@ Run:  python3 transcribe.py            # backfill every pending audio
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -186,11 +187,17 @@ API_MAX_RATE_LIMIT_RETRIES = 5
 
 def _retry_after_seconds(retry_after_header, attempt):
     """Groq/OpenAI send Retry-After in seconds on 429. Fall back to exponential
-    backoff (2^attempt) if the header is absent or not a plain number — never
-    let a malformed header crash the retry loop."""
+    backoff (2^attempt) if the header is absent, not a plain finite number, or
+    out of a sane range — never let a malformed/hostile header hang or crash
+    the retry loop (float() alone accepts "inf"/"nan"/negative values, which
+    would reach time.sleep as an OverflowError/ValueError or a no-op wait).
+    Clamped to 60s so a legitimate but huge Retry-After (e.g. daily quota
+    reset) doesn't stall a backfill for the full duration unnoticed."""
     if retry_after_header is not None:
         try:
-            return float(retry_after_header)
+            value = float(retry_after_header)
+            if math.isfinite(value):
+                return max(0.0, min(value, 60.0))
         except ValueError:
             pass
     return float(2 ** attempt)
@@ -224,7 +231,13 @@ def _transcribe_api(ogg_path):
                 f"transcription API rejected the key (HTTP {r.status_code}); check TRANSCRIPTION_API_KEY")
         if r.status_code == 429:
             if attempt == API_MAX_RATE_LIMIT_RETRIES:
-                r.raise_for_status()
+                # Still rate-limited after backing off — this isn't a bad audio,
+                # it's a still-active rate limit. Abort the whole run (same as a
+                # rejected key) instead of burning the rest of the queue one
+                # retry-and-fail cycle at a time against a limit that isn't lifting.
+                raise FatalTranscriptionError(
+                    f"still rate limited after {API_MAX_RATE_LIMIT_RETRIES} retries (HTTP 429); "
+                    "the API's rate limit isn't clearing — wait and re-run, or check your plan/quota")
             wait = _retry_after_seconds(r.headers.get("Retry-After"), attempt)
             log(f"  rate limited (429), waiting {wait:.0f}s before retry {attempt + 1}/{API_MAX_RATE_LIMIT_RETRIES}")
             time.sleep(wait)

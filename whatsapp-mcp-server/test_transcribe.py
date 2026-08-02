@@ -46,6 +46,21 @@ class RetryAfterSecondsTest(unittest.TestCase):
         # A non-numeric Retry-After must not crash the retry loop.
         self.assertEqual(_retry_after_seconds("not-a-number", attempt=2), 4.0)
 
+    def test_non_finite_header_falls_back_to_backoff(self):
+        # float() accepts these without raising ValueError — inf/nan would
+        # otherwise reach time.sleep and crash (OverflowError/ValueError).
+        self.assertEqual(_retry_after_seconds("inf", attempt=1), 2.0)
+        self.assertEqual(_retry_after_seconds("-inf", attempt=1), 2.0)
+        self.assertEqual(_retry_after_seconds("nan", attempt=1), 2.0)
+
+    def test_negative_header_is_clamped(self):
+        self.assertEqual(_retry_after_seconds("-5", attempt=0), 0.0)
+
+    def test_huge_header_is_clamped(self):
+        # A legitimate but huge Retry-After (e.g. daily quota reset) shouldn't
+        # stall a backfill for its full duration unnoticed.
+        self.assertEqual(_retry_after_seconds("3600", attempt=0), 60.0)
+
 
 class StripAccentsTest(unittest.TestCase):
     def test_removes_diacritics_and_lowercases(self):
