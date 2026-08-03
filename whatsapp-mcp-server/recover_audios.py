@@ -23,7 +23,7 @@ import time
 import requests
 
 from transcribe import (DB_PATH, API_BASE, transcribe, write_content,
-                        engine_ready, SENTINEL_EMPTY)
+                        engine_ready, SENTINEL_EMPTY, _bridge_auth_headers)
 
 BRIDGE_LOG = os.environ.get("WHATSAPP_BRIDGE_LOG", "/tmp/wa-bridge.log")
 SENTINEL_NOT_ON_PHONE = "[áudio indisponível: não está mais no telefone]"
@@ -54,7 +54,10 @@ def unavailable_audios(conn, limit):
 def request_retry(message_id, chat_jid):
     r = requests.post(f"{API_BASE}/mediaretry",
                       json={"message_id": message_id, "chat_jid": chat_jid},
+                      headers=_bridge_auth_headers(),
                       timeout=30)
+    if r.status_code == 401:
+        log("HTTP 401 - check WHATSAPP_API_AUTH_TOKEN matches the bridge's API_AUTH_TOKEN")
     return r.status_code == 200 and r.json().get("success")
 
 
