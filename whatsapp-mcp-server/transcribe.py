@@ -40,6 +40,13 @@ CDN_EXPIRY = timedelta(days=21)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 API_BASE = os.environ.get("WHATSAPP_API_BASE_URL", f"http://localhost:{os.environ.get('WHATSAPP_BRIDGE_PORT', '8080')}/api")
+WHATSAPP_API_AUTH_TOKEN = os.environ.get("WHATSAPP_API_AUTH_TOKEN", "")
+
+
+def _bridge_auth_headers():
+    if WHATSAPP_API_AUTH_TOKEN:
+        return {"Authorization": f"Bearer {WHATSAPP_API_AUTH_TOKEN}"}
+    return {}
 
 # --- Transcription engine configuration (all via env so the repo is portable) ---
 #
@@ -128,6 +135,7 @@ def download(message_id, chat_jid):
     try:
         r = requests.post(f"{API_BASE}/download",
                           json={"message_id": message_id, "chat_jid": chat_jid},
+                          headers=_bridge_auth_headers(),
                           timeout=120)
     except requests.RequestException as e:
         return None, f"request error: {e}"

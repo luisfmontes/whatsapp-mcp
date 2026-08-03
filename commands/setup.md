@@ -129,8 +129,10 @@ If there's any existing history synced (chats/messages already present — this 
 
 ```bash
 cd "<INSTALL_DIR>/whatsapp-mcp-server" && \
-  source "<INSTALL_DIR>/transcription.env" && \
+  set -a && source "<INSTALL_DIR>/transcription.env" && set +a && \
   WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" uv run transcribe.py
 ```
+
+If this bridge's `BIND_ADDR` is non-loopback (`API_AUTH_TOKEN` required — see the REST API section above), also export `WHATSAPP_API_AUTH_TOKEN=<that same token>` before running the command above, or the download call 401s.
 
 Report how many audios were transcribed when it finishes. If skipped, mention the same command for later.
