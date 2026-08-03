@@ -222,6 +222,19 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		return nil
 	}
 
+	// Incoming content is empty (the common re-sync-of-audio case the
+	// COALESCE below exists for) — check if we're about to preserve a
+	// non-empty value someone already wrote (typically a transcription), so
+	// it's not a completely silent transition if this protection ever
+	// actually fires. Single extra SELECT, only on this narrow path (not
+	// every write) since it only matters when there's something to protect.
+	if content == "" {
+		var existing sql.NullString
+		if err := store.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?", id, chatJID).Scan(&existing); err == nil && existing.Valid && existing.String != "" {
+			fmt.Printf("StoreMessage: preserving existing content for %s in %s against incoming empty value\n", id, chatJID)
+		}
+	}
+
 	// ON CONFLICT + COALESCE(NULLIF(...)) instead of INSERT OR REPLACE: a
 	// re-sync (re-pairing, on-demand history sync) re-delivers messages with
 	// their original raw content — for audio that's '', since transcription
@@ -229,6 +242,13 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	// would blow away an existing transcription with that empty string. This
 	// keeps whichever content is already there when the incoming value is
 	// empty, same pattern as StoreSender below.
+	//
+	// media_key/file_sha256/file_enc_sha256 need the same treatment, but as
+	// BLOB columns NULLIF(x, '') does NOT catch an empty []byte the way it
+	// catches an empty TEXT — '' there is compared as TEXT and never equals a
+	// zero-length BLOB, so the NULLIF guard would silently no-op and always
+	// take the incoming (possibly empty) value. Verified empirically before
+	// writing this. Use length(...) instead, which works for BLOB.
 	_, err := store.db.Exec(
 		`INSERT INTO messages
 		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
@@ -241,9 +261,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			media_type      = excluded.media_type,
 			filename        = excluded.filename,
 			url             = excluded.url,
-			media_key       = excluded.media_key,
-			file_sha256     = excluded.file_sha256,
-			file_enc_sha256 = excluded.file_enc_sha256,
+			media_key       = CASE WHEN length(excluded.media_key)       > 0 THEN excluded.media_key       ELSE messages.media_key       END,
+			file_sha256     = CASE WHEN length(excluded.file_sha256)     > 0 THEN excluded.file_sha256     ELSE messages.file_sha256     END,
+			file_enc_sha256 = CASE WHEN length(excluded.file_enc_sha256) > 0 THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
 			file_length     = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
