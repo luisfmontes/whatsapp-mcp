@@ -56,6 +56,8 @@ def request_retry(message_id, chat_jid):
                       json={"message_id": message_id, "chat_jid": chat_jid},
                       headers=_bridge_auth_headers(),
                       timeout=30)
+    if r.status_code == 401:
+        log("HTTP 401 - check WHATSAPP_API_AUTH_TOKEN matches the bridge's API_AUTH_TOKEN")
     return r.status_code == 200 and r.json().get("success")
 
 
