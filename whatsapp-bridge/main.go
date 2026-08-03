@@ -222,10 +222,29 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		return nil
 	}
 
+	// ON CONFLICT + COALESCE(NULLIF(...)) instead of INSERT OR REPLACE: a
+	// re-sync (re-pairing, on-demand history sync) re-delivers messages with
+	// their original raw content — for audio that's '', since transcription
+	// is a local enrichment the server doesn't know about. A blind REPLACE
+	// would blow away an existing transcription with that empty string. This
+	// keeps whichever content is already there when the incoming value is
+	// empty, same pattern as StoreSender below.
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender          = excluded.sender,
+			content         = COALESCE(NULLIF(excluded.content, ''), messages.content),
+			timestamp       = excluded.timestamp,
+			is_from_me      = excluded.is_from_me,
+			media_type      = excluded.media_type,
+			filename        = excluded.filename,
+			url             = excluded.url,
+			media_key       = excluded.media_key,
+			file_sha256     = excluded.file_sha256,
+			file_enc_sha256 = excluded.file_enc_sha256,
+			file_length     = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
@@ -3723,38 +3742,32 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 }
 
 // Request history sync from the server
-func requestHistorySync(client *whatsmeow.Client) {
-	if client == nil {
-		fmt.Println("Client is not initialized. Cannot request history sync.")
+// requestHistorySync asks the primary device (phone) for `count` messages
+// immediately BEFORE lastKnown, via whatsmeow's on-demand history sync
+// (BuildHistorySyncRequest + SendPeerMessage — see
+// https://github.com/tulir/whatsmeow/blob/main/send.go). lastKnown must be a
+// real, already-known message (chat/ID/IsFromMe/timestamp) — the whatsmeow
+// call dereferences it unconditionally and panics on nil. The response
+// arrives later as a normal *events.HistorySync (type ON_DEMAND), handled by
+// the same handleHistorySync used for the initial pairing sync — no separate
+// handler needed.
+func requestHistorySync(client *whatsmeow.Client, lastKnown *types.MessageInfo, count int) {
+	if client == nil || !client.IsConnected() || client.Store.ID == nil {
+		fmt.Println("Client not ready for history sync request.")
+		return
+	}
+	if lastKnown == nil {
+		fmt.Println("requestHistorySync: lastKnown message info is required (whatsmeow dereferences it unconditionally).")
 		return
 	}
 
-	if !client.IsConnected() {
-		fmt.Println("Client is not connected. Please ensure you are connected to WhatsApp first.")
-		return
-	}
-
-	if client.Store.ID == nil {
-		fmt.Println("Client is not logged in. Please scan the QR code first.")
-		return
-	}
-
-	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
-	if historyMsg == nil {
-		fmt.Println("Failed to build history sync request.")
-		return
-	}
-
-	_, err := client.SendMessage(context.Background(), types.JID{
-		Server: "s.whatsapp.net",
-		User:   "status",
-	}, historyMsg)
-
+	historyMsg := client.BuildHistorySyncRequest(lastKnown, count)
+	_, err := client.SendPeerMessage(context.Background(), historyMsg)
 	if err != nil {
 		fmt.Printf("Failed to request history sync: %v\n", err)
 	} else {
-		fmt.Println("History sync requested. Waiting for server response...")
+		fmt.Printf("History sync requested for %d messages before %s in %s. Waiting for server response...\n",
+			count, lastKnown.ID, lastKnown.Chat.String())
 	}
 }
 
