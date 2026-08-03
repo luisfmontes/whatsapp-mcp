@@ -129,7 +129,7 @@ If there's any existing history synced (chats/messages already present — this 
 
 ```bash
 cd "<INSTALL_DIR>/whatsapp-mcp-server" && \
-  source "<INSTALL_DIR>/transcription.env" && \
+  set -a && source "<INSTALL_DIR>/transcription.env" && set +a && \
   WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" uv run transcribe.py
 ```
 

@@ -45,8 +45,8 @@ launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge          # status
 launchctl kickstart -k gui/$(id -u)/com.whatsapp-mcp.bridge    # reiniciar
 tail -f whatsapp-bridge/bridge.log
 
-# transcrição manual (source env primeiro)
-cd whatsapp-mcp-server && source ../whatsapp-bridge/transcription.env
+# transcrição manual (set -a propaga pro subprocesso; source sozinho não)
+cd whatsapp-mcp-server && set -a && source ../whatsapp-bridge/transcription.env && set +a
 python3 transcribe.py            # backfill
 WHATSAPP_BRIDGE_LOG=../whatsapp-bridge/bridge.log python3 recover_audios.py
 ```
