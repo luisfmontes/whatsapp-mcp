@@ -18,7 +18,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - Go **1.25+** (casa com go.mod); recompilar binário após mudar main.go — `go run` é só dev. CGO impede cross-compile do macOS pra Linux/VPS — compilar direto na VPS (tem Go+gcc lá).
 - REST API liga **127.0.0.1** por padrão; `BIND_ADDR=<ip>` pra expor além de loopback exige `API_AUTH_TOKEN` setado (a bridge recusa subir sem token nesse caso) — nunca bind não-loopback sem token, mesmo em rede privada (Tailscale/VPN não é substituto de auth).
 - `safeMediaPath` **rejeita** componentes com separadores/`..` — não sanitizar silenciosamente.
-- Re-parear/re-sync **apaga transcrições** (INSERT OR REPLACE em messages) — backup `messages.db` antes.
+- Re-parear/re-sync: `StoreMessage` preserva `content` existente via `COALESCE(NULLIF(...))` (não sobrescreve transcrição com string vazia do sync) — mas faça backup de `messages.db`/`whatsapp.db` antes de qualquer re-pareamento de qualquer forma, é operação real de produção.
 - Transcrição é **opt-in**; sem engine, sweep deve ser no-op (não marcar áudios).
 - `transcription.env` **nunca** commitado (gitignored).
 - Push em `rodrigopg` (fork), não `origin` (upstream).
