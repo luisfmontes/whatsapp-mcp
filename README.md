@@ -178,7 +178,7 @@ env = { WHATSAPP_BRIDGE_PORT = "8080" }
    go run main.go
    ```
 
-   On first run, open **http://localhost:8080/qr** in your browser and scan the QR code with WhatsApp (Settings → Linked Devices → Link a Device). The page auto-refreshes when a new code is generated. On macOS the QR is also saved to `/tmp/whatsapp-qr.png` and opened in Preview.
+   On first run, open **http://localhost:8080/qr** in your browser and scan the QR code with WhatsApp (Settings → Linked Devices → Link a Device). The page auto-refreshes when a new code is generated. The QR is also written to the system temp dir as `whatsapp-qr.png` and opened in the default image viewer (Preview on macOS, the registered handler on Windows, `xdg-open` on Linux). See the Windows section below: 8080 is often unusable there, so that install defaults to 8081.
 
 3. **Connect to the MCP server**
 
@@ -205,12 +205,60 @@ env = { WHATSAPP_BRIDGE_PORT = "8080" }
 
 ### Windows
 
-`go-sqlite3` requires CGO. Install [MSYS2](https://www.msys2.org/), add `ucrt64\bin` to `PATH`, then:
+No C toolchain needed — MSYS2 is no longer required. On Windows the bridge is
+built against [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite), a
+pure-Go build of SQLite, selected by build tag; macOS and Linux keep using
+`mattn/go-sqlite3` (CGO) exactly as before. `CGO_ENABLED=0` produces a
+standalone `.exe`.
 
-```bash
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Service
+```
+
+Flags mirror `install.sh`: `-Service` registers auto-start, `-Codex` registers
+the MCP with Codex CLI, plus `-InstallDir`, `-BridgePort`, `-RepoUrl`, `-Branch`.
+To build by hand instead:
+
+```powershell
 cd whatsapp-bridge
-go env -w CGO_ENABLED=1
-go run main.go
+go build -o whatsapp-bridge.exe .
+$env:WHATSAPP_BRIDGE_PORT = '8081'
+.\whatsapp-bridge.exe
+```
+
+Three things differ from macOS/Linux and will bite if ignored:
+
+- **Port.** Windows reserves TCP ranges for Hyper-V/WSL, and the project default
+  8080 frequently lands inside one. The bind then fails with *"an attempt was
+  made to access a socket in a way forbidden by its access permissions"* — and
+  the bridge only logs it and keeps running, so you get a live process with no
+  port open. Check with `netsh interface ipv4 show excludedportrange protocol=tcp`
+  and pick a port outside those ranges (`install.ps1` does this automatically and
+  defaults to 8081).
+- **Auto-start** is a Task Scheduler task named `WhatsAppMCPBridge`, triggered at
+  logon, running unelevated in your session (no launchd, no systemd). Inspect it
+  with `Get-ScheduledTask -TaskName WhatsAppMCPBridge`. Task Scheduler keeps no
+  output of its own, so diagnostics live in `bridge.log` in the install dir.
+- **ffmpeg** is optional but needed for sending audio and for the local whisper
+  engine: `winget install --id Gyan.FFmpeg`. If it is not on `PATH`, point
+  `FFMPEG_BIN` at the executable. For transcription on Windows prefer
+  `TRANSCRIPTION_ENGINE=api` — the local engine needs a whisper.cpp build present
+  on this machine.
+
+The QR is written to `%TEMP%\whatsapp-qr.png` and opened with the default image
+viewer, in addition to being served at `/qr`.
+
+#### Contributing on Windows
+
+`go build` on Windows never compiles the `!windows` half of the SQLite layer, so
+a broken macOS/Linux build passes every local check. Before pushing, type-check
+the other platforms — no C toolchain required, since this catches compile errors,
+not linkage:
+
+```powershell
+$env:GOOS='darwin'; go build -o "$env:TEMP\x" ./...
+$env:GOOS='linux';  go build -o "$env:TEMP\x" ./...
+Remove-Item env:GOOS
 ```
 
 ---
