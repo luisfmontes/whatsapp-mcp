@@ -23,6 +23,12 @@ whatsapp-bridge-personal/
 # systemd EnvironmentFile (sem export, contém Groq key)
 whatsapp-bridge/transcription.systemd.env
 
+# Mesma coisa em qualquer diretório: os instaladores colocam transcription.env
+# na raiz do INSTALL_DIR (que pode ser o próprio clone), e o arquivo contém uma
+# chave de API em texto claro. As entradas acima só cobriam whatsapp-bridge/.
+transcription.env
+transcription.systemd.env
+
 # Reversa
 .reversa/
 _reversa_sdd/
