@@ -4,7 +4,28 @@ Bridge Go (`whatsapp-bridge/main.go`) — conecta ao WhatsApp via whatsmeow, exp
 
 ## Pontos críticos
 
-- **whatsmeow exige `context.Context`** em todas as chamadas de API (quebra que congelou o upstream). Versão pinada: `v0.0.0-20260516102357-8d3700152a69`. Go **1.25+** obrigatório (`go.mod`).
+- **whatsmeow exige `context.Context`** em todas as chamadas de API (quebra que congelou o upstream). Versão pinada: `v0.0.0-20260529101937-a7ea56383ec4` (pseudo-version de commit — a lib não tem release estável). Go **1.25+** obrigatório (`go.mod`).
+
+## Camada SQLite por plataforma (desde o port Windows)
+
+- `sqlite_driver_cgo.go` (`//go:build !windows`) mantém `mattn/go-sqlite3` (CGO) — mac/Linux
+  inalterados. `sqlite_driver_windows.go` (`//go:build windows`) usa `modernc.org/sqlite`, Go puro,
+  para o Windows compilar com `CGO_ENABLED=0` sem MinGW. `main.go` chama `openMessagesDB()`,
+  `openUnaccentMessagesDB()`, `openStoreDBReadOnly()` e `storeDSN()` em vez de `sql.Open` direto.
+- **O driver tem que se chamar `"sqlite3"`**: `sqlstore.New(ctx, dialect, dsn)` usa o `dialect` como
+  nome do driver **e** como chave da sintaxe de UPSERT. E no Windows o alias precisa apontar para a
+  instância que o modernc registrou (obtida via `(*sql.DB).Driver()`): um `&sqlite.Driver{}` de
+  zero-value conecta mas não carrega funções registradas, e toda query com `unaccent()` falha em
+  runtime com `no such function: unaccent`.
+- DSN não é portável entre os dois: `_foreign_keys=on`/`_busy_timeout=5000`/`mode=ro` do mattn
+  correspondem a `_fk=on`/`_pragma=busy_timeout(5000)`/`_pragma=query_only(true)` no modernc.
+- **Divergência conhecida em NULL:** no lado CGO o mattn recusa argumento que não seja TEXT/BLOB
+  (`callbackArgString`), então `unaccent(NULL)` derruba a query; no Windows NULL propaga como NULL.
+  Não dispara hoje porque o bridge grava string vazia, não NULL.
+- `go build` no Windows **não compila** o arquivo `!windows`. Type-check cruzado antes de publicar:
+  `GOOS=darwin go build ./...` e `GOOS=linux go build ./...` (não precisa de toolchain C).
+- `busy_timeout` nas duas conexões de `messages.db` não é opcional: sem ele, buscas durante history
+  sync falham com `database is locked (5) (SQLITE_BUSY)` como 500.
 - **REST API liga em `127.0.0.1` por padrão.** Upstream ligava `0.0.0.0` (qualquer um na LAN mandava mensagem como você). `BIND_ADDR=<ip>` (ex. `0.0.0.0`, ou um IP específico como um endereço Tailscale) reabre.
 - **Porta** via `WHATSAPP_BRIDGE_PORT` (default 8080; este setup usa 8081).
 - **`API_AUTH_TOKEN`**: se `BIND_ADDR` não é `127.0.0.1`/`localhost`, o processo **recusa subir**
