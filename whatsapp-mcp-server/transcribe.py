@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -118,14 +119,53 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# messages.timestamp is written by Go, and its text layout depends on which
+# SQLite driver the bridge was built with (whatsapp-bridge/sqlite_driver_*.go):
+# mattn/go-sqlite3 (macOS/Linux) writes "2026-08-07 10:07:53-03:00", which
+# fromisoformat accepts, while modernc.org/sqlite (Windows) writes Go's
+# time.Time.String() layout — "2026-08-07 10:07:53 -0300 -03", with a compact
+# offset AND a trailing zone *name*, which fromisoformat rejects outright.
+#
+# This is not cosmetic: _is_expired treats an unparseable timestamp as old, so
+# on Windows every audio looked CDN-expired and got a permanent "unavailable"
+# sentinel instead of being retried. Hence: parse both spellings.
+_GO_TIME_STRING = re.compile(
+    r'^(?P<dt>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)'   # naive part
+    r'(?:\s*(?P<offset>[+-]\d{2}:?\d{2}))?'                        # -0300 / -03:00
+    r'(?:\s+\S+)?$'                                                # zone name (-03, UTC, …)
+)
+
+
+def _parse_db_ts(ts):
+    """Parse a messages.timestamp value into a datetime, or None if unparseable.
+
+    Naive results are returned naive — the caller decides what tz to assume."""
+    if not ts:
+        return None
+    text = str(ts).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    match = _GO_TIME_STRING.match(text)
+    if not match:
+        return None
+    normalized = match.group('dt')
+    offset = match.group('offset')
+    if offset:
+        digits = offset.replace(':', '')
+        normalized += f"{digits[:3]}:{digits[3:]}"
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
 def _is_expired(ts):
     """True if the message timestamp is older than the CDN retention window."""
-    if not ts:
+    dt = _parse_db_ts(ts)
+    if dt is None:
         return True  # unknown age — assume old, don't retry forever
-    try:
-        dt = datetime.fromisoformat(str(ts))
-    except ValueError:
-        return True
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - dt > CDN_EXPIRY

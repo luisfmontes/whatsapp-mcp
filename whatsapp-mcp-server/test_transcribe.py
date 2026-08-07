@@ -5,13 +5,23 @@ misses). Run: python3 -m unittest test_transcribe -v"""
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from transcribe import _is_expired, _retry_after_seconds, CDN_EXPIRY
+from transcribe import _is_expired, _parse_db_ts, _retry_after_seconds, CDN_EXPIRY
 from whatsapp import _strip_accents
 
 
 def _iso(delta_days):
     dt = datetime.now(timezone.utc) - timedelta(days=delta_days)
     return dt.isoformat()
+
+
+def _go_string(delta_days, tz_hours=-3):
+    """The same instant spelled the way modernc.org/sqlite (Windows) stores it:
+    Go's time.Time.String() — compact offset plus a trailing zone name."""
+    tz = timezone(timedelta(hours=tz_hours))
+    dt = (datetime.now(timezone.utc) - timedelta(days=delta_days)).astimezone(tz)
+    sign = "+" if tz_hours >= 0 else "-"
+    hh = abs(tz_hours)
+    return f"{dt:%Y-%m-%d %H:%M:%S} {sign}{hh:02d}00 {sign}{hh:02d}"
 
 
 class IsExpiredTest(unittest.TestCase):
@@ -32,6 +42,40 @@ class IsExpiredTest(unittest.TestCase):
         # go-sqlite3 stores an offset, but a naive string must not crash.
         naive = (datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None)
         self.assertFalse(_is_expired(naive.isoformat()))
+
+    def test_go_time_string_layout_is_not_treated_as_expired(self):
+        # The Windows regression: every row in messages.db is spelled this way,
+        # so a parse failure here marked the whole backlog permanently
+        # unavailable instead of retrying it.
+        self.assertFalse(_is_expired(_go_string(0)))
+        self.assertFalse(_is_expired(_go_string(CDN_EXPIRY.days - 1)))
+        self.assertTrue(_is_expired(_go_string(CDN_EXPIRY.days + 5)))
+
+
+class ParseDbTsTest(unittest.TestCase):
+    def test_go_time_string_offset_and_zone_name(self):
+        dt = _parse_db_ts("2026-08-07 10:07:53 -0300 -03")
+        self.assertEqual(dt.utcoffset(), timedelta(hours=-3))
+        self.assertEqual(
+            dt.replace(tzinfo=None), datetime(2026, 8, 7, 10, 7, 53))
+
+    def test_go_time_string_utc_and_fractional_seconds(self):
+        dt = _parse_db_ts("2026-08-07 13:07:53.123456789 +0000 UTC")
+        self.assertEqual(dt.utcoffset(), timedelta(0))
+        self.assertEqual(dt.microsecond, 123456)
+
+    def test_cgo_and_rfc3339_layouts_still_parse(self):
+        # macOS/Linux (mattn) spelling, and what the bridge emits over HTTP.
+        for text in ("2026-08-07 10:07:53-03:00", "2026-08-07T13:07:53+00:00"):
+            self.assertIsNotNone(_parse_db_ts(text), text)
+
+    def test_naive_stays_naive(self):
+        # The tz assumption belongs to the caller, not the parser.
+        self.assertIsNone(_parse_db_ts("2026-08-07 10:07:53").tzinfo)
+
+    def test_unparseable_returns_none(self):
+        for text in (None, "", "not-a-date", "2026-13-45 99:99:99"):
+            self.assertIsNone(_parse_db_ts(text), repr(text))
 
 
 class RetryAfterSecondsTest(unittest.TestCase):
