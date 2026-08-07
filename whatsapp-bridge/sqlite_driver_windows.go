@@ -70,16 +70,22 @@ func unaccentFunc(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Valu
 
 // openMessagesDB opens the read/write handle for messages.db.
 // _fk=on is modernc's spelling of mattn's _foreign_keys=on (verified: PRAGMA
-// foreign_keys reports 1 with this DSN).
+// foreign_keys reports 1 with this DSN). busy_timeout: transcribe.py writes
+// transcriptions into this same file, so two writers do compete.
 func openMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:store/messages.db?_fk=on")
+	return sql.Open("sqlite3", "file:store/messages.db?_fk=on&_pragma=busy_timeout(5000)")
 }
 
 // openUnaccentMessagesDB opens the second handle used by the read endpoints,
 // where search filters call unaccent(). Same driver, separate handle, so the
 // write path is untouched.
+//
+// busy_timeout is not optional here: while history sync is writing, a search
+// that scans enough rows loses the lock race and the endpoint returns
+// "database is locked (5) (SQLITE_BUSY)" as a 500 instead of waiting. Observed
+// on a live sync — list_messages/list_chats/search_contacts all fail that way.
 func openUnaccentMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_fk=on")
+	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_fk=on&_pragma=busy_timeout(5000)")
 }
 
 // openStoreDBReadOnly opens whatsmeow's own session/contacts database for
