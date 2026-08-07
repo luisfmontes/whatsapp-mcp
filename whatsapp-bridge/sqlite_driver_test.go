@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -140,6 +142,87 @@ func TestSQLiteLayer(t *testing.T) {
 		}
 		if qo != 1 {
 			t.Errorf("query_only = %d, want 1", qo)
+		}
+	}
+}
+
+// TestMessageStoreIndexes checks the schema NewMessageStore creates. It lives
+// next to the driver tests because both are about the storage layer, and because
+// an index is only worth anything if the planner actually picks it — existing in
+// sqlite_master is not the same as being used.
+func TestMessageStoreIndexes(t *testing.T) {
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore: %v", err)
+	}
+	defer store.Close()
+
+	for _, name := range []string{
+		"idx_messages_chat_time",
+		"idx_messages_audio_pending",
+		"idx_senders_names",
+	} {
+		var found string
+		err := store.db.QueryRow(
+			"SELECT name FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&found)
+		if err != nil {
+			t.Errorf("index %s not created: %v", name, err)
+		}
+	}
+
+	// The reads that matter must resolve through the index instead of scanning.
+	for _, tc := range []struct {
+		name  string
+		query string
+		args  []any
+		want  string
+	}{
+		{
+			name:  "mensagens de um chat, mais recentes primeiro",
+			query: "SELECT id FROM messages WHERE chat_jid=? ORDER BY timestamp DESC LIMIT 20",
+			args:  []any{"x@g.us"},
+			want:  "idx_messages_chat_time",
+		},
+		{
+			name:  "audios pendentes de transcricao",
+			query: "SELECT id FROM messages WHERE media_type='audio' AND (content IS NULL OR content='')",
+			args:  nil,
+			want:  "idx_messages_audio_pending",
+		},
+	} {
+		rows, err := store.db.Query("EXPLAIN QUERY PLAN "+tc.query, tc.args...)
+		if err != nil {
+			t.Fatalf("%s: explain: %v", tc.name, err)
+		}
+		var plan strings.Builder
+		cols, err := rows.Columns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			cells := make([]any, len(cols))
+			for i := range cells {
+				cells[i] = new(any)
+			}
+			if err := rows.Scan(cells...); err != nil {
+				t.Fatalf("%s: scan: %v", tc.name, err)
+			}
+			// The last column is the human-readable detail ("SEARCH ... USING INDEX ...").
+			fmt.Fprintf(&plan, "%v ", *(cells[len(cells)-1].(*any)))
+		}
+		rows.Close()
+		if !strings.Contains(plan.String(), tc.want) {
+			t.Errorf("%s: plano nao usa %s\n  plano: %s", tc.name, tc.want, plan.String())
 		}
 	}
 }
