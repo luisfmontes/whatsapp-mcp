@@ -37,6 +37,7 @@ _reversa_sdd/
 # path and port, so they are per-machine, not repository content.
 start-bridge.ps1
 start-bridge.sh
+start-bridge-hidden.vbs
 
 # Log do bridge na raiz: o start-bridge.ps1 escreve no INSTALL_DIR, que aqui e o
 # proprio clone. As entradas antigas so cobriam whatsapp-bridge/.
