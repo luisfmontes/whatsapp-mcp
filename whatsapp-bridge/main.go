@@ -24,7 +24,6 @@ import (
 	"time"
 	"unicode"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 	goqr "github.com/skip2/go-qrcode"
 	"golang.org/x/text/unicode/norm"
@@ -74,7 +73,7 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	db, err := openMessagesDB()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -1746,19 +1745,6 @@ func extractDirectPathFromURL(url string) string {
 // HTTP instead of opening the SQLite files directly.
 // ---------------------------------------------------------------------------
 
-// unaccentSQLiteDriver is a copy of the "sqlite3" driver with an extra
-// "unaccent" SQL scalar function registered on every new connection, mirroring
-// the Python side's conn.create_function("unaccent", 1, _strip_accents).
-// Registered once via init() so `sql.Open("sqlite3_unaccent", ...)` works
-// anywhere in this file without disturbing the existing messageStore.db handle.
-func init() {
-	sql.Register("sqlite3_unaccent", &sqlite3.SQLiteDriver{
-		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			return conn.RegisterFunc("unaccent", stripAccents, true)
-		},
-	})
-}
-
 // stripAccents lowercases a string and strips Unicode diacritics (NFD
 // decomposition, drop Mn category), matching Python's _strip_accents exactly
 // so LIKE-based search behaves the same regardless of accents/case.
@@ -1814,23 +1800,6 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
-}
-
-// openUnaccentMessagesDB opens a second connection to messages.db using the
-// unaccent-enabled driver, for the read endpoints below. Kept separate from
-// messageStore.db (which uses the plain "sqlite3" driver) to avoid touching
-// the existing write path.
-func openUnaccentMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on")
-}
-
-// openStoreDBReadOnly opens a read-only connection to whatsmeow's own
-// session/contacts database (store/whatsapp.db). whatsmeow's sqlstore.Container
-// doesn't expose raw SQL access, so reads needed for LID/contact resolution use
-// their own handle here. mode=ro avoids interfering with whatsmeow's writes;
-// _busy_timeout tolerates brief lock contention instead of failing immediately.
-func openStoreDBReadOnly() (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:store/whatsapp.db?mode=ro&_busy_timeout=5000")
 }
 
 // resolvePhoneToJIDs mirrors _resolve_phone_to_jids: returns every JID form
@@ -3354,7 +3323,7 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", storeDSN(), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
@@ -3465,10 +3434,17 @@ func main() {
 				}
 
 				// Also save to disk for convenience.
-				qrFile := "/tmp/whatsapp-qr.png"
-				if err := goqr.WriteFile(evt.Code, goqr.Medium, 512, qrFile); err == nil {
+				qrFile := filepath.Join(os.TempDir(), "whatsapp-qr.png")
+				if err := goqr.WriteFile(evt.Code, goqr.Medium, 512, qrFile); err != nil {
+					// Previously this failure was swallowed by `err == nil`, so on
+					// any OS where the path was unwritable the QR just never
+					// appeared and nothing said why.
+					fmt.Printf("\nCould not save QR image to %s: %v\n", qrFile, err)
+				} else {
 					fmt.Printf("\nQR also saved as image: %s\n", qrFile)
-					_ = exec.Command("open", qrFile).Start()
+					if err := openInDefaultApp(qrFile); err != nil {
+						fmt.Printf("Could not open it automatically (%v) — open the file, or use the /qr endpoint.\n", err)
+					}
 				}
 			} else if evt.Event == "success" {
 				qrState.Lock()
@@ -3806,7 +3782,7 @@ func startTranscriptionSweep(interval time.Duration) {
 		fmt.Printf("transcription sweep disabled: %v\n", err)
 		return
 	}
-	python := filepath.Join(pyDir, ".venv", "bin", "python3")
+	python := venvPython(pyDir)
 	script := filepath.Join(pyDir, "transcribe.py")
 	lockPath := filepath.Join(os.TempDir(), "wa_transcribe.lock")
 
@@ -3830,7 +3806,7 @@ func startTranscriptionSweep(interval time.Duration) {
 			// Skip if a previous sweep is still running.
 			if data, err := os.ReadFile(lockPath); err == nil {
 				if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil {
-					if proc, ferr := os.FindProcess(pid); ferr == nil && proc.Signal(syscall.Signal(0)) == nil {
+					if processAlive(pid) {
 						continue // prior sweep alive
 					}
 				}
