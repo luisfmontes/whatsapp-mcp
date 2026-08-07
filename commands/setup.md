@@ -8,7 +8,7 @@ Set up the WhatsApp bridge for this plugin. Follow the steps in order; do not sk
 
 Read `~/.claude.json` and list any `mcpServers` keys starting with `whatsapp` (e.g. `whatsapp`, `whatsapp-personal`). Also check for existing install dirs: `~/.whatsapp-mcp*`.
 
-- **None found** → this is a first install. Skip ahead to step 1, use defaults (`~/.whatsapp-mcp`, port 8080, server name `whatsapp`).
+- **None found** → this is a first install. Skip ahead to step 1, use defaults (`~/.whatsapp-mcp`, port 8080 on macOS/Linux or 8081 on Windows, server name `whatsapp`).
 - **One or more found** → ask the user with AskUserQuestion:
   - Question: "Found existing WhatsApp account(s): `<list the keys/dirs found>`. What do you want to do?"
   - Options: "Add another account" / "Reconfigure/reinstall an existing one" / "Cancel"
@@ -28,7 +28,9 @@ Verify all three before installing anything. If any is missing, STOP — report 
 
 ## 2. Run the installer with service mode
 
-Prefer the plugin's own copy — it always supports the flags. Set `WHATSAPP_MCP_DIR` and `WHATSAPP_BRIDGE_PORT` to the values resolved in step 0. If `${CLAUDE_PLUGIN_ROOT}/install.sh` exists, run:
+Prefer the plugin's own copy — it always supports the flags. Set `WHATSAPP_MCP_DIR` and `WHATSAPP_BRIDGE_PORT` to the values resolved in step 0.
+
+**On macOS/Linux (POSIX shell):** If `${CLAUDE_PLUGIN_ROOT}/install.sh` exists, run:
 
 ```bash
 WHATSAPP_MCP_DIR="<resolved INSTALL_DIR>" WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" \
@@ -45,7 +47,31 @@ grep -q -- '--service' /tmp/whatsapp-mcp-install.sh
 - If the grep matches: `WHATSAPP_MCP_DIR="<resolved INSTALL_DIR>" WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" bash /tmp/whatsapp-mcp-install.sh --service`
 - If it does NOT match: run without `--service` (same env vars), then start the bridge manually with `<INSTALL_DIR>/start-bridge.sh`, and warn the user that automatic service setup is not available until the published installer updates.
 
-Check the installer's output for `differs from generated plist/unit — not touching it` — this means a service already existed (e.g. from a prior install) and `--service` did NOT register a new one for this account, even though the flag was passed. Don't let this pass silently: tell the user explicitly that no service was created, the bridge is not yet running, and it needs to be started manually before continuing (`<INSTALL_DIR>/start-bridge.sh`, same command step 3 uses either way).
+**On Windows (PowerShell):** If `${CLAUDE_PLUGIN_ROOT}/install.ps1` exists, run:
+
+```powershell
+$env:WHATSAPP_MCP_DIR = "<resolved INSTALL_DIR>"
+$env:WHATSAPP_BRIDGE_PORT = "<resolved BRIDGE_PORT>"
+powershell -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/install.ps1" -Service
+```
+
+Otherwise download first and verify the script supports `-Service` before executing:
+
+```powershell
+$tempPath = "$env:TEMP/whatsapp-mcp-install.ps1"
+(New-Object System.Net.WebClient).DownloadFile("https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.ps1", $tempPath)
+Select-String -Path $tempPath -Pattern '\-Service' -Quiet
+```
+
+- If the script contains `-Service`: 
+```powershell
+$env:WHATSAPP_MCP_DIR = "<resolved INSTALL_DIR>"
+$env:WHATSAPP_BRIDGE_PORT = "<resolved BRIDGE_PORT>"
+powershell -ExecutionPolicy Bypass -File "$tempPath" -Service
+```
+- If it does NOT match: run without `-Service` (same env vars), then start the bridge manually with `<INSTALL_DIR>/start-bridge.ps1`, and warn the user that automatic service setup is not available until the published installer updates.
+
+Check the installer's output for `differs from generated plist/unit — not touching it` (macOS/Linux) or similar Task Scheduler warnings (Windows) — this means a service already existed (e.g. from a prior install) and the service flag did NOT register a new one for this account, even though the flag was passed. Don't let this pass silently: tell the user explicitly that no service was created, the bridge is not yet running, and it needs to be started manually before continuing. On macOS/Linux, run `<INSTALL_DIR>/start-bridge.sh`; on Windows, run `<INSTALL_DIR>/start-bridge.ps1`.
 
 If the installer reports this account's bridge port/process is already in use, that account's installation is already running — do not reinstall; continue to step 4.
 
@@ -57,11 +83,11 @@ uv --directory "<resolved INSTALL_DIR>/whatsapp-mcp-server" sync
 
 ## 3. Pair with WhatsApp
 
-Open `http://localhost:<resolved BRIDGE_PORT>/qr` in the user's default browser yourself (`open <url>` on macOS, `xdg-open` on Linux) — don't just print the URL and wait for them to open it. The page there already auto-refreshes every 20s with a fresh QR, so there's no need to save/serve a static PNG separately.
+Open `http://localhost:<resolved BRIDGE_PORT>/qr` in the user's default browser yourself (use `open <url>` on macOS, `xdg-open` on Linux, or `start <url>` on Windows) — don't just print the URL and wait for them to open it. The page there already auto-refreshes every 20s with a fresh QR, so there's no need to save/serve a static PNG separately.
 
 - The bridge listens on loopback only by design. On a headless/remote machine, `open`/`xdg-open` won't reach the user's actual browser — tell them to port-forward instead: `ssh -L <port>:localhost:<port> <host>` and open the URL locally themselves.
 
-Tell the user to scan it with WhatsApp (Settings → Linked Devices → Link a Device). Don't wait for them to say "done" — poll for it yourself: `curl -s http://localhost:<port>/qr` and check whether the response contains `WhatsApp connected` (the page's own success-state text) instead of the QR page. Poll every ~5s, up to the same 3-minute window the bridge itself waits before giving up on the pairing session (past that, tell the user the QR expired and to re-run this step — a fresh page load gets a new one).
+Tell the user to scan it with WhatsApp (Settings → Linked Devices → Link a Device). Don't wait for them to say "done" — poll for it yourself. On macOS/Linux, use `curl -s http://localhost:<port>/qr`; on Windows, use `(Invoke-WebRequest -Uri "http://localhost:<port>/qr" -UseBasicParsing).Content`. Check whether the response contains `WhatsApp connected` (the page's own success-state text) instead of the QR page. Poll every ~5s, up to the same 3-minute window the bridge itself waits before giving up on the pairing session (past that, tell the user the QR expired and to re-run this step — a fresh page load gets a new one).
 
 ## 4. Register the MCP server in Claude Code
 
@@ -84,7 +110,7 @@ Preserve every other existing entry in `mcpServers` — only add/replace this on
 Call `mcp__<SERVER_NAME>__search_contacts` with a short query. If it returns data (even an empty list without error), report setup as successful.
 
 If it fails:
-- Bridge not running? Check `pgrep -fa whatsapp-bridge` and report the error.
+- Bridge not running? On macOS/Linux, check `pgrep -fa whatsapp-bridge`; on Windows, check `Get-Process whatsapp-bridge -ErrorAction SilentlyContinue`. Report the error.
 - Bridge running but tools still fail? Likely a port mismatch — confirm `WHATSAPP_API_BASE_URL` in this server's `~/.claude.json` env matches the bridge's actual port.
 - Multiple accounts and this smoke test returns the wrong data (e.g. same chats as another account)? Do NOT proceed — that means two accounts are pointing at the same bridge port or install dir. Re-check step 0's resolved values before continuing.
 
@@ -123,14 +149,46 @@ export TRANSCRIPTION_API_MODEL=<model>
 
 Either engine: ask once, optionally, if they want `TRANSCRIPTION_PROMPT` set (biases transcription toward correct punctuation/domain terms — e.g. product names, jargon they use often). If a global `CLAUDE.md` or similar user profile is visible in this session and names a specific stack/domain (technologies, tools, jargon they work with), offer that as one of the AskUserQuestion options pre-filled — most users don't have their own jargon list top of mind, but recognize it instantly when it's already drafted from what they told Claude about themselves. Skip if they don't have anything specific in mind, don't push for an answer.
 
-Write the resulting `export VAR=value` lines to `<INSTALL_DIR>/transcription.env` — this file holds a live API key in plaintext, so create it with owner-only permissions from the start (e.g. `(umask 077; cat > "<INSTALL_DIR>/transcription.env" <<'EOF' ... EOF)`), not a default-mode write followed by a separate `chmod`. If the file already existed (reconfiguring), `chmod 600` it regardless of whether the content changed — an earlier install may have left it world-readable. `start-bridge.sh` already sources it if present — no other wiring needed. Tell the user transcription takes effect within ~5 minutes for new voice messages (the bridge's sweep interval).
+Write the resulting `export VAR=value` lines to `<INSTALL_DIR>/transcription.env` — this file holds a live API key in plaintext, so create it with owner-only permissions from the start.
 
-If there's any existing history synced (chats/messages already present — this is common, pairing pulls recent history), ask with AskUserQuestion whether to backfill transcriptions for existing audio now: "Yes, backfill now" / "Skip — I'll run it later". If yes, run it directly rather than just printing the command — `transcribe.py` does NOT auto-load `transcription.env` (only the bridge's own `start-bridge.sh` sources it), and it needs to know this account's actual bridge port to download audio (its own default is 8080, wrong for any account not on that port):
+**On macOS/Linux:** `(umask 077; cat > "<INSTALL_DIR>/transcription.env" <<'EOF' ... EOF)` (not a default-mode write followed by a separate `chmod`). If the file already existed (reconfiguring), `chmod 600` it regardless of whether the content changed.
+
+**On Windows:** Write the file, then restrict it to the owner by removing inherited permissions and granting only this account:
+
+```powershell
+icacls "<INSTALL_DIR>\transcription.env" /inheritance:r /grant:r "$($env:USERNAME):F"
+```
+
+(`/inheritance:r` drops the inherited ACEs — without it, groups that inherit from the parent folder keep read access, which is the Windows equivalent of leaving the file world-readable.)
+
+In both cases, `start-bridge.sh` (macOS/Linux) or `start-bridge.ps1` (Windows) already sources it if present — no other wiring needed. Tell the user transcription takes effect within ~5 minutes for new voice messages (the bridge's sweep interval).
+
+If there's any existing history synced (chats/messages already present — this is common, pairing pulls recent history), ask with AskUserQuestion whether to backfill transcriptions for existing audio now: "Yes, backfill now" / "Skip — I'll run it later". If yes, run it directly rather than just printing the command — `transcribe.py` does NOT auto-load `transcription.env` (only the bridge's own `start-bridge.sh`/`start-bridge.ps1` sources it), and it needs to know this account's actual bridge port to download audio (its own default is 8080, wrong for any account not on that port).
+
+**On macOS/Linux:**
 
 ```bash
 cd "<INSTALL_DIR>/whatsapp-mcp-server" && \
   set -a && source "<INSTALL_DIR>/transcription.env" && set +a && \
   WHATSAPP_BRIDGE_PORT="<resolved BRIDGE_PORT>" uv run transcribe.py
+```
+
+**On Windows:**
+
+```powershell
+$env:WHATSAPP_BRIDGE_PORT = "<resolved BRIDGE_PORT>"
+if (Test-Path "<INSTALL_DIR>/transcription.env") {
+  Get-Content "<INSTALL_DIR>/transcription.env" | ForEach-Object {
+    if ($_ -match '^\s*export\s+(\w+)=(.+)$') {
+      $varName = $matches[1]
+      $varValue = $matches[2] -replace '^["'']|["'']$'
+      Set-Item -Path "env:$varName" -Value $varValue
+    }
+  }
+}
+Push-Location "<INSTALL_DIR>/whatsapp-mcp-server"
+uv run transcribe.py
+Pop-Location
 ```
 
 If this bridge's `BIND_ADDR` is non-loopback (`API_AUTH_TOKEN` required — see the REST API section above), also export `WHATSAPP_API_AUTH_TOKEN=<that same token>` before running the command above, or the download call 401s.
