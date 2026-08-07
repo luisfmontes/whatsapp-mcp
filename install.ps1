@@ -267,6 +267,18 @@ if (Test-Path `$EnvFile) {
 Set-Content -Path $launchScript -Value $launchScriptContent -Encoding Ascii
 Write-Ok "Launch script: $launchScript"
 
+# Windows Terminal (the default terminal host on Windows 11) does not honor
+# -WindowStyle Hidden the way classic conhost.exe does - a visible blank window
+# pops up anyway. Wrap the launch in a VBScript that uses WScript.Shell.Run with
+# window style 0 (truly hidden), since wscript.exe is not a console host.
+$launchScriptHidden = Join-Path $InstallDir 'start-bridge-hidden.vbs'
+$vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$launchScript""", 0, False
+"@
+Set-Content -Path $launchScriptHidden -Value $vbsContent -Encoding Ascii
+Write-Ok "Hidden launcher: $launchScriptHidden"
+
 # ---------------------------------------------------------------------------
 # MCP client configuration
 # ---------------------------------------------------------------------------
@@ -349,7 +361,9 @@ if ($Service) {
     } else {
         Write-Info "Registering auto-start at logon..."
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launchScript`""
+        # Use wscript.exe (not powershell.exe -WindowStyle Hidden) to avoid the
+        # Windows Terminal visible-window issue: wscript.exe has no console host.
+        $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$launchScriptHidden`""
         # ExecutionTimeLimit Zero = no limit: the default kills a task after 3
         # days, which for a long-running bridge means a silent death mid-week.
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1))
