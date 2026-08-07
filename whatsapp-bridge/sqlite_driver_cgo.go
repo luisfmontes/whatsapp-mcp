@@ -22,17 +22,26 @@ func init() {
 }
 
 // openMessagesDB opens the main messages database for writing (main.go line 77).
-// Uses the plain "sqlite3" driver from mattn/go-sqlite3 with foreign key constraints enabled.
+// Uses the plain "sqlite3" driver from mattn/go-sqlite3 with foreign key
+// constraints enabled. busy_timeout: transcribe.py writes transcriptions into
+// this same file, so two writers do compete.
 func openMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	return sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 }
 
 // openUnaccentMessagesDB opens a read-only connection to messages.db with unaccent support.
 // Uses the registered "sqlite3_unaccent" driver that has the unaccent function available.
 // Kept separate from messageStore.db (which uses the plain "sqlite3" driver) to avoid
 // touching the existing write path.
+//
+// busy_timeout is not optional here: while history sync is writing, a search
+// that scans enough rows loses the lock race and the endpoint returns
+// "database is locked (5) (SQLITE_BUSY)" as a 500 instead of waiting. Observed
+// on a live sync — list_messages/list_chats/search_contacts all fail that way.
+// Not Windows-specific: the same race exists on macOS/Linux, it was simply
+// never exercised under a full history sync.
 func openUnaccentMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on")
+	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 }
 
 // openStoreDBReadOnly opens a read-only connection to whatsmeow's session/contacts database.
