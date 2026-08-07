@@ -7,6 +7,16 @@ whatsapp-bridge/whatsapp-bridge
 whatsapp-bridge/whatsapp-client
 whatsapp-bridge/whatsapp-bridge.exe
 whatsapp-bridge/whatsapp-client.exe
+# go build leaves a .exe~ behind when the target is locked by a running bridge.
+*.exe~
+
+# The WhatsApp session and everything synced from it: messages, contacts and
+# downloaded media. *.db already covered the databases, but the media
+# subdirectories were not — and this is the user's private conversation data.
+whatsapp-bridge/store/
+
+# Worktrees created by subagents inside the repo.
+.claude/worktrees/
 whatsapp-bridge/transcription.env
 whatsapp-bridge-personal/
 

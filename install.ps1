@@ -227,15 +227,28 @@ Set-Location `$BridgeDir
 # Transcription is opt-in. Task Scheduler does NOT inherit the environment of an
 # interactive shell, so the engine variables have to be loaded here for the
 # auto-start to see them - the same reason start-bridge.sh sources this file.
-# Create transcription.env next to this script with KEY=VALUE lines
-# (TRANSCRIPTION_ENGINE, TRANSCRIPTION_API_KEY, WHISPER_CLI/WHISPER_MODEL, ...).
+# Create transcription.env next to this script with the same syntax the POSIX
+# side uses (TRANSCRIPTION_ENGINE, TRANSCRIPTION_API_KEY, WHISPER_CLI, ...).
+#
+# The file is written for `source` on macOS/Linux, so its lines normally start
+# with `export`. That prefix has to be stripped here: without it the variable
+# would be created as "export TRANSCRIPTION_ENGINE" and the bridge would never
+# see the setting. Plain KEY=VALUE lines work too.
 if (Test-Path `$EnvFile) {
     foreach (`$line in Get-Content `$EnvFile) {
         `$entry = `$line.Trim()
         if (`$entry -and -not `$entry.StartsWith('#')) {
+            `$entry = `$entry -replace '^export\s+', ''
             `$kv = `$entry -split '=', 2
             if (`$kv.Count -eq 2) {
-                [Environment]::SetEnvironmentVariable(`$kv[0].Trim(), `$kv[1].Trim().Trim('"'), 'Process')
+                `$value = `$kv[1].Trim()
+                # Strip one layer of matching quotes, as `source` would.
+                if (`$value.Length -ge 2) {
+                    if ((`$value.StartsWith('"') -and `$value.EndsWith('"')) -or (`$value.StartsWith("'") -and `$value.EndsWith("'"))) {
+                        `$value = `$value.Substring(1, `$value.Length - 2)
+                    }
+                }
+                [Environment]::SetEnvironmentVariable(`$kv[0].Trim(), `$value, 'Process')
             }
         }
     }
