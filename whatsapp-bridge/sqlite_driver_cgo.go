@@ -10,8 +10,20 @@ import (
 
 // init registers the "sqlite3_unaccent" driver on non-Windows platforms.
 // This driver wraps the mattn/go-sqlite3 driver and registers the "unaccent"
-// SQL scalar function on every new connection, mirroring the Python side's
+// SQL scalar function on every new connection, as the Python side does with
 // conn.create_function("unaccent", 1, _strip_accents).
+//
+// Known divergence from the Windows implementation, carried over unchanged from
+// the original code: because stripAccents takes a string, mattn's argument
+// conversion (callbackArgString) accepts only TEXT and BLOB and returns
+// "argument must be BLOB or TEXT" for anything else — so unaccent(NULL) fails
+// the whole query here, while sqlite_driver_windows.go returns NULL for NULL
+// (which is also what Python's _strip_accents does). It does not fire today
+// because the bridge writes an empty string rather than NULL into chats.name and
+// messages.content, but a NULL in either column would break list_chats and text
+// search on macOS/Linux only. Registering a func(any) wrapper would align both
+// sides; that changes the CGO runtime path, so it is a deliberate open decision
+// rather than an oversight.
 func init() {
 	sql.Register("sqlite3_unaccent", &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
