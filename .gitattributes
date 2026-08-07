@@ -1,0 +1,20 @@
+# Line endings are normalised to LF in the repository. Without this, a commit
+# made from a Windows checkout (where core.autocrlf rewrites files to CRLF) can
+# ship CRLF shell scripts — and a CRLF install.sh or start-bridge.sh fails on
+# macOS/Linux with "bad interpreter: no such file or directory".
+* text=auto eol=lf
+
+# Scripts that MUST keep LF regardless of local settings.
+*.sh text eol=lf
+*.py text eol=lf
+*.go text eol=lf
+
+# Windows-only scripts are the mirror case: PowerShell and batch tolerate LF,
+# but keeping CRLF avoids surprises in editors that respect the platform.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets — never touch.
+*.png binary
+*.db binary
