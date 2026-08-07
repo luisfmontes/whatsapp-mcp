@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"runtime"
 	"testing"
@@ -47,7 +48,10 @@ func TestSQLiteLayer(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE t (name TEXT)`); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO t VALUES ('Ação'), ('SÃO PAULO'), ('Luís')`); err != nil {
+	// The NULL row is the point of this fixture, not padding: chats.name and
+	// messages.content are nullable TEXT and are exactly what the search
+	// endpoints pass to unaccent().
+	if _, err := db.Exec(`INSERT INTO t VALUES ('Ação'), ('SÃO PAULO'), ('Luís'), (NULL)`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	db.Close()
@@ -85,6 +89,23 @@ func TestSQLiteLayer(t *testing.T) {
 			t.Errorf("pattern %s matched %d rows, want %d (%s)", tc.pattern, n, tc.want, tc.proves)
 		}
 	}
+	// NULL must not blow up the query. Registering a string-only function makes
+	// the CGO driver reject a NULL argument outright ("argument must be BLOB or
+	// TEXT"), which took down list_chats and text search on macOS/Linux while
+	// working on Windows. The two halves spell the result differently — NULL on
+	// Windows, empty string under CGO — so assert what actually matters: no
+	// error, and no spurious match.
+	var nullFolded sql.NullString
+	if err := rdb.QueryRow(`SELECT unaccent(NULL)`).Scan(&nullFolded); err != nil {
+		t.Errorf("unaccent(NULL) errored: %v", err)
+	}
+	var nullRowMatches int
+	if err := rdb.QueryRow(`SELECT count(*) FROM t WHERE name IS NULL AND unaccent(name) LIKE unaccent(?)`, "%a%").Scan(&nullRowMatches); err != nil {
+		t.Errorf("search over a NULL row errored: %v", err)
+	} else if nullRowMatches != 0 {
+		t.Errorf("NULL row matched a LIKE pattern %d times, want 0", nullRowMatches)
+	}
+
 	rdb.Close()
 
 	// --- read-only handle on whatsmeow's own database ----------------------

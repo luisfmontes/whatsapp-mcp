@@ -4,6 +4,8 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
+	"strconv"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
@@ -13,23 +15,47 @@ import (
 // SQL scalar function on every new connection, as the Python side does with
 // conn.create_function("unaccent", 1, _strip_accents).
 //
-// Known divergence from the Windows implementation, carried over unchanged from
-// the original code: because stripAccents takes a string, mattn's argument
-// conversion (callbackArgString) accepts only TEXT and BLOB and returns
-// "argument must be BLOB or TEXT" for anything else — so unaccent(NULL) fails
-// the whole query here, while sqlite_driver_windows.go returns NULL for NULL
-// (which is also what Python's _strip_accents does). It does not fire today
-// because the bridge writes an empty string rather than NULL into chats.name and
-// messages.content, but a NULL in either column would break list_chats and text
-// search on macOS/Linux only. Registering a func(any) wrapper would align both
-// sides; that changes the CGO runtime path, so it is a deliberate open decision
-// rather than an oversight.
+// The registered function takes `any`, not `string`, on purpose. Registering
+// stripAccents directly routes NULL through mattn's callbackArgString, which
+// accepts only TEXT and BLOB and fails the whole query with "argument must be
+// BLOB or TEXT" — so a single NULL in chats.name or messages.content used to
+// break list_chats and text search on macOS/Linux (and only there: the pure-Go
+// driver propagates NULL fine). With `any`, mattn's callbackArgGeneric hands
+// NULL over as a nil []byte and unaccentArg folds it to an empty string.
 func init() {
 	sql.Register("sqlite3_unaccent", &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			return conn.RegisterFunc("unaccent", stripAccents, true)
+			return conn.RegisterFunc("unaccent", unaccentArg, true)
 		},
 	})
+}
+
+// unaccentArg adapts stripAccents to SQLite's dynamic typing, mirroring
+// unaccentFunc in sqlite_driver_windows.go.
+//
+// One deliberate difference from the Windows half: NULL returns an empty string
+// here instead of NULL, because a string return maps to TEXT while returning a
+// nil []byte to represent NULL would make the value a BLOB — and `unaccent(x)
+// LIKE unaccent(?)` over a BLOB does not compare as text. Both spellings behave
+// identically for every LIKE pattern the search endpoints build (a NULL row
+// never matches), and neither errors.
+func unaccentArg(v any) string {
+	switch value := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return stripAccents(value)
+	case []byte:
+		// Also the NULL case: callbackArgGeneric represents SQLITE_NULL as a nil
+		// byte slice, and string(nil) is "".
+		return stripAccents(string(value))
+	case int64:
+		return stripAccents(strconv.FormatInt(value, 10))
+	case float64:
+		return stripAccents(strconv.FormatFloat(value, 'g', -1, 64))
+	default:
+		return stripAccents(fmt.Sprintf("%v", value))
+	}
 }
 
 // openMessagesDB opens the main messages database for writing (main.go line 77).

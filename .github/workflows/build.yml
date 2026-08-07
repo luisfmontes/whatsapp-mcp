@@ -1,0 +1,102 @@
+name: build
+
+# The SQLite layer is split by build tag: mattn/go-sqlite3 (CGO) on macOS/Linux,
+# modernc.org/sqlite (pure Go) on Windows. A local `go build` therefore compiles
+# only one of the two halves, and a compile error in the other one passes every
+# check on the developer's machine — that is exactly how an unused import once
+# shipped a broken macOS/Linux build from a Windows checkout. This workflow is
+# the guarantee that cannot be forgotten.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    name: bridge (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platforms: knowing whether a failure is
+      # platform-specific is the whole point.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cgo: '1'
+          - os: macos-latest
+            cgo: '1'
+          # Windows must build with CGO off — that is the supported path there,
+          # and it proves no C toolchain is needed.
+          - os: windows-latest
+            cgo: '0'
+    defaults:
+      run:
+        working-directory: whatsapp-bridge
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # Runs TestSQLiteLayer on both driver implementations: foreign keys, the
+      # unaccent() SQL function (including the NULL argument that used to fail
+      # under CGO only), and read-only enforcement.
+      - name: test
+        run: go test ./...
+
+  gofmt:
+    # Linux only: the Windows runner checks out with CRLF, which gofmt reports as
+    # unformatted for every file, so running this on all three would be noise.
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: whatsapp-bridge/go.sum
+      - name: gofmt -l
+        working-directory: whatsapp-bridge
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+  mcp-server:
+    name: mcp server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: whatsapp-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: whatsapp-mcp-server/uv.lock
+
+      - name: sync
+        run: uv sync
+
+      # These cover the path-resolution logic, where a POSIX-only assumption
+      # (comparing against a "/"-separated suffix) already slipped through once.
+      - name: unittest
+        run: uv run python -m unittest discover -p "test_*.py"
