@@ -88,7 +88,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v9
+      # Versao exata, nao alias de major: astral-sh/setup-uv publica tag movel
+      # apenas ate v7 (v8 e v9 existem so como versao completa), e apontar para
+      # @v9 falha na resolucao da action, no passo "Set up job".
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: whatsapp-mcp-server/uv.lock
