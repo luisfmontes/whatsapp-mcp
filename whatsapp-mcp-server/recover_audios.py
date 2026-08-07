@@ -18,6 +18,7 @@ import glob
 import os
 import re
 import sqlite3
+import tempfile
 import time
 
 import requests
@@ -25,7 +26,13 @@ import requests
 from transcribe import (DB_PATH, API_BASE, transcribe, write_content,
                         engine_ready, SENTINEL_EMPTY, _bridge_auth_headers)
 
-BRIDGE_LOG = os.environ.get("WHATSAPP_BRIDGE_LOG", "/tmp/wa-bridge.log")
+BRIDGE_LOG = os.environ.get(
+    "WHATSAPP_BRIDGE_LOG",
+    # tempfile.gettempdir() instead of a literal /tmp: on Windows the literal
+    # resolves to C:\tmp, which does not exist, so the log was never found and
+    # recovery silently had nothing to work with.
+    os.path.join(tempfile.gettempdir(), "wa-bridge.log"),
+)
 SENTINEL_NOT_ON_PHONE = "[áudio indisponível: não está mais no telefone]"
 
 # These must stay in sync with the stable log contract emitted by

@@ -57,8 +57,20 @@ def _bridge_auth_headers():
 TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local").lower()
 
 # Local backend (whisper.cpp)
-WHISPER_CLI = os.environ.get("WHISPER_CLI", "/Users/rodrigo/git/whisper.cpp/build/bin/whisper-cli")
+# Resolution order: explicit env var, then whatever is on PATH (which is how a
+# Windows/Linux install of whisper.cpp is normally reachable — and shutil.which
+# handles the .exe suffix), then the original author's local build path so his
+# existing macOS install keeps working with no env changes.
+_WHISPER_CLI_FALLBACK = "/Users/rodrigo/git/whisper.cpp/build/bin/whisper-cli"
+WHISPER_CLI = os.environ.get("WHISPER_CLI") or shutil.which("whisper-cli") or _WHISPER_CLI_FALLBACK
+# No PATH equivalent for a model file: without WHISPER_MODEL set, the local
+# engine simply reports itself unconfigured (see engine_ready) instead of
+# pretending to work. On Windows, prefer TRANSCRIPTION_ENGINE=api.
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "/Users/rodrigo/PyCharmMiscProject/models/ggml-medium.bin")
+# ffmpeg is assumed to be on PATH; FFMPEG_BIN overrides it with an absolute path
+# for installs where it is not (common on Windows, where installers frequently
+# skip the PATH entry).
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 DECODING_OPTS = ["--temperature", "0", "--no-fallback", "--max-context", "0", "--split-on-word"]
 
 # API backend (OpenAI Whisper, or any OpenAI-compatible endpoint such as Groq).
@@ -88,8 +100,8 @@ def engine_ready():
             return False, f"local engine: whisper-cli not found at {WHISPER_CLI}"
         if not os.path.exists(WHISPER_MODEL):
             return False, f"local engine: model not found at {WHISPER_MODEL}"
-        if not shutil.which("ffmpeg"):
-            return False, "local engine: ffmpeg not found"
+        if not (shutil.which(FFMPEG_BIN) or os.path.isfile(FFMPEG_BIN)):
+            return False, f"local engine: ffmpeg not found ({FFMPEG_BIN}) — set FFMPEG_BIN or add it to PATH"
         return True, "local"
     if TRANSCRIPTION_ENGINE == "api":
         if not TRANSCRIPTION_API_KEY:
@@ -170,7 +182,7 @@ def _transcribe_local(ogg_path, message_id):
     wav = os.path.join(tmpdir, "audio.wav")
     out_base = os.path.join(tmpdir, "out")
     try:
-        subprocess.run(["ffmpeg", "-i", ogg_path, "-ar", "16000", "-ac", "1",
+        subprocess.run([FFMPEG_BIN, "-i", ogg_path, "-ar", "16000", "-ac", "1",
                         "-c:a", "pcm_s16le", "-y", wav],
                        check=True, capture_output=True)
         cmd = [WHISPER_CLI, "-m", WHISPER_MODEL, "-l", "pt", "-oj", "-of", out_base,

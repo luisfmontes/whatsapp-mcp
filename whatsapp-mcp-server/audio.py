@@ -2,6 +2,11 @@ import os
 import subprocess
 import tempfile
 
+# ffmpeg is assumed to be on PATH; FFMPEG_BIN overrides it with an absolute path
+# for installs where it is not (common on Windows, where installers frequently
+# skip the PATH entry). Same knob transcribe.py uses.
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
+
 def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate=24000):
     """
     Convert an audio file to Opus format in an Ogg container.
@@ -34,7 +39,7 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
     
     # Build the ffmpeg command
     cmd = [
-        "ffmpeg",
+        FFMPEG_BIN,
         "-i", input_file,
         "-c:a", "libopus",
         "-b:a", bitrate,
