@@ -590,3 +590,321 @@ func TestMergeIsOnWhatsAppResults(t *testing.T) {
 		}
 	})
 }
+
+// T004 — Gap #12 tests
+
+// TestHandleGroupInviteLink covers /api/group_invite_link request validation:
+// method guard, decode guard, group_jid @g.us guard, and 503 disconnected.
+func TestHandleGroupInviteLink(t *testing.T) {
+	handler := handleGroupInviteLink(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing group_jid returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupInviteLinkRequest{Reset: false})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("group_jid not @g.us returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupInviteLinkRequest{GroupJID: "5562999999999@s.whatsapp.net", Reset: false})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleGroupInviteInfo covers /api/group_invite_info request validation.
+func TestHandleGroupInviteInfo(t *testing.T) {
+	handler := handleGroupInviteInfo(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing link returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupInviteInfoRequest{})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleJoinGroup covers /api/join_group_with_link request validation.
+func TestHandleJoinGroup(t *testing.T) {
+	handler := handleJoinGroup(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing link returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(JoinGroupRequest{})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleGroupSettings covers /api/group_settings request validation.
+func TestHandleGroupSettings(t *testing.T) {
+	handler := handleGroupSettings(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing group_jid returns 400", func(t *testing.T) {
+		name := "test"
+		body, _ := json.Marshal(GroupSettingsRequest{Name: &name})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("group_jid not @g.us returns 400", func(t *testing.T) {
+		name := "test"
+		body, _ := json.Marshal(GroupSettingsRequest{GroupJID: "5562999999999@s.whatsapp.net", Name: &name})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("no fields present returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupSettingsRequest{GroupJID: "123456@g.us"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleGroupPhoto covers /api/group_photo request validation.
+func TestHandleGroupPhoto(t *testing.T) {
+	handler := handleGroupPhoto(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing group_jid returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupPhotoRequest{Remove: false, MediaPath: "a.jpg"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("group_jid not @g.us returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupPhotoRequest{GroupJID: "5562999999999@s.whatsapp.net", Remove: false, MediaPath: "a.jpg"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("remove=true with media_path returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupPhotoRequest{GroupJID: "123456@g.us", Remove: true, MediaPath: "a.jpg"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("remove=false without media_path returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(GroupPhotoRequest{GroupJID: "123456@g.us", Remove: false, MediaPath: ""})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleUserInfo covers /api/user_info request validation.
+func TestHandleUserInfo(t *testing.T) {
+	handler := handleUserInfo(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing jids returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(UserInfoRequest{})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("too many jids returns 400", func(t *testing.T) {
+		jids := make([]string, 21)
+		for i := 0; i < 21; i++ {
+			jids[i] = "5562999999999@s.whatsapp.net"
+		}
+		body, _ := json.Marshal(UserInfoRequest{JIDs: jids})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestHandleProfilePicture covers /api/profile_picture request validation.
+func TestHandleProfilePicture(t *testing.T) {
+	handler := handleProfilePicture(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("missing jid returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(ProfilePictureRequest{})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("jid with invalid server returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(ProfilePictureRequest{JID: "5562999999999@invalid.server"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+// TestMergeUserInfoResults ensures output has one result per input query in order,
+// with Found:false for omissions.
+func TestMergeUserInfoResults(t *testing.T) {
+	t.Run("output order matches input order", func(t *testing.T) {
+		queries := []string{"5562000000001@s.whatsapp.net", "5562000000002@s.whatsapp.net", "5562000000003@s.whatsapp.net"}
+		userInfoMap := make(map[types.JID]types.UserInfo)
+		jid2, _ := types.ParseJID("5562000000002@s.whatsapp.net")
+		userInfoMap[jid2] = types.UserInfo{Status: "Hello"}
+
+		results := mergeUserInfoResults(queries, userInfoMap)
+		if len(results) != 3 {
+			t.Fatalf("got %d results, want 3", len(results))
+		}
+		if results[0].Query != queries[0] || results[0].Found {
+			t.Fatalf("results[0] should be unfound for %q", queries[0])
+		}
+		if results[1].Query != queries[1] || !results[1].Found {
+			t.Fatalf("results[1] should be found for %q", queries[1])
+		}
+		if results[1].Status != "Hello" {
+			t.Fatalf("results[1].Status = %q, want 'Hello'", results[1].Status)
+		}
+		if results[2].Query != queries[2] || results[2].Found {
+			t.Fatalf("results[2] should be unfound for %q", queries[2])
+		}
+	})
+
+	// Regression: whatsmeow's usync calls jid.ToNonAD() before querying, so the
+	// map it returns is keyed without device/agent. A caller passing an
+	// AD-qualified JID (e.g. copied from a group message sender) must still be
+	// correlated, instead of being reported as Found:false for a user WhatsApp
+	// did resolve.
+	t.Run("AD-qualified query matches non-AD map key", func(t *testing.T) {
+		queries := []string{"5562000000001:26@s.whatsapp.net"}
+		nonAD, _ := types.ParseJID("5562000000001@s.whatsapp.net")
+		userInfoMap := map[types.JID]types.UserInfo{nonAD: {Status: "Hello"}}
+
+		results := mergeUserInfoResults(queries, userInfoMap)
+		if len(results) != 1 {
+			t.Fatalf("got %d results, want 1", len(results))
+		}
+		if !results[0].Found {
+			t.Fatalf("AD-qualified query %q was not correlated with its non-AD map key", queries[0])
+		}
+		if results[0].Status != "Hello" {
+			t.Fatalf("results[0].Status = %q, want 'Hello'", results[0].Status)
+		}
+		if results[0].Query != queries[0] {
+			t.Fatalf("results[0].Query = %q, want the caller's original %q", results[0].Query, queries[0])
+		}
+		if results[0].JID != nonAD.String() {
+			t.Fatalf("results[0].JID = %q, want the resolved non-AD JID %q", results[0].JID, nonAD.String())
+		}
+	})
+}

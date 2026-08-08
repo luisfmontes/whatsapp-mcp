@@ -25,7 +25,14 @@ from whatsapp import (
     delete_message as whatsapp_delete_message,
     update_group_participants as whatsapp_update_group_participants,
     send_chat_presence as whatsapp_send_chat_presence,
-    check_whatsapp as whatsapp_check_whatsapp
+    check_whatsapp as whatsapp_check_whatsapp,
+    get_group_invite_link as whatsapp_get_group_invite_link,
+    get_group_invite_info as whatsapp_get_group_invite_info,
+    join_group_with_link as whatsapp_join_group_with_link,
+    update_group_settings as whatsapp_update_group_settings,
+    set_group_photo as whatsapp_set_group_photo,
+    get_user_info as whatsapp_get_user_info,
+    get_profile_picture as whatsapp_get_profile_picture
 )
 
 # Initialize FastMCP server
@@ -342,10 +349,19 @@ def mark_chat_as_unread(chat_jid: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_group_info(jid: str) -> Dict[str, Any]:
-    """Get a WhatsApp group's name and participant list.
+    """Get a WhatsApp group's name, topic, participant list and admin-only flags.
 
     Args:
         jid: The group JID (e.g. 120363012345678901@g.us)
+
+    Returns:
+        {"success", "message", "name", "topic", "participants",
+         "is_locked" (only admins can edit group info),
+         "is_announce" (only admins can send messages)}
+
+    Note: This is the way to read back what update_group_settings wrote.
+    get_group_invite_info cannot be used for that — the invite-link response
+    carries no locked/announce data, so it always reports both as false.
     """
     success, message, info = whatsapp_get_group_info(jid)
     result: Dict[str, Any] = {"success": success, "message": message}
@@ -536,6 +552,191 @@ def check_whatsapp(phones: List[str]) -> Dict[str, Any]:
         "message": message,
         "results": results
     }
+
+
+
+
+@mcp.tool()
+def get_group_invite_link(group_jid: str, reset: bool = False) -> Dict[str, Any]:
+    """Get invite link for a WhatsApp group.
+
+    Args:
+        group_jid: The JID of the group (must end with @g.us)
+        reset: If True, revoke the old link; anyone with it loses access
+
+    Returns:
+        {"success": bool, "message": str, "link": str}
+
+    Note: reset=True revokes the old link; anyone with it loses access.
+    """
+    success, message, link = whatsapp_get_group_invite_link(group_jid, reset)
+    return {"success": success, "message": message, "link": link}
+
+
+@mcp.tool()
+def get_group_invite_info(link: str) -> Dict[str, Any]:
+    """Get group information from an invite link.
+
+    Args:
+        link: The group invite link (full URL or code only)
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "jid"?: str,
+            "name"?: str,
+            "topic"?: str,
+            "participants"?: [str]
+        }
+
+    Note: Read-only — this does NOT join the group. Use it before
+    join_group_with_link to see what the link points to.
+
+    Note: No locked/announce data here — WhatsApp does not include those flags
+    in an invite-link lookup. Read them with get_group_info instead.
+    """
+    success, message, info = whatsapp_get_group_invite_info(link)
+    result = {"success": success, "message": message}
+    if info:
+        result.update(info)
+    return result
+
+
+@mcp.tool()
+def join_group_with_link(link: str) -> Dict[str, Any]:
+    """Join a WhatsApp group using an invite link.
+
+    Args:
+        link: The group invite link (full URL or code only)
+
+    Returns:
+        {"success": bool, "message": str, "jid"?: str}
+
+    Note: This actually joins. If the group requires admin approval, the call
+    succeeds as a pending membership request rather than immediate membership.
+    """
+    success, message, jid = whatsapp_join_group_with_link(link)
+    return {"success": success, "message": message, "jid": jid}
+
+
+@mcp.tool()
+def update_group_settings(
+    group_jid: str,
+    name: Optional[str] = None,
+    topic: Optional[str] = None,
+    announce: Optional[bool] = None,
+    locked: Optional[bool] = None
+) -> Dict[str, Any]:
+    """Update WhatsApp group settings.
+
+    Args:
+        group_jid: The JID of the group (must end with @g.us)
+        name: New group name (or None to skip)
+        topic: New group topic (or None to skip; "" to clear)
+        announce: True=only admins post, False=everyone posts (or None to skip)
+        locked: True=closed group, False=open (or None to skip)
+
+    Returns:
+        {
+            "success": bool (true only if ALL requested fields applied),
+            "message": str,
+            "results"?: [{"field": str, "success": bool, "error"?: str}, ...]
+        }
+
+    Note: An omitted field is left unchanged, so topic="" is not "skip" — it
+    CLEARS the group topic. The result is per field and can be partial: one
+    field may fail (e.g. not an admin) while the others apply, so check
+    results[] rather than success alone. Most fields require you to be admin.
+    """
+    success, message, results = whatsapp_update_group_settings(group_jid, name, topic, announce, locked)
+    return {"success": success, "message": message, "results": results}
+
+
+@mcp.tool()
+def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) -> Dict[str, Any]:
+    """Set or remove the group profile photo.
+
+    Args:
+        group_jid: The JID of the group (must end with @g.us)
+        media_path: Path to JPEG file on bridge host (ignored if remove=True)
+        remove: If True, remove the current photo
+
+    Returns:
+        {"success": bool, "message": str, "picture_id"?: str}
+
+    Note: media_path is read by the bridge process, so it must exist on the
+    bridge's host filesystem, not the caller's. JPEG only. remove=True clears
+    the photo and ignores media_path.
+    """
+    success, message, picture_id = whatsapp_set_group_photo(group_jid, media_path, remove)
+    return {"success": success, "message": message, "picture_id": picture_id}
+
+
+@mcp.tool()
+def get_user_info(jids: List[str]) -> Dict[str, Any]:
+    """Get user information for one or more WhatsApp users.
+
+    Args:
+        jids: List of JIDs or phone numbers (max 20 per call)
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "results"?: [
+                {
+                    "query": str (parsed JID),
+                    "jid"?: str,
+                    "found": bool,
+                    "status"?: str,
+                    "picture_id"?: str,
+                    "verified_name"?: str,
+                    "lid"?: str,
+                    "devices"?: [str]
+                },
+                ...
+            ]
+        }
+
+    Note: Max 20 per call.
+
+    Note: found=true does NOT mean the number is registered on WhatsApp — it
+    only means WhatsApp returned a node for it. An unregistered number comes
+    back found=true with an empty status and devices=[]. To check whether a
+    number actually has WhatsApp, use check_whatsapp, which answers that
+    directly. Observed behavior, not inferred.
+    """
+    success, message, results = whatsapp_get_user_info(jids)
+    return {"success": success, "message": message, "results": results}
+
+
+@mcp.tool()
+def get_profile_picture(jid: str, preview: bool = False) -> Dict[str, Any]:
+    """Get profile picture information for a user or group.
+
+    Args:
+        jid: JID of user or group
+        preview: If True, get a smaller preview image
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "url"?: str (download URL, not the image itself),
+            "id"?: str,
+            "type"?: str,
+            "direct_path"?: str
+        }
+
+    Note: Returns URL for download, not the image; success=false is normal when 
+    no photo or hidden by privacy; accepts group JID.
+    """
+    success, message, info = whatsapp_get_profile_picture(jid, preview)
+    result = {"success": success, "message": message}
+    if info:
+        result.update(info)
+    return result
 
 
 if __name__ == "__main__":
