@@ -1845,15 +1845,23 @@ func mergeIsOnWhatsAppResults(queries []string, resp []types.IsOnWhatsAppRespons
 // unregistered users) with the original query list, so the API always returns
 // exactly one result per input JID, in input order, with Found:false filled in
 // for omissions.
+//
+// The lookup key is ToNonAD: Client.GetUserInfo delegates to usync, which calls
+// jid.ToNonAD() before building the query node, so the returned map is always
+// keyed without device/agent. Indexing it with an AD-qualified JID (a caller
+// can legitimately pass "5511999999999:26@s.whatsapp.net") would miss every
+// time and report Found:false for a user WhatsApp actually resolved. Query
+// still echoes the caller's original string so they can correlate.
 func mergeUserInfoResults(queries []string, userInfoMap map[types.JID]types.UserInfo) []UserInfoResult {
 	out := make([]UserInfoResult, 0, len(queries))
 	for _, q := range queries {
-		jid, err := types.ParseJID(q)
+		parsed, err := types.ParseJID(q)
 		if err != nil {
 			// Query should already be validated, but be defensive
 			out = append(out, UserInfoResult{Query: q, Found: false})
 			continue
 		}
+		jid := parsed.ToNonAD()
 		info, found := userInfoMap[jid]
 		if !found {
 			out = append(out, UserInfoResult{Query: q, Found: false})

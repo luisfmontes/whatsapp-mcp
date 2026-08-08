@@ -879,4 +879,32 @@ func TestMergeUserInfoResults(t *testing.T) {
 			t.Fatalf("results[2] should be unfound for %q", queries[2])
 		}
 	})
+
+	// Regression: whatsmeow's usync calls jid.ToNonAD() before querying, so the
+	// map it returns is keyed without device/agent. A caller passing an
+	// AD-qualified JID (e.g. copied from a group message sender) must still be
+	// correlated, instead of being reported as Found:false for a user WhatsApp
+	// did resolve.
+	t.Run("AD-qualified query matches non-AD map key", func(t *testing.T) {
+		queries := []string{"5562000000001:26@s.whatsapp.net"}
+		nonAD, _ := types.ParseJID("5562000000001@s.whatsapp.net")
+		userInfoMap := map[types.JID]types.UserInfo{nonAD: {Status: "Hello"}}
+
+		results := mergeUserInfoResults(queries, userInfoMap)
+		if len(results) != 1 {
+			t.Fatalf("got %d results, want 1", len(results))
+		}
+		if !results[0].Found {
+			t.Fatalf("AD-qualified query %q was not correlated with its non-AD map key", queries[0])
+		}
+		if results[0].Status != "Hello" {
+			t.Fatalf("results[0].Status = %q, want 'Hello'", results[0].Status)
+		}
+		if results[0].Query != queries[0] {
+			t.Fatalf("results[0].Query = %q, want the caller's original %q", results[0].Query, queries[0])
+		}
+		if results[0].JID != nonAD.String() {
+			t.Fatalf("results[0].JID = %q, want the resolved non-AD JID %q", results[0].JID, nonAD.String())
+		}
+	})
 }
