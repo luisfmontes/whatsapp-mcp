@@ -297,9 +297,24 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 | `send_file` | Send image, video, document, or audio file |
 | `send_audio_message` | Send audio as a WhatsApp voice message |
 | `download_media` | Download media from a message, get local path |
+| `mark_chat_as_read` | Mark a chat as read |
+| `mark_chat_as_unread` | Mark a chat as unread |
+| `archive_chat` | Archive or unarchive a chat |
+| `resolve_contact` | Resolve a phone number or QR link to a JID |
+| `react_to_message` | React to a message with an emoji |
+| `edit_message` | Edit the text of a message you sent |
+| `delete_message` | Delete a message for everyone (revoke) |
 | `create_group` | Create a new WhatsApp group |
 | `leave_group` | Leave a group |
+| `get_group_info` | Group name and participant list |
 | `update_group_participants` | Add/remove/promote/demote group members |
+| `update_group_settings` | Set group name, topic, announce-only, or locked mode |
+| `set_group_photo` | Set or remove the group photo |
+| `get_group_invite_link` | Get the group invite link (optionally revoking the old one) |
+| `get_group_invite_info` | Inspect an invite link without joining |
+| `join_group_with_link` | Join a group from an invite link |
+| `get_user_info` | Status, profile picture ID, devices, and verified name |
+| `get_profile_picture` | URL of a user's or group's profile picture |
 | `send_chat_presence` | Send typing or recording indicators |
 | `check_whatsapp` | Check if phone numbers are registered on WhatsApp |
 
