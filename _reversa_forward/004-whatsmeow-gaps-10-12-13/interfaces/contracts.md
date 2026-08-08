@@ -57,10 +57,15 @@ type GroupInviteInfoResponse struct {
     Name         string   `json:"name,omitempty"`
     Topic        string   `json:"topic,omitempty"`
     Participants []string `json:"participants,omitempty"`
-    IsLocked     bool     `json:"is_locked"`
-    IsAnnounce   bool     `json:"is_announce"`
 }
 ```
+
+> **Corrigido pelo smoke (2026-08-08).** Este struct tinha `IsLocked`/`IsAnnounce`. Removidos: o nó
+> `group` de uma resposta de convite não carrega os filhos `locked`/`announcement`, então os dois
+> saíam sempre `false` mesmo com o grupo travado — campo sempre falso é pior que campo ausente.
+> Esses flags passam a ser lidos por `/api/group_info`, que ganhou `topic`, `is_locked` e
+> `is_announce` no mesmo ciclo e é o caminho de releitura do que `/api/group_settings` escreve.
+> Detalhes em `regression-watch.md` item 2.
 
 - `link` obrigatório → 400 se vazio. **Não** validar formato de URL: `GetGroupInfoFromLink` já faz `stripURLPrefix`, então link completo ou só o código funcionam.
 - `whatsmeow.GetGroupInfoFromLink(r.Context(), req.Link)`.
