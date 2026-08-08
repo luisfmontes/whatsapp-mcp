@@ -583,7 +583,8 @@ def get_group_invite_info(link: str) -> Dict[str, Any]:
             "is_announce"?: bool
         }
 
-    Note: Consulta apenas - nao entra no grupo. Use before join_group_with_link.
+    Note: Read-only — this does NOT join the group. Use it before
+    join_group_with_link to see what the link points to.
     """
     success, message, info = whatsapp_get_group_invite_info(link)
     result = {"success": success, "message": message}
@@ -602,7 +603,8 @@ def join_group_with_link(link: str) -> Dict[str, Any]:
     Returns:
         {"success": bool, "message": str, "jid"?: str}
 
-    Note: Entra de fato. Grupo com aprovacao -> vira pedido pendente.
+    Note: This actually joins. If the group requires admin approval, the call
+    succeeds as a pending membership request rather than immediate membership.
     """
     success, message, jid = whatsapp_join_group_with_link(link)
     return {"success": success, "message": message, "jid": jid}
@@ -632,8 +634,10 @@ def update_group_settings(
             "results"?: [{"field": str, "success": bool, "error"?: str}, ...]
         }
 
-    Note: Campo omitido nao muda; topic="" apaga o topico; resultado eh por campo 
-    e pode ser parcial; exige ser admin.
+    Note: An omitted field is left unchanged, so topic="" is not "skip" — it
+    CLEARS the group topic. The result is per field and can be partial: one
+    field may fail (e.g. not an admin) while the others apply, so check
+    results[] rather than success alone. Most fields require you to be admin.
     """
     success, message, results = whatsapp_update_group_settings(group_jid, name, topic, announce, locked)
     return {"success": success, "message": message, "results": results}
@@ -651,7 +655,9 @@ def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) 
     Returns:
         {"success": bool, "message": str, "picture_id"?: str}
 
-    Note: Caminho eh lido pela bridge (host dela), JPEG; remove=True tira a foto.
+    Note: media_path is read by the bridge process, so it must exist on the
+    bridge's host filesystem, not the caller's. JPEG only. remove=True clears
+    the photo and ignores media_path.
     """
     success, message, picture_id = whatsapp_set_group_photo(group_jid, media_path, remove)
     return {"success": success, "message": message, "picture_id": picture_id}
