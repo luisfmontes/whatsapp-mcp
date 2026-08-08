@@ -6,9 +6,11 @@
 
 ## Estado atual (o que já existe)
 
-**25 tools MCP:** `search_contacts`, `list_messages`, `list_chats`, `get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`, `get_last_interaction`, `get_message_context`, `send_message`, `send_file`, `send_audio_message`, `download_media`, `create_group`, `leave_group`, `mark_chat_as_read`, `mark_chat_as_unread`, `get_group_info`, `archive_chat`, `resolve_contact`, `react_to_message`, `edit_message`, `delete_message`, `update_group_participants`, `send_chat_presence`, `check_whatsapp`.
+> **Atualizado em 2026-08-08** pelo ciclo `004-whatsmeow-gaps-10-12-13`, que cobriu os gaps #10, #12 e #13.
 
-**19 REST handlers:** `/api/send`, `/api/download`, `/api/mediaretry`, `/api/create_group`, `/api/group_info`, `/api/leave_group`, `/api/mark_chat_read`, `/api/mark_chat_unread`, `/api/archive_chat`, `/api/resolve_contact`, `/api/search_contacts`, `/api/react`, `/api/edit`, `/api/revoke`, `/api/group_participants`, `/api/chat_presence`, `/api/is_on_whatsapp` (+ `/qr`, `/qr.png`).
+**32 tools MCP:** `search_contacts`, `list_messages`, `list_chats`, `get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`, `get_last_interaction`, `get_message_context`, `send_message`, `send_file`, `send_audio_message`, `download_media`, `create_group`, `leave_group`, `mark_chat_as_read`, `mark_chat_as_unread`, `get_group_info`, `archive_chat`, `resolve_contact`, `react_to_message`, `edit_message`, `delete_message`, `update_group_participants`, `send_chat_presence`, `check_whatsapp`, `get_group_invite_link`, `get_group_invite_info`, `join_group_with_link`, `update_group_settings`, `set_group_photo`, `get_user_info`, `get_profile_picture`.
+
+**26 REST handlers:** `/api/send`, `/api/download`, `/api/mediaretry`, `/api/create_group`, `/api/group_info`, `/api/leave_group`, `/api/mark_chat_read`, `/api/mark_chat_unread`, `/api/archive_chat`, `/api/resolve_contact`, `/api/search_contacts`, `/api/react`, `/api/edit`, `/api/revoke`, `/api/group_participants`, `/api/chat_presence`, `/api/is_on_whatsapp`, `/api/group_invite_link`, `/api/group_invite_info`, `/api/join_group_with_link`, `/api/group_settings`, `/api/group_photo`, `/api/user_info`, `/api/profile_picture` (+ `/qr`, `/qr.png`).
 
 ## Legenda de esforço
 
@@ -33,10 +35,10 @@
 | 7 | **Gerenciar participantes** (add/remove/promote/demote) | `UpdateGroupParticipants` | ✅ | ✅ | **B** | **Alto — maior gap único** |
 | 8 | **Typing/presença no chat** | `SendChatPresence` | ✅ | ✅ | **B** | Alto (bot mais natural) |
 | 9 | **Está no WhatsApp?** (valida número) | `IsOnWhatsApp` | ✅ | ✅ | **B** | Alto |
-| 10 | **Info de usuário** (status, pic, devices) | `GetUserInfo`/`GetProfilePictureInfo` | ❌ | ❌ | **B** | Médio |
+| 10 | **Info de usuário** (status, pic, devices) | `GetUserInfo`/`GetProfilePictureInfo` | ✅ | ✅ | **B** | Médio |
 | 11 | **Enquete** (criar + ler votos) | `BuildPollCreation`/`DecryptPollVote` | ❌ | ❌ | **B** | Médio |
-| 12 | **Link de convite do grupo** (get/join) | `GetGroupInviteLink`/`JoinGroupWithLink` | ❌ | ❌ | **B** | Médio |
-| 13 | **Setters de grupo** (nome/tópico/foto/anúncio/locked) | `SetGroupName`/`SetGroupTopic`/`SetGroupPhoto`/`SetGroupAnnounce`/`SetGroupLocked` | ❌ | ❌ | **B** | Médio |
+| 12 | **Link de convite do grupo** (get/join) | `GetGroupInviteLink`/`JoinGroupWithLink` | ✅ | ✅ | **B** | Médio |
+| 13 | **Setters de grupo** (nome/tópico/foto/anúncio/locked) | `SetGroupName`/`SetGroupTopic`/`SetGroupPhoto`/`SetGroupAnnounce`/`SetGroupLocked` | ✅ | ✅ | **B** | Médio |
 | 14 | **Read receipt explícito** (marcar lida via app-state ✅; receipt real ❌) | `MarkRead` | parcial | parcial | **B** | Médio |
 | 15 | **Presença global** (online/offline) | `SendPresence`/`SubscribePresence` | ❌ | ❌ | **B** | Baixo |
 | 16 | **Bloquear/desbloquear** | `UpdateBlocklist`/`GetBlocklist` | ❌ | ❌ | **B** | Baixo |
@@ -49,27 +51,30 @@
 
 ---
 
-## Quick wins recomendados
+## Histórico de colheita
 
-### Fazer já — Tier A (zero Go, ~15min cada)
-Handler REST pronto; padrão de wrapper idêntico a `download_media` (tool → helper `whatsapp.py` → POST bridge):
+| Ciclo | Gaps | Entregue em |
+|-------|------|-------------|
+| `002-whatsmeow-quick-wins` | #1, #2, #3 (Tier A) + #4, #5, #6 | 2026-07-07 |
+| `003-whatsmeow-gaps-7-8-9` | #7, #8, #9 | 2026-07-09 |
+| `004-whatsmeow-gaps-10-12-13` | #10, #12, #13 | 2026-08-08 |
 
-1. **`get_group_info(jid)`** → POST `/api/group_info`
-2. **`archive_chat(chat_jid, archived)`** → POST `/api/archive_chat`
-3. **`resolve_contact(...)`** → POST `/api/resolve_contact`
+Todos seguiram o mesmo shape: handler REST curto na bridge → helper `whatsapp.py` → tool `@mcp.tool`.
 
-Estranho o handler existir sem tool — provavelmente meio-caminho de PRs anteriores (#4, #5). Fechar essa lacuna primeiro.
+## O que ainda falta
 
-### Sprint seguinte — Tier B alto valor (Go + Python)
-Ordem por valor/esforço:
+### Próximo, se houver demanda — #11 Enquete
+Único Tier B restante. **Não** é do mesmo shape dos anteriores: criar a enquete é trivial
+(`BuildPollCreation`), mas *ler votos* exige event handler para `events.Message` com voto e
+persistir as opções da enquete para conseguir decriptar (`DecryptPollVote`). Muda o modelo de
+dados — merece ciclo próprio, não entra de carona num PR de handlers.
 
-1. **Reagir** (#4) — `BuildReaction` é one-liner; handler `/api/react` trivial.
-2. **Apagar p/ todos** (#6) — `BuildRevoke`, mesmo padrão.
-3. **Editar** (#5) — `BuildEdit`, idem.
-4. **Gerenciar participantes** (#7) — `UpdateGroupParticipants(jid, []jids, action)`; **maior valor** pra grupos.
-5. **Typing** (#8) + **IsOnWhatsApp** (#9) — baratos, deixam bot mais natural/robusto.
+### Adiar — Tier C e baixo valor
+#14 read receipt explícito, #15 presença global, #16 bloquear/desbloquear, #17 business profile,
+#18 mensagens efêmeras, #19 newsletters/canais, #20 proxy/privacy. API existe, uso pessoal baixo.
+Só sob demanda.
 
-Todos #4–#6 compartilham o mesmo shape: `Build*` + `SendMessage` + handler POST curto. Dá pra fazer os três num PR só.
-
-### Adiar — Tier C
-Newsletters, proxy, disappearing timer, privacy: API existe mas pouco uso pessoal. Só sob demanda.
+### Manutenção, independente de feature
+Bump do `go.mau.fi/whatsmeow` (pinado em `v0.0.0-20260529101937-a7ea56383ec4`). Deliberadamente
+fora dos ciclos de feature: misturar os dois torna impossível atribuir uma quebra à lib ou ao
+código novo.
