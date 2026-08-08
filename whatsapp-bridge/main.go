@@ -1112,6 +1112,114 @@ type GroupParticipantsResponse struct {
 	Participants []GroupParticipantResult `json:"participants,omitempty"`
 }
 
+// Gap #12 — Group Invites
+type GroupInviteLinkRequest struct {
+	GroupJID string `json:"group_jid"`
+	Reset    bool   `json:"reset"`
+}
+
+type GroupInviteLinkResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Link    string `json:"link,omitempty"`
+}
+
+type GroupInviteInfoRequest struct {
+	Link string `json:"link"`
+}
+
+type GroupInviteInfoResponse struct {
+	Success      bool     `json:"success"`
+	Message      string   `json:"message"`
+	JID          string   `json:"jid,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Topic        string   `json:"topic,omitempty"`
+	Participants []string `json:"participants,omitempty"`
+	IsLocked     bool     `json:"is_locked"`
+	IsAnnounce   bool     `json:"is_announce"`
+}
+
+type JoinGroupRequest struct {
+	Link string `json:"link"`
+}
+
+type JoinGroupResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	JID     string `json:"jid,omitempty"`
+}
+
+// Gap #13 — Group Settings & Photo
+type GroupSettingsRequest struct {
+	GroupJID string  `json:"group_jid"`
+	Name     *string `json:"name"`
+	Topic    *string `json:"topic"`
+	Announce *bool   `json:"announce"`
+	Locked   *bool   `json:"locked"`
+}
+
+type GroupSettingResult struct {
+	Field   string `json:"field"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+type GroupSettingsResponse struct {
+	Success bool                 `json:"success"`
+	Message string               `json:"message"`
+	Results []GroupSettingResult `json:"results,omitempty"`
+}
+
+type GroupPhotoRequest struct {
+	GroupJID  string `json:"group_jid"`
+	MediaPath string `json:"media_path"`
+	Remove    bool   `json:"remove"`
+}
+
+type GroupPhotoResponse struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	PictureID string `json:"picture_id,omitempty"`
+}
+
+// Gap #10 — User Info
+type UserInfoRequest struct {
+	JIDs []string `json:"jids"`
+}
+
+type UserInfoResult struct {
+	Query        string   `json:"query"`
+	JID          string   `json:"jid,omitempty"`
+	Found        bool     `json:"found"`
+	Status       string   `json:"status,omitempty"`
+	PictureID    string   `json:"picture_id,omitempty"`
+	VerifiedName string   `json:"verified_name,omitempty"`
+	LID          string   `json:"lid,omitempty"`
+	Devices      []string `json:"devices,omitempty"`
+}
+
+type UserInfoResponse struct {
+	Success bool             `json:"success"`
+	Message string           `json:"message"`
+	Results []UserInfoResult `json:"results,omitempty"`
+}
+
+type ProfilePictureRequest struct {
+	JID     string `json:"jid"`
+	Preview bool   `json:"preview"`
+}
+
+type ProfilePictureResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	URL        string `json:"url,omitempty"`
+	ID         string `json:"id,omitempty"`
+	Type       string `json:"type,omitempty"`
+	DirectPath string `json:"direct_path,omitempty"`
+}
+
+const maxUserInfoJIDs = 20
+
 var participantChangeByAction = map[string]whatsmeow.ParticipantChange{
 	"add":     whatsmeow.ParticipantChangeAdd,
 	"remove":  whatsmeow.ParticipantChangeRemove,
@@ -1206,6 +1314,394 @@ func handleGroupParticipants(client *whatsmeow.Client) http.HandlerFunc {
 			Success:      true,
 			Message:      fmt.Sprintf("%s applied to %d participant(s)", req.Action, len(participants)),
 			Participants: participants,
+		})
+	}
+}
+
+// T001 — Gap #12 handlers: group invites
+
+// handleGroupInviteLink returns the handler for POST /api/group_invite_link.
+func handleGroupInviteLink(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GroupInviteLinkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.GroupJID == "" {
+			http.Error(w, "Invalid request: group_jid required", http.StatusBadRequest)
+			return
+		}
+		groupJID, err := types.ParseJID(req.GroupJID)
+		if err != nil || groupJID.Server != types.GroupServer {
+			http.Error(w, "Invalid group_jid: must be a @g.us JID", http.StatusBadRequest)
+			return
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(GroupInviteLinkResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		link, err := client.GetGroupInviteLink(r.Context(), groupJID, req.Reset)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(GroupInviteLinkResponse{Success: false, Message: fmt.Sprintf("GetGroupInviteLink error: %v", err)})
+			return
+		}
+		msgSuffix := "retrieved"
+		if req.Reset {
+			msgSuffix = "reset"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GroupInviteLinkResponse{
+			Success: true,
+			Message: fmt.Sprintf("invite link %s", msgSuffix),
+			Link:    link,
+		})
+	}
+}
+
+// handleGroupInviteInfo returns the handler for POST /api/group_invite_info.
+func handleGroupInviteInfo(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GroupInviteInfoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Link == "" {
+			http.Error(w, "Invalid request: link required", http.StatusBadRequest)
+			return
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(GroupInviteInfoResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		info, err := client.GetGroupInfoFromLink(r.Context(), req.Link)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(GroupInviteInfoResponse{Success: false, Message: fmt.Sprintf("GetGroupInfoFromLink error: %v", err)})
+			return
+		}
+		participants := make([]string, 0, len(info.Participants))
+		for _, p := range info.Participants {
+			participants = append(participants, p.JID.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GroupInviteInfoResponse{
+			Success:      true,
+			Message:      "group info retrieved",
+			JID:          info.JID.String(),
+			Name:         info.GroupName.Name,
+			Topic:        info.Topic,
+			Participants: participants,
+			IsLocked:     info.IsLocked,
+			IsAnnounce:   info.IsAnnounce,
+		})
+	}
+}
+
+// handleJoinGroup returns the handler for POST /api/join_group_with_link.
+func handleJoinGroup(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req JoinGroupRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Link == "" {
+			http.Error(w, "Invalid request: link required", http.StatusBadRequest)
+			return
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(JoinGroupResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		jid, err := client.JoinGroupWithLink(r.Context(), req.Link)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(JoinGroupResponse{Success: false, Message: fmt.Sprintf("JoinGroupWithLink error: %v", err)})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(JoinGroupResponse{
+			Success: true,
+			Message: "joined group (or membership request sent)",
+			JID:     jid.String(),
+		})
+	}
+}
+
+// T002 — Gap #13 handlers: group settings and photo
+
+// handleGroupSettings returns the handler for POST /api/group_settings.
+func handleGroupSettings(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GroupSettingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.GroupJID == "" {
+			http.Error(w, "Invalid request: group_jid required", http.StatusBadRequest)
+			return
+		}
+		groupJID, err := types.ParseJID(req.GroupJID)
+		if err != nil || groupJID.Server != types.GroupServer {
+			http.Error(w, "Invalid group_jid: must be a @g.us JID", http.StatusBadRequest)
+			return
+		}
+		if req.Name == nil && req.Topic == nil && req.Announce == nil && req.Locked == nil {
+			http.Error(w, "Invalid request: at least one of name, topic, announce, locked is required", http.StatusBadRequest)
+			return
+		}
+		if req.Name != nil {
+			trimmed := strings.TrimSpace(*req.Name)
+			if trimmed == "" {
+				http.Error(w, "Group name is required", http.StatusBadRequest)
+				return
+			}
+			if len([]rune(trimmed)) > 25 {
+				http.Error(w, "Group name must be 25 characters or fewer", http.StatusBadRequest)
+				return
+			}
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(GroupSettingsResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		results := make([]GroupSettingResult, 0, 4)
+		successCount := 0
+		if req.Name != nil {
+			err := client.SetGroupName(r.Context(), groupJID, *req.Name)
+			result := GroupSettingResult{Field: "name", Success: err == nil}
+			if err != nil {
+				result.Error = err.Error()
+			} else {
+				successCount++
+			}
+			results = append(results, result)
+		}
+		if req.Topic != nil {
+			err := client.SetGroupTopic(r.Context(), groupJID, "", "", *req.Topic)
+			result := GroupSettingResult{Field: "topic", Success: err == nil}
+			if err != nil {
+				result.Error = err.Error()
+			} else {
+				successCount++
+			}
+			results = append(results, result)
+		}
+		if req.Announce != nil {
+			err := client.SetGroupAnnounce(r.Context(), groupJID, *req.Announce)
+			result := GroupSettingResult{Field: "announce", Success: err == nil}
+			if err != nil {
+				result.Error = err.Error()
+			} else {
+				successCount++
+			}
+			results = append(results, result)
+		}
+		if req.Locked != nil {
+			err := client.SetGroupLocked(r.Context(), groupJID, *req.Locked)
+			result := GroupSettingResult{Field: "locked", Success: err == nil}
+			if err != nil {
+				result.Error = err.Error()
+			} else {
+				successCount++
+			}
+			results = append(results, result)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		success := successCount == len(results)
+		json.NewEncoder(w).Encode(GroupSettingsResponse{
+			Success: success,
+			Message: fmt.Sprintf("%d of %d setting(s) applied", successCount, len(results)),
+			Results: results,
+		})
+	}
+}
+
+// handleGroupPhoto returns the handler for POST /api/group_photo.
+func handleGroupPhoto(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GroupPhotoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.GroupJID == "" {
+			http.Error(w, "Invalid request: group_jid required", http.StatusBadRequest)
+			return
+		}
+		groupJID, err := types.ParseJID(req.GroupJID)
+		if err != nil || groupJID.Server != types.GroupServer {
+			http.Error(w, "Invalid group_jid: must be a @g.us JID", http.StatusBadRequest)
+			return
+		}
+		if req.Remove {
+			if req.MediaPath != "" {
+				http.Error(w, "Invalid request: media_path must be empty when remove=true", http.StatusBadRequest)
+				return
+			}
+		} else {
+			if req.MediaPath == "" {
+				http.Error(w, "Invalid request: media_path required when remove=false", http.StatusBadRequest)
+				return
+			}
+		}
+		var avatar []byte
+		if !req.Remove {
+			data, err := os.ReadFile(req.MediaPath)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to read media file: %v", err), http.StatusBadRequest)
+				return
+			}
+			avatar = data
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(GroupPhotoResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		pictureID, err := client.SetGroupPhoto(r.Context(), groupJID, avatar)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(GroupPhotoResponse{Success: false, Message: fmt.Sprintf("SetGroupPhoto error: %v", err)})
+			return
+		}
+		msgSuffix := "updated"
+		if req.Remove {
+			msgSuffix = "removed"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(GroupPhotoResponse{
+			Success:   true,
+			Message:   fmt.Sprintf("group photo %s", msgSuffix),
+			PictureID: pictureID,
+		})
+	}
+}
+
+// T003 — Gap #10 handlers: user info
+
+// handleUserInfo returns the handler for POST /api/user_info.
+func handleUserInfo(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req UserInfoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.JIDs) == 0 {
+			http.Error(w, "Invalid request: jids required", http.StatusBadRequest)
+			return
+		}
+		if len(req.JIDs) > maxUserInfoJIDs {
+			http.Error(w, fmt.Sprintf("Too many jids: max %d, got %d", maxUserInfoJIDs, len(req.JIDs)), http.StatusBadRequest)
+			return
+		}
+		jids, err := parseGroupParticipantJIDs(req.JIDs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(UserInfoResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		userInfoMap, err := client.GetUserInfo(r.Context(), jids)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(UserInfoResponse{Success: false, Message: fmt.Sprintf("GetUserInfo error: %v", err)})
+			return
+		}
+		queryStrings := make([]string, len(jids))
+		for i, jid := range jids {
+			queryStrings[i] = jid.String()
+		}
+		results := mergeUserInfoResults(queryStrings, userInfoMap)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(UserInfoResponse{
+			Success: true,
+			Message: fmt.Sprintf("%d user(s) info retrieved", len(results)),
+			Results: results,
+		})
+	}
+}
+
+// handleProfilePicture returns the handler for POST /api/profile_picture.
+func handleProfilePicture(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req ProfilePictureRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.JID == "" {
+			http.Error(w, "Invalid request: jid required", http.StatusBadRequest)
+			return
+		}
+		jid, err := types.ParseJID(req.JID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid jid: %v", err), http.StatusBadRequest)
+			return
+		}
+		if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.GroupServer {
+			http.Error(w, "Invalid jid: unsupported server", http.StatusBadRequest)
+			return
+		}
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(ProfilePictureResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		info, err := client.GetProfilePictureInfo(r.Context(), jid, &whatsmeow.GetProfilePictureParams{Preview: req.Preview})
+		if err != nil {
+			if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(ProfilePictureResponse{Success: false, Message: "no profile picture set"})
+				return
+			}
+			if errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(ProfilePictureResponse{Success: false, Message: "profile picture hidden by privacy settings"})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(ProfilePictureResponse{Success: false, Message: fmt.Sprintf("GetProfilePictureInfo error: %v", err)})
+			return
+		}
+		if info == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(ProfilePictureResponse{Success: false, Message: "no profile picture available"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ProfilePictureResponse{
+			Success:    true,
+			Message:    "profile picture info retrieved",
+			URL:        info.URL,
+			ID:         info.ID,
+			Type:       info.Type,
+			DirectPath: info.DirectPath,
 		})
 	}
 }
@@ -1339,6 +1835,48 @@ func mergeIsOnWhatsAppResults(queries []string, resp []types.IsOnWhatsAppRespons
 		}
 		if res.VerifiedName != nil && res.VerifiedName.Details != nil {
 			item.VerifiedName = res.VerifiedName.Details.GetVerifiedName()
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// mergeUserInfoResults correlates the whatsmeow response (which omits
+// unregistered users) with the original query list, so the API always returns
+// exactly one result per input JID, in input order, with Found:false filled in
+// for omissions.
+func mergeUserInfoResults(queries []string, userInfoMap map[types.JID]types.UserInfo) []UserInfoResult {
+	out := make([]UserInfoResult, 0, len(queries))
+	for _, q := range queries {
+		jid, err := types.ParseJID(q)
+		if err != nil {
+			// Query should already be validated, but be defensive
+			out = append(out, UserInfoResult{Query: q, Found: false})
+			continue
+		}
+		info, found := userInfoMap[jid]
+		if !found {
+			out = append(out, UserInfoResult{Query: q, Found: false})
+			continue
+		}
+		item := UserInfoResult{Query: q, Found: true, JID: jid.String()}
+		if info.Status != "" {
+			item.Status = info.Status
+		}
+		if info.PictureID != "" {
+			item.PictureID = info.PictureID
+		}
+		if info.VerifiedName != nil && info.VerifiedName.Details != nil {
+			item.VerifiedName = info.VerifiedName.Details.GetVerifiedName()
+		}
+		if !info.LID.IsEmpty() {
+			item.LID = info.LID.String()
+		}
+		if len(info.Devices) > 0 {
+			item.Devices = make([]string, 0, len(info.Devices))
+			for _, d := range info.Devices {
+				item.Devices = append(item.Devices, d.String())
+			}
 		}
 		out = append(out, item)
 	}
@@ -3222,6 +3760,19 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 
 	// Handler for adding, removing, promoting or demoting group participants.
 	http.HandleFunc("/api/group_participants", handleGroupParticipants(client))
+
+	// T001 — Gap #12: group invites
+	http.HandleFunc("/api/group_invite_link", handleGroupInviteLink(client))
+	http.HandleFunc("/api/group_invite_info", handleGroupInviteInfo(client))
+	http.HandleFunc("/api/join_group_with_link", handleJoinGroup(client))
+
+	// T002 — Gap #13: group settings and photo
+	http.HandleFunc("/api/group_settings", handleGroupSettings(client))
+	http.HandleFunc("/api/group_photo", handleGroupPhoto(client))
+
+	// T003 — Gap #10: user info
+	http.HandleFunc("/api/user_info", handleUserInfo(client))
+	http.HandleFunc("/api/profile_picture", handleProfilePicture(client))
 
 	// Handler for sending a typing/recording indicator to a chat.
 	http.HandleFunc("/api/chat_presence", handleChatPresence(client))
