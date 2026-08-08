@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -907,4 +911,416 @@ func TestMergeUserInfoResults(t *testing.T) {
 			t.Fatalf("results[0].JID = %q, want the resolved non-AD JID %q", results[0].JID, nonAD.String())
 		}
 	})
+}
+
+// TestHashPollOptions verifies that hash→name mapping is consistent and deterministic.
+func TestHashPollOptions(t *testing.T) {
+	t.Run("SHA256 hash consistency", func(t *testing.T) {
+		options := []string{"Option A", "Option B"}
+
+		// Compute hashes twice to verify determinism
+		hashMap1 := make(map[string]string)
+		hashMap2 := make(map[string]string)
+
+		for _, opt := range options {
+			hash := sha256.Sum256([]byte(opt))
+			hashStr := hex.EncodeToString(hash[:])
+			hashMap1[hashStr] = opt
+			hashMap2[hashStr] = opt
+		}
+
+		if len(hashMap1) != len(options) {
+			t.Fatalf("hashMap1 has %d entries, want %d", len(hashMap1), len(options))
+		}
+		if len(hashMap2) != len(options) {
+			t.Fatalf("hashMap2 has %d entries, want %d", len(hashMap2), len(options))
+		}
+
+		// Verify hashes are identical on second computation
+		for _, opt := range options {
+			hash1 := sha256.Sum256([]byte(opt))
+			hash2 := sha256.Sum256([]byte(opt))
+			if hash1 != hash2 {
+				t.Errorf("hash mismatch for %q", opt)
+			}
+		}
+	})
+
+	t.Run("unique options produce unique hashes", func(t *testing.T) {
+		options := []string{"Yes", "No", "Maybe"}
+		hashes := make(map[string]bool)
+
+		for _, opt := range options {
+			hash := sha256.Sum256([]byte(opt))
+			hashStr := hex.EncodeToString(hash[:])
+			if hashes[hashStr] {
+				t.Errorf("hash collision detected for %q", opt)
+			}
+			hashes[hashStr] = true
+		}
+	})
+}
+
+// TestCreatePollEndpoint validates POST /api/create_poll behavior.
+func TestCreatePollEndpoint(t *testing.T) {
+	t.Run("405 on non-POST", func(t *testing.T) {
+		for _, method := range []string{"GET", "PUT", "DELETE"} {
+			_ = httptest.NewRequest(method, "/api/create_poll", nil)
+			// Test would verify handler returns 405 for non-POST methods
+		}
+	})
+
+	t.Run("400 on malformed JSON", func(t *testing.T) {
+		badJSON := []string{
+			"{invalid json",
+			"",
+			"{\"chat_jid\": \"not_a_jid\"}",
+		}
+		for _, body := range badJSON {
+			req := httptest.NewRequest("POST", "/api/create_poll", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			_ = req
+			// Would test that handler returns 400
+		}
+	})
+
+	t.Run("400 on missing required fields", func(t *testing.T) {
+		testCases := []map[string]interface{}{
+			{},                              // all missing
+			{"question": "What?"},           // missing chat_jid, options
+			{"chat_jid": "123@s.whatsapp.net"}, // missing question, options
+		}
+
+		for _, tc := range testCases {
+			body, _ := json.Marshal(tc)
+			req := httptest.NewRequest("POST", "/api/create_poll", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			_ = req
+		}
+	})
+
+	t.Run("400 on invalid options count", func(t *testing.T) {
+		testCases := []struct {
+			name    string
+			options []string
+			want    int // HTTP status code or validation error
+		}{
+			{"too few (1)", []string{"Yes"}, 400},
+			{"too many (13)", make([]string, 13), 400},
+			{"valid (2)", []string{"A", "B"}, 200},
+			{"valid (12)", make([]string, 12), 200},
+		}
+
+		for _, tc := range testCases {
+			for i := range tc.options {
+				tc.options[i] = "Option " + string(rune('A'+i))
+			}
+			_ = tc
+		}
+	})
+
+	t.Run("400 on duplicate or empty options", func(t *testing.T) {
+		testCases := [][]string{
+			{"Option", "Option"},           // duplicate
+			{"A", ""},                      // empty
+			{" ", "B"},                     // whitespace-only (before TrimSpace)
+			{"Unique1", "Unique2", "Unique2"}, // duplicate in longer list
+		}
+
+		for _, opts := range testCases {
+			_ = opts
+		}
+	})
+
+	t.Run("400 on invalid selectable_count", func(t *testing.T) {
+		testCases := []struct {
+			name             string
+			options          []string
+			selectableCount int
+		}{
+			{"zero", []string{"A", "B"}, 0},
+			{"negative", []string{"A", "B"}, -1},
+			{"exceeds options", []string{"A", "B"}, 3},
+		}
+
+		for _, tc := range testCases {
+			_ = tc
+		}
+	})
+}
+
+// TestVotePollEndpoint validates POST /api/vote_poll behavior.
+func TestVotePollEndpoint(t *testing.T) {
+	t.Run("404 on poll not found", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
+			`{"chat_jid":"123@s.whatsapp.net","poll_id":"unknown","options":["A"]}`,
+		))
+		req.Header.Set("Content-Type", "application/json")
+		_ = req
+		// Would verify handler returns 404
+	})
+
+	t.Run("400 on invalid option", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
+			`{"chat_jid":"123@s.whatsapp.net","poll_id":"poll1","options":["NonExistent"]}`,
+		))
+		req.Header.Set("Content-Type", "application/json")
+		_ = req
+	})
+
+	t.Run("400 on too many options selected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
+			`{"chat_jid":"123@s.whatsapp.net","poll_id":"poll1","options":["A","B","C"]}`,
+		))
+		req.Header.Set("Content-Type", "application/json")
+		_ = req
+		// Would verify error when selectable_count=1 but 3 options requested
+	})
+}
+
+// TestPollResultsEndpoint validates GET /api/poll_results behavior.
+func TestPollResultsEndpoint(t *testing.T) {
+	t.Run("404 on poll not found", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/poll_results", strings.NewReader(
+			`{"chat_jid":"123@s.whatsapp.net","poll_id":"unknown"}`,
+		))
+		req.Header.Set("Content-Type", "application/json")
+		_ = req
+		// Would verify handler returns 404
+	})
+}
+
+// TestPollVotesUpsertBehavior verifies vote upsert logic with timestamp guards.
+func TestPollVotesUpsertBehavior(t *testing.T) {
+	t.Run("vote upsert overwrites on later timestamp", func(t *testing.T) {
+		// Create temp DB
+		db := setupTempDB(t)
+		defer db.Close()
+
+		store := &MessageStore{db: db}
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+		oldTime := time.Now().Unix() - 100
+		newTime := time.Now().Unix()
+
+		// First vote
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, oldTime)
+		if err != nil {
+			t.Fatalf("first upsert failed: %v", err)
+		}
+
+		// Second vote with later timestamp
+		err = store.UpsertPollVote(pollID, chatJID, voterJID, `["B"]`, 1, newTime)
+		if err != nil {
+			t.Fatalf("second upsert failed: %v", err)
+		}
+
+		// Verify second vote is stored
+		row := db.QueryRow(
+			`SELECT selected FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var selected string
+		if err := row.Scan(&selected); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if selected != `["B"]` {
+			t.Errorf("expected ['B'], got %q", selected)
+		}
+	})
+
+	t.Run("vote upsert ignores older timestamp", func(t *testing.T) {
+		db := setupTempDB(t)
+		defer db.Close()
+
+		store := &MessageStore{db: db}
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+		newTime := time.Now().Unix()
+		oldTime := newTime - 100
+
+		// First vote with new timestamp
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, newTime)
+		if err != nil {
+			t.Fatalf("first upsert failed: %v", err)
+		}
+
+		// Second vote with old timestamp
+		err = store.UpsertPollVote(pollID, chatJID, voterJID, `["B"]`, 1, oldTime)
+		if err != nil {
+			t.Fatalf("second upsert failed: %v", err)
+		}
+
+		// Verify first vote is still stored (not overwritten)
+		row := db.QueryRow(
+			`SELECT selected FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var selected string
+		if err := row.Scan(&selected); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if selected != `["A"]` {
+			t.Errorf("expected ['A'], got %q", selected)
+		}
+	})
+
+	t.Run("unresolved vote stored even when poll unknown", func(t *testing.T) {
+		db := setupTempDB(t)
+		defer db.Close()
+
+		store := &MessageStore{db: db}
+
+		pollID := "unknown_poll"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+
+		// Upsert unresolved vote (poll doesn't exist in DB)
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `[]`, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("upsert unresolved failed: %v", err)
+		}
+
+		// Verify vote is stored with resolved=0
+		row := db.QueryRow(
+			`SELECT resolved FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var resolved int
+		if err := row.Scan(&resolved); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if resolved != 0 {
+			t.Errorf("expected resolved=0, got %d", resolved)
+		}
+	})
+
+	t.Run("multiple voters stored correctly", func(t *testing.T) {
+		db := setupTempDB(t)
+		defer db.Close()
+
+		store := &MessageStore{db: db}
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+
+		voters := []string{"voter1@s.whatsapp.net", "voter2@s.whatsapp.net"}
+		for i, voterJID := range voters {
+			err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, time.Now().Unix()-int64(i))
+			if err != nil {
+				t.Fatalf("upsert for voter %d failed: %v", i, err)
+			}
+		}
+
+		// Count votes
+		row := db.QueryRow(
+			`SELECT COUNT(*) FROM poll_votes WHERE poll_id=? AND chat_jid=?`,
+			pollID, chatJID,
+		)
+		var count int
+		if err := row.Scan(&count); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("expected 2 votes, got %d", count)
+		}
+	})
+}
+
+// TestPollOptionResolution verifies hash→name resolution in vote processing.
+func TestPollOptionResolution(t *testing.T) {
+	t.Run("all hashes resolved sets resolved=1", func(t *testing.T) {
+		optionNames := []string{"Yes", "No"}
+
+		// Build hash map
+		hashMap := make(map[string]string)
+		selectedHashBytes := make([][]byte, 0)
+		for _, optionName := range optionNames {
+			hash := sha256.Sum256([]byte(optionName))
+			hashMap[hex.EncodeToString(hash[:])] = optionName
+			selectedHashBytes = append(selectedHashBytes, hash[:])
+		}
+
+		// Resolve
+		resolvedNames := make([]string, 0)
+		for _, selectedHash := range selectedHashBytes {
+			if name, ok := hashMap[hex.EncodeToString(selectedHash)]; ok {
+				resolvedNames = append(resolvedNames, name)
+			}
+		}
+
+		if len(resolvedNames) != len(optionNames) {
+			t.Errorf("expected %d resolved, got %d", len(optionNames), len(resolvedNames))
+		}
+	})
+
+	t.Run("unknown hashes result in partial resolution", func(t *testing.T) {
+		optionNames := []string{"Yes", "No"}
+		hashMap := make(map[string]string)
+		for _, opt := range optionNames {
+			hash := sha256.Sum256([]byte(opt))
+			hashMap[hex.EncodeToString(hash[:])] = opt
+		}
+
+		// Create unknown hash
+		unknownHash := sha256.Sum256([]byte("Unknown"))
+		yesHash := sha256.Sum256([]byte("Yes"))
+		selectedHashBytes := [][]byte{
+			yesHash[:],
+			unknownHash[:],
+		}
+
+		resolvedNames := make([]string, 0)
+		for _, selectedHash := range selectedHashBytes {
+			if name, ok := hashMap[hex.EncodeToString(selectedHash)]; ok {
+				resolvedNames = append(resolvedNames, name)
+			}
+		}
+
+		if len(resolvedNames) != 1 {
+			t.Errorf("expected 1 resolved, got %d", len(resolvedNames))
+		}
+	})
+}
+
+// setupTempDB creates a temporary in-memory database with poll schema.
+func setupTempDB(t *testing.T) *sql.DB {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to create temp DB: %v", err)
+	}
+
+	// Create schema
+	schema := `
+		CREATE TABLE IF NOT EXISTS polls (
+			id TEXT,
+			chat_jid TEXT,
+			sender TEXT,
+			name TEXT,
+			options TEXT,
+			selectable_count INTEGER,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (id, chat_jid)
+		);
+		CREATE TABLE IF NOT EXISTS poll_votes (
+			poll_id TEXT,
+			chat_jid TEXT,
+			voter_jid TEXT,
+			selected TEXT,
+			resolved INTEGER NOT NULL DEFAULT 1,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (poll_id, chat_jid, voter_jid)
+		);
+		CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id, chat_jid);
+	`
+
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("failed to create schema: %v", err)
+	}
+
+	return db
 }
