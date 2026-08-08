@@ -675,6 +675,9 @@ def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
         info = {
             "name": result.get("name", ""),
             "participants": result.get("participants", []),
+            "topic": result.get("topic", ""),
+            "is_locked": bool(result.get("is_locked", False)),
+            "is_announce": bool(result.get("is_announce", False)),
         }
         return True, "Group info retrieved", info
     except requests.RequestException as e:
@@ -888,3 +891,188 @@ def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
         return False, f"Request error: {str(e)}", []
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", []
+
+
+def get_group_invite_link(group_jid: str, reset: bool = False) -> Tuple[bool, str, str]:
+    """Get group invite link (or reset if reset=True)."""
+    try:
+        if not group_jid or not group_jid.strip():
+            return False, "group_jid is required", ""
+        payload = {
+            "group_jid": group_jid,
+            "reset": reset,
+        }
+        response = _api_request("POST", "/group_invite_link", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", ""
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("link", ""),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", ""
+
+
+def get_group_invite_info(link: str) -> Tuple[bool, str, Optional[dict]]:
+    """Get group info from invite link (doesn't join the group)."""
+    try:
+        if not link or not link.strip():
+            return False, "link is required", None
+        payload = {"link": link}
+        response = _api_request("POST", "/group_invite_info", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", None
+        if not result.get("success", False):
+            return False, result.get("message", "Unknown response"), None
+        info = {
+            "jid": result.get("jid", ""),
+            "name": result.get("name", ""),
+            "topic": result.get("topic", ""),
+            "participants": result.get("participants", []),
+        }
+        return True, result.get("message", "Unknown response"), info
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
+
+
+def join_group_with_link(link: str) -> Tuple[bool, str, str]:
+    """Join a group using invite link."""
+    try:
+        if not link or not link.strip():
+            return False, "link is required", ""
+        payload = {"link": link}
+        response = _api_request("POST", "/join_group_with_link", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", ""
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("jid", ""),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", ""
+
+
+def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Optional[str] = None,
+                         announce: Optional[bool] = None, locked: Optional[bool] = None) -> Tuple[bool, str, List[dict]]:
+    """Update group settings (name, topic, announce, locked)."""
+    try:
+        if not group_jid or not group_jid.strip():
+            return False, "group_jid is required", []
+        if name is None and topic is None and announce is None and locked is None:
+            return False, "at least one of name, topic, announce, locked is required", []
+        
+        payload = {"group_jid": group_jid}
+        if name is not None:
+            payload["name"] = name
+        if topic is not None:
+            payload["topic"] = topic
+        if announce is not None:
+            payload["announce"] = announce
+        if locked is not None:
+            payload["locked"] = locked
+        
+        response = _api_request("POST", "/group_settings", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", []
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("results", []),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", []
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", []
+
+
+def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) -> Tuple[bool, str, str]:
+    """Set group photo from file or remove it."""
+    try:
+        if not group_jid or not group_jid.strip():
+            return False, "group_jid is required", ""
+        payload = {
+            "group_jid": group_jid,
+            "media_path": media_path,
+            "remove": remove,
+        }
+        response = _api_request("POST", "/group_photo", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", ""
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("picture_id", ""),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", ""
+
+
+def get_user_info(jids: List[str]) -> Tuple[bool, str, List[dict]]:
+    """Get user info for a list of JIDs."""
+    try:
+        if not jids:
+            return False, "jids list is required", []
+        payload = {"jids": jids}
+        response = _api_request("POST", "/user_info", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", []
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("results", []),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", []
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", []
+
+
+def get_profile_picture(jid: str, preview: bool = False) -> Tuple[bool, str, Optional[dict]]:
+    """Get profile picture info for a user or group."""
+    try:
+        if not jid or not jid.strip():
+            return False, "jid is required", None
+        payload = {
+            "jid": jid,
+            "preview": preview,
+        }
+        response = _api_request("POST", "/profile_picture", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", None
+        if not result.get("success", False):
+            return False, result.get("message", "Unknown response"), None
+        info = {
+            "url": result.get("url", ""),
+            "id": result.get("id", ""),
+            "type": result.get("type", ""),
+            "direct_path": result.get("direct_path", ""),
+        }
+        return True, result.get("message", "Unknown response"), info
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
