@@ -675,6 +675,9 @@ def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
         info = {
             "name": result.get("name", ""),
             "participants": result.get("participants", []),
+            "topic": result.get("topic", ""),
+            "is_locked": bool(result.get("is_locked", False)),
+            "is_announce": bool(result.get("is_announce", False)),
         }
         return True, "Group info retrieved", info
     except requests.RequestException as e:
@@ -933,8 +936,6 @@ def get_group_invite_info(link: str) -> Tuple[bool, str, Optional[dict]]:
             "name": result.get("name", ""),
             "topic": result.get("topic", ""),
             "participants": result.get("participants", []),
-            "is_locked": result.get("is_locked", False),
-            "is_announce": result.get("is_announce", False),
         }
         return True, result.get("message", "Unknown response"), info
     except requests.RequestException as e:

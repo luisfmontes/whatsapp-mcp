@@ -349,10 +349,19 @@ def mark_chat_as_unread(chat_jid: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_group_info(jid: str) -> Dict[str, Any]:
-    """Get a WhatsApp group's name and participant list.
+    """Get a WhatsApp group's name, topic, participant list and admin-only flags.
 
     Args:
         jid: The group JID (e.g. 120363012345678901@g.us)
+
+    Returns:
+        {"success", "message", "name", "topic", "participants",
+         "is_locked" (only admins can edit group info),
+         "is_announce" (only admins can send messages)}
+
+    Note: This is the way to read back what update_group_settings wrote.
+    get_group_invite_info cannot be used for that — the invite-link response
+    carries no locked/announce data, so it always reports both as false.
     """
     success, message, info = whatsapp_get_group_info(jid)
     result: Dict[str, Any] = {"success": success, "message": message}
@@ -578,13 +587,14 @@ def get_group_invite_info(link: str) -> Dict[str, Any]:
             "jid"?: str,
             "name"?: str,
             "topic"?: str,
-            "participants"?: [str],
-            "is_locked"?: bool,
-            "is_announce"?: bool
+            "participants"?: [str]
         }
 
     Note: Read-only — this does NOT join the group. Use it before
     join_group_with_link to see what the link points to.
+
+    Note: No locked/announce data here — WhatsApp does not include those flags
+    in an invite-link lookup. Read them with get_group_info instead.
     """
     success, message, info = whatsapp_get_group_invite_info(link)
     result = {"success": success, "message": message}
@@ -689,7 +699,13 @@ def get_user_info(jids: List[str]) -> Dict[str, Any]:
             ]
         }
 
-    Note: Max 20 per call; found=false when WhatsApp did not return data.
+    Note: Max 20 per call.
+
+    Note: found=true does NOT mean the number is registered on WhatsApp — it
+    only means WhatsApp returned a node for it. An unregistered number comes
+    back found=true with an empty status and devices=[]. To check whether a
+    number actually has WhatsApp, use check_whatsapp, which answers that
+    directly. Observed behavior, not inferred.
     """
     success, message, results = whatsapp_get_user_info(jids)
     return {"success": success, "message": message, "results": results}

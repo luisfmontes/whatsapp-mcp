@@ -1128,6 +1128,14 @@ type GroupInviteInfoRequest struct {
 	Link string `json:"link"`
 }
 
+// GroupInviteInfoResponse represents the response for POST /api/group_invite_info.
+//
+// Deliberately no is_locked/is_announce: the group node in an invite-query
+// response carries no "locked"/"announcement" child, so parseGroupNode leaves
+// both false no matter the group's real state. Confirmed by smoke — setting
+// both to true and re-reading through this endpoint still reported false.
+// An always-false field is worse than an absent one, so those flags are read
+// through /api/group_info (full GetGroupInfo) instead.
 type GroupInviteInfoResponse struct {
 	Success      bool     `json:"success"`
 	Message      string   `json:"message"`
@@ -1135,8 +1143,6 @@ type GroupInviteInfoResponse struct {
 	Name         string   `json:"name,omitempty"`
 	Topic        string   `json:"topic,omitempty"`
 	Participants []string `json:"participants,omitempty"`
-	IsLocked     bool     `json:"is_locked"`
-	IsAnnounce   bool     `json:"is_announce"`
 }
 
 type JoinGroupRequest struct {
@@ -1400,8 +1406,6 @@ func handleGroupInviteInfo(client *whatsmeow.Client) http.HandlerFunc {
 			Name:         info.GroupName.Name,
 			Topic:        info.Topic,
 			Participants: participants,
-			IsLocked:     info.IsLocked,
-			IsAnnounce:   info.IsAnnounce,
 		})
 	}
 }
@@ -3391,7 +3395,14 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 			})
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
+			// topic/is_locked/is_announce round out what /api/group_settings can
+			// write. GetGroupInfoFromLink is not a substitute for reading them back:
+			// the group node in an invite-query response carries no "locked" or
+			// "announcement" child, so those flags always parse as false there
+			// regardless of the group's real state.
 			"success": true, "name": groupInfo.Name, "participants": participants,
+			"topic": groupInfo.Topic, "is_locked": groupInfo.IsLocked,
+			"is_announce": groupInfo.IsAnnounce,
 		})
 	})
 
