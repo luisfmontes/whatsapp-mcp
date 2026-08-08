@@ -4594,9 +4594,14 @@ func handleMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, evt 
 	}
 
 	newPath := retryData.GetDirectPath()
+	// whatsmeow 2026-08-06 dropped the fileLength argument and added allowNoHash
+	// as the last one. false keeps the hash check on, matching what the library
+	// itself passes from Download/DownloadThumbnail/DownloadFB; only
+	// DownloadMediaWithOnlyPath, which has no hash at all, passes true. The
+	// retry entry carries fileSHA256 from the DB, so there is a hash to verify.
 	data, err := client.DownloadMediaWithPath(context.Background(), newPath,
 		entry.fileEncSHA256, entry.fileSHA256, entry.mediaKey,
-		int(entry.fileLength), waMediaType, "")
+		waMediaType, "", false)
 	if err != nil {
 		fmt.Printf("MEDIA RETRY %s: ERROR download with fresh path failed: %v\n", evt.MessageID, err)
 		return
