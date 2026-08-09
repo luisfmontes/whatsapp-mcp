@@ -2158,11 +2158,19 @@ func handlePollResults(messageStore *MessageStore) http.HandlerFunc {
 				continue
 			}
 
-			totalVoters++
 			var selectedOptions []string
 			if err := json.Unmarshal([]byte(vote.SelectedJSON), &selectedOptions); err != nil {
 				continue
 			}
+
+			// A withdrawn vote (empty selection) is a resolved, understood vote,
+			// but it is not a voter: counting it would let total_voters exceed
+			// the sum of the per-option counts, and "3 people voted" would be
+			// read as three actual choices.
+			if len(selectedOptions) == 0 {
+				continue
+			}
+			totalVoters++
 
 			for _, opt := range selectedOptions {
 				optionCounts[opt]++
