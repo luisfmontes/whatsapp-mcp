@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1087,11 +1087,14 @@ func TestHandleVotePoll(t *testing.T) {
 // is the only way to cover the tally arithmetic — the validation-only tests
 // below never reach it.
 func TestPollResultsTally(t *testing.T) {
-	db := setupTempDB(t)
-	defer db.Close()
-	store := &MessageStore{db: db}
+	store := setupPollStore(t)
 
 	const pollID, chatJID = "POLL1", "120363000000000000@g.us"
+	// polls has a foreign key to chats(jid), enforced on this connection —
+	// same reason handleCreatePoll calls EnsureChat before StorePoll.
+	if err := store.EnsureChat(chatJID, time.Now()); err != nil {
+		t.Fatalf("EnsureChat: %v", err)
+	}
 	if err := store.StorePoll(pollID, chatJID, "me@s.whatsapp.net", "smoke?",
 		`["alpha","beta","gama"]`, 1, time.Now().Unix()); err != nil {
 		t.Fatalf("StorePoll: %v", err)
@@ -1177,10 +1180,8 @@ func TestHandlePollResults(t *testing.T) {
 func TestPollVotesUpsertBehavior(t *testing.T) {
 	t.Run("vote upsert overwrites on later timestamp", func(t *testing.T) {
 		// Create temp DB
-		db := setupTempDB(t)
-		defer db.Close()
-
-		store := &MessageStore{db: db}
+		store := setupPollStore(t)
+		db := store.db
 
 		pollID := "poll1"
 		chatJID := "chat@s.whatsapp.net"
@@ -1215,10 +1216,8 @@ func TestPollVotesUpsertBehavior(t *testing.T) {
 	})
 
 	t.Run("vote upsert ignores older timestamp", func(t *testing.T) {
-		db := setupTempDB(t)
-		defer db.Close()
-
-		store := &MessageStore{db: db}
+		store := setupPollStore(t)
+		db := store.db
 
 		pollID := "poll1"
 		chatJID := "chat@s.whatsapp.net"
@@ -1253,10 +1252,8 @@ func TestPollVotesUpsertBehavior(t *testing.T) {
 	})
 
 	t.Run("unresolved vote stored even when poll unknown", func(t *testing.T) {
-		db := setupTempDB(t)
-		defer db.Close()
-
-		store := &MessageStore{db: db}
+		store := setupPollStore(t)
+		db := store.db
 
 		pollID := "unknown_poll"
 		chatJID := "chat@s.whatsapp.net"
@@ -1283,10 +1280,8 @@ func TestPollVotesUpsertBehavior(t *testing.T) {
 	})
 
 	t.Run("multiple voters stored correctly", func(t *testing.T) {
-		db := setupTempDB(t)
-		defer db.Close()
-
-		store := &MessageStore{db: db}
+		store := setupPollStore(t)
+		db := store.db
 
 		pollID := "poll1"
 		chatJID := "chat@s.whatsapp.net"
@@ -1403,40 +1398,34 @@ func TestResolvePollVote(t *testing.T) {
 	}
 }
 
-// setupTempDB creates a temporary in-memory database with poll schema.
-func setupTempDB(t *testing.T) *sql.DB {
-	db, err := sql.Open("sqlite", ":memory:")
+// setupPollStore gives a test a real MessageStore on a throwaway database.
+//
+// It goes through NewMessageStore instead of sql.Open with a literal driver
+// name: the project registers a different driver per platform (mattn/go-sqlite3
+// under CGO, modernc on Windows), so a hardcoded "sqlite" compiles everywhere
+// and fails at run time on macOS and Linux — which is exactly how CI caught the
+// first version of this helper.
+//
+// Using the production opener also means the schema under test is the real
+// CREATE TABLE block, not a copy maintained by hand next to it. A column added
+// to polls or poll_votes reaches these tests automatically instead of drifting.
+func setupPollStore(t *testing.T) *MessageStore {
+	t.Helper()
+	orig, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("failed to create temp DB: %v", err)
+		t.Fatal(err)
 	}
-
-	// Create schema
-	schema := `
-		CREATE TABLE IF NOT EXISTS polls (
-			id TEXT,
-			chat_jid TEXT,
-			sender TEXT,
-			name TEXT,
-			options TEXT,
-			selectable_count INTEGER,
-			timestamp TIMESTAMP,
-			PRIMARY KEY (id, chat_jid)
-		);
-		CREATE TABLE IF NOT EXISTS poll_votes (
-			poll_id TEXT,
-			chat_jid TEXT,
-			voter_jid TEXT,
-			selected TEXT,
-			resolved INTEGER NOT NULL DEFAULT 1,
-			timestamp TIMESTAMP,
-			PRIMARY KEY (poll_id, chat_jid, voter_jid)
-		);
-		CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id, chat_jid);
-	`
-
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("failed to create schema: %v", err)
+	dir := t.TempDir()
+	// Cleanups run LIFO, so registering the chdir-back after t.TempDir makes it
+	// run before TempDir removal — Windows cannot delete a process's CWD.
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
 	}
-
-	return db
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
