@@ -4752,45 +4752,69 @@ func watchdogLoop(client *whatsmeow.Client, logger waLog.Logger) {
 		loggedIn := client.Store != nil && client.Store.ID != nil
 
 		decision := decideWatchdogAction(connected, loggedIn)
+		reconnect, attempt, warnLoggedOut := applyWatchdogDecision(decision)
 
-		watchdogState.Lock()
-
-		switch decision {
-		case watchdogNone:
-			// Reset disconnected tick counter on any connected, logged-in state
-			watchdogState.disconnectedTicks = 0
-
-		case watchdogReconnect:
-			// Reconnect only after two consecutive ticks (RF-06)
-			watchdogState.disconnectedTicks++
-			if watchdogState.disconnectedTicks >= 2 {
-				watchdogState.lastAction = watchdogReconnect
-				watchdogState.lastActionAt = time.Now()
-				watchdogState.reconnects++
-				watchdogState.disconnectedTicks = 0
-				watchdogState.Unlock()
-
-				// Try to reconnect (log errors but don't crash the loop)
-				logger.Warnf("Watchdog: attempting reconnect (attempt %d)", watchdogState.reconnects)
-				if err := client.Connect(); err != nil {
-					logger.Warnf("Watchdog reconnect failed: %v", err)
-				}
-				watchdogState.Lock()
-			}
-
-		case watchdogLoggedOut:
-			// Rate-limit logged-out warnings to at most 1 per 10 ticks
-			watchdogState.lastAction = watchdogLoggedOut
-			watchdogState.lastActionAt = time.Now()
-			watchdogState.loggedOutWarnTick++
-			if watchdogState.loggedOutWarnTick >= 10 {
-				logger.Warnf("Watchdog: device logged out, reconnect impossible without QR scan")
-				watchdogState.loggedOutWarnTick = 0
+		if warnLoggedOut {
+			logger.Warnf("Watchdog: device logged out, reconnect impossible without QR scan")
+		}
+		if reconnect {
+			logger.Warnf("Watchdog: attempting reconnect (attempt %d)", attempt)
+			if err := client.Connect(); err != nil {
+				logger.Warnf("Watchdog reconnect failed: %v", err)
 			}
 		}
-
-		watchdogState.Unlock()
 	}
+}
+
+// applyWatchdogDecision applies one tick to the shared watchdog state and
+// returns what the caller must do outside the lock: whether to reconnect, which
+// attempt number to log, and whether this tick earned a logged-out warning.
+//
+// Returning the attempt number instead of letting the caller read
+// watchdogState.reconnects is not cosmetic. The first version logged
+// "attempt %d" by reading that field *after* releasing the mutex — an
+// unsynchronized read of mutex-protected state, racing with every concurrent
+// GET /api/status. It survived a green `go test -race` run only because no test
+// ever started the watchdog goroutine, which is the same reason this function
+// exists: the effects (Connect, logging) are now outside, so the state
+// transitions can be driven from a test.
+func applyWatchdogDecision(d watchdogDecision) (reconnect bool, attempt int, warnLoggedOut bool) {
+	watchdogState.Lock()
+	defer watchdogState.Unlock()
+
+	switch d {
+	case watchdogNone:
+		// Any healthy tick clears the streak, so two *consecutive* bad ticks are
+		// required — a single blip is probably the library's own backoff working.
+		watchdogState.disconnectedTicks = 0
+		// Also clears the logged-out warning streak: after a re-pair, the next
+		// logout has to warn immediately instead of inheriting the old counter.
+		watchdogState.loggedOutWarnTick = 0
+
+	case watchdogReconnect:
+		watchdogState.disconnectedTicks++
+		if watchdogState.disconnectedTicks >= 2 {
+			watchdogState.lastAction = watchdogReconnect
+			watchdogState.lastActionAt = time.Now()
+			watchdogState.reconnects++
+			watchdogState.disconnectedTicks = 0
+			return true, watchdogState.reconnects, false
+		}
+
+	case watchdogLoggedOut:
+		watchdogState.lastAction = watchdogLoggedOut
+		watchdogState.lastActionAt = time.Now()
+		// Warn on the first tick of a logged-out streak, then at most once every
+		// 10. Warning only on the 10th would keep a dead session silent for ten
+		// minutes at the default interval — the opposite of the point.
+		warn := watchdogState.loggedOutWarnTick == 0
+		watchdogState.loggedOutWarnTick++
+		if watchdogState.loggedOutWarnTick >= 10 {
+			watchdogState.loggedOutWarnTick = 0
+		}
+		return false, 0, warn
+	}
+	return false, 0, false
 }
 
 func main() {
