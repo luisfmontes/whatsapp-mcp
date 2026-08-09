@@ -1878,9 +1878,12 @@ func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http
 			return
 		}
 
-		// Check for unique and non-empty options
+		// Trim in place, not just in the loop variable: the trimmed form is what
+		// gets validated, so it has to also be what is sent and stored. Otherwise
+		// " Sim" passes the duplicate check as "Sim" but reaches WhatsApp — and
+		// polls.options — with the leading space still on it.
 		seenOptions := make(map[string]bool)
-		for _, opt := range req.Options {
+		for i, opt := range req.Options {
 			opt = strings.TrimSpace(opt)
 			if opt == "" {
 				http.Error(w, "Invalid options: names must be unique and non-empty", http.StatusBadRequest)
@@ -1891,6 +1894,7 @@ func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http
 				return
 			}
 			seenOptions[opt] = true
+			req.Options[i] = opt
 		}
 
 		if req.SelectableCount < 1 || req.SelectableCount > len(req.Options) {
@@ -1929,6 +1933,24 @@ func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http
 		); err != nil {
 			// Log but don't fail the response - poll was sent even if storage failed
 			fmt.Printf("Failed to store poll in database: %v\n", err)
+		}
+
+		// Persist the poll as a message too, for the same reason /api/send does
+		// it (main.go, sendWhatsAppMessage): on a single-device account the
+		// multi-device echo never fires, so handleMessage never sees our own
+		// poll and RN-02 would hold only for polls received from other people.
+		// Without this, create_poll leaves a hole in list_messages exactly where
+		// the poll is.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			if ensureErr := messageStore.EnsureChat(chatJID.String(), resp.Timestamp); ensureErr != nil {
+				fmt.Printf("Failed to ensure chat row for poll: %v\n", ensureErr)
+			}
+			if storeErr := messageStore.StoreMessage(
+				resp.ID, chatJID.String(), client.Store.ID.User, req.Question,
+				resp.Timestamp, true, "", "", "", nil, nil, nil, 0,
+			); storeErr != nil {
+				fmt.Printf("Failed to store poll message: %v\n", storeErr)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

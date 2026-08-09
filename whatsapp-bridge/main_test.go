@@ -962,135 +962,153 @@ func TestHashPollOptions(t *testing.T) {
 }
 
 // TestCreatePollEndpoint validates POST /api/create_poll behavior.
-func TestCreatePollEndpoint(t *testing.T) {
-	t.Run("405 on non-POST", func(t *testing.T) {
-		for _, method := range []string{"GET", "PUT", "DELETE"} {
-			_ = httptest.NewRequest(method, "/api/create_poll", nil)
-			// Test would verify handler returns 405 for non-POST methods
+// The poll endpoint tests below replace an earlier version that built the
+// request with httptest.NewRequest and then discarded it (`_ = req`), never
+// calling the handler. Those passed with the validation code deleted, so RF-06
+// had no coverage at all. These go through doHandlerRequest, which actually
+// invokes the handler and returns the recorded response.
+//
+// A nil *whatsmeow.Client is fine here: every case is rejected during request
+// validation, before the handler touches the client.
+
+func TestHandleCreatePoll(t *testing.T) {
+	handler := handleCreatePoll(nil, nil)
+	valid := func() CreatePollRequest {
+		return CreatePollRequest{
+			ChatJID:         "120363000000000000@g.us",
+			Question:        "smoke?",
+			Options:         []string{"alpha", "beta"},
+			SelectableCount: 1,
+		}
+	}
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
 		}
 	})
 
-	t.Run("400 on malformed JSON", func(t *testing.T) {
-		badJSON := []string{
-			"{invalid json",
-			"",
-			"{\"chat_jid\": \"not_a_jid\"}",
-		}
-		for _, body := range badJSON {
-			req := httptest.NewRequest("POST", "/api/create_poll", strings.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			_ = req
-			// Would test that handler returns 400
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 
-	t.Run("400 on missing required fields", func(t *testing.T) {
-		testCases := []map[string]interface{}{
-			{},                                 // all missing
-			{"question": "What?"},              // missing chat_jid, options
-			{"chat_jid": "123@s.whatsapp.net"}, // missing question, options
-		}
-
-		for _, tc := range testCases {
-			body, _ := json.Marshal(tc)
-			req := httptest.NewRequest("POST", "/api/create_poll", bytes.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			_ = req
-		}
-	})
-
-	t.Run("400 on invalid options count", func(t *testing.T) {
-		testCases := []struct {
-			name    string
-			options []string
-			want    int // HTTP status code or validation error
-		}{
-			{"too few (1)", []string{"Yes"}, 400},
-			{"too many (13)", make([]string, 13), 400},
-			{"valid (2)", []string{"A", "B"}, 200},
-			{"valid (12)", make([]string, 12), 200},
-		}
-
-		for _, tc := range testCases {
-			for i := range tc.options {
-				tc.options[i] = "Option " + string(rune('A'+i))
+	rejected := []struct {
+		name   string
+		mutate func(*CreatePollRequest)
+	}{
+		{"empty chat_jid", func(r *CreatePollRequest) { r.ChatJID = "" }},
+		{"blank question", func(r *CreatePollRequest) { r.Question = "   " }},
+		{"single option", func(r *CreatePollRequest) { r.Options = []string{"alpha"} }},
+		{"thirteen options", func(r *CreatePollRequest) {
+			r.Options = make([]string, 13)
+			for i := range r.Options {
+				r.Options[i] = string(rune('a' + i))
 			}
-			_ = tc
-		}
-	})
+			r.SelectableCount = 1
+		}},
+		{"duplicate options", func(r *CreatePollRequest) { r.Options = []string{"alpha", "alpha"} }},
+		// " alpha" and "alpha" are the same option once trimmed; accepting both
+		// would produce two entries with the same SHA-256, making any vote for
+		// them ambiguous by construction (RN-08).
+		{"options differing only by surrounding space", func(r *CreatePollRequest) {
+			r.Options = []string{"alpha", " alpha "}
+		}},
+		{"blank option", func(r *CreatePollRequest) { r.Options = []string{"alpha", "  "} }},
+		// selectable_count 0 must not be forwarded: whatsmeow silently rewrites
+		// an out-of-range value to 0, which means "no limit" — a different poll
+		// from the one that was asked for (RN-07).
+		{"selectable_count zero", func(r *CreatePollRequest) { r.SelectableCount = 0 }},
+		{"selectable_count above option count", func(r *CreatePollRequest) { r.SelectableCount = 99 }},
+		{"negative selectable_count", func(r *CreatePollRequest) { r.SelectableCount = -1 }},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name+" returns 400", func(t *testing.T) {
+			req := valid()
+			tc.mutate(&req)
+			body, _ := json.Marshal(req)
+			rec := doHandlerRequest(t, handler, http.MethodPost, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
 
-	t.Run("400 on duplicate or empty options", func(t *testing.T) {
-		testCases := [][]string{
-			{"Option", "Option"},              // duplicate
-			{"A", ""},                         // empty
-			{" ", "B"},                        // whitespace-only (before TrimSpace)
-			{"Unique1", "Unique2", "Unique2"}, // duplicate in longer list
-		}
-
-		for _, opts := range testCases {
-			_ = opts
-		}
-	})
-
-	t.Run("400 on invalid selectable_count", func(t *testing.T) {
-		testCases := []struct {
-			name            string
-			options         []string
-			selectableCount int
-		}{
-			{"zero", []string{"A", "B"}, 0},
-			{"negative", []string{"A", "B"}, -1},
-			{"exceeds options", []string{"A", "B"}, 3},
-		}
-
-		for _, tc := range testCases {
-			_ = tc
+	// Guards the boundary from the other side: a request that satisfies every
+	// rule must get past validation. Without this, a handler that returned 400
+	// unconditionally would pass all the cases above.
+	t.Run("valid request passes validation and reaches the client guard", func(t *testing.T) {
+		body, _ := json.Marshal(valid())
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (nil client), got body: %s", rec.Code, rec.Body.String())
 		}
 	})
 }
 
-// TestVotePollEndpoint validates POST /api/vote_poll behavior.
-func TestVotePollEndpoint(t *testing.T) {
-	t.Run("404 on poll not found", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
-			`{"chat_jid":"123@s.whatsapp.net","poll_id":"unknown","options":["A"]}`,
-		))
-		req.Header.Set("Content-Type", "application/json")
-		_ = req
-		// Would verify handler returns 404
+func TestHandleVotePoll(t *testing.T) {
+	handler := handleVotePoll(nil, nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
 	})
 
-	t.Run("400 on invalid option", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
-			`{"chat_jid":"123@s.whatsapp.net","poll_id":"poll1","options":["NonExistent"]}`,
-		))
-		req.Header.Set("Content-Type", "application/json")
-		_ = req
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
 	})
 
-	t.Run("400 on too many options selected", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/vote_poll", strings.NewReader(
-			`{"chat_jid":"123@s.whatsapp.net","poll_id":"poll1","options":["A","B","C"]}`,
-		))
-		req.Header.Set("Content-Type", "application/json")
-		_ = req
-		// Would verify error when selectable_count=1 but 3 options requested
+	for _, tc := range []struct {
+		name string
+		req  VotePollRequest
+	}{
+		{"missing chat_jid", VotePollRequest{PollID: "MSG1", Options: []string{"alpha"}}},
+		{"missing poll_id", VotePollRequest{ChatJID: "120363000000000000@g.us", Options: []string{"alpha"}}},
+	} {
+		t.Run(tc.name+" returns 400", func(t *testing.T) {
+			body, _ := json.Marshal(tc.req)
+			rec := doHandlerRequest(t, handler, http.MethodPost, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlePollResults(t *testing.T) {
+	handler := handlePollResults(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("missing poll_id returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(PollResultsRequest{ChatJID: "120363000000000000@g.us"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+		}
 	})
 }
 
-// TestPollResultsEndpoint validates GET /api/poll_results behavior.
-func TestPollResultsEndpoint(t *testing.T) {
-	t.Run("404 on poll not found", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/poll_results", strings.NewReader(
-			`{"chat_jid":"123@s.whatsapp.net","poll_id":"unknown"}`,
-		))
-		req.Header.Set("Content-Type", "application/json")
-		_ = req
-		// Would verify handler returns 404
-	})
-}
-
-// TestPollVotesUpsertBehavior verifies vote upsert logic with timestamp guards.
 func TestPollVotesUpsertBehavior(t *testing.T) {
 	t.Run("vote upsert overwrites on later timestamp", func(t *testing.T) {
 		// Create temp DB
