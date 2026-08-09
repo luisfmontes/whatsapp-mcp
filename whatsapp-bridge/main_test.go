@@ -1403,10 +1403,10 @@ func TestResolvePollVote(t *testing.T) {
 // Healthy is only true when connected AND logged in; reason varies based on why not.
 func TestEvaluateHealth(t *testing.T) {
 	cases := []struct {
-		connected    bool
-		loggedIn     bool
-		wantHealthy  bool
-		wantReason   string
+		connected   bool
+		loggedIn    bool
+		wantHealthy bool
+		wantReason  string
 	}{
 		{true, true, true, ""},
 		{false, true, false, "disconnected from WhatsApp"},
@@ -1430,9 +1430,9 @@ func TestEvaluateHealth(t *testing.T) {
 // TestDecideWatchdogAction verifies the watchdog decision table (T001).
 func TestDecideWatchdogAction(t *testing.T) {
 	cases := []struct {
-		connected      bool
-		loggedIn       bool
-		wantDecision   watchdogDecision
+		connected    bool
+		loggedIn     bool
+		wantDecision watchdogDecision
 	}{
 		{true, true, watchdogNone},
 		{true, false, watchdogLoggedOut},
@@ -1452,103 +1452,65 @@ func TestDecideWatchdogAction(t *testing.T) {
 
 // TestStatusEndpointWithNilClient verifies that GET /api/status returns 200
 // (not 503) even when client == nil, with healthy=false and a non-empty reason (T003).
-func TestStatusEndpointWithNilClient(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
+// These replace a first version that re-implemented the handler body inside the
+// test ("mimics the actual handler") and asserted against its own copy. Proven
+// dead by mutation: making the real handler answer 503 left them green. They now
+// call handleStatus, which is why that handler had to stop being an inline
+// closure.
+func TestHandleStatus(t *testing.T) {
+	handler := handleStatus(nil)
+
+	t.Run("non-GET returns 405", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		// Mimics the actual handler with client == nil
-		connected := false
-		loggedIn := false
-		jid := ""
-		lastSuccessfulConnect := time.Time{}
-		autoReconnectErrors := 0
-
-		healthy, reason := evaluateHealth(connected, loggedIn)
-
-		watchdogState.RLock()
-		watchdogInterval := 60
-		watchdogStatus := WatchdogStatus{
-			IntervalSeconds: watchdogInterval,
-			Reconnects:      watchdogState.reconnects,
-		}
-		upstartTime := watchdogState.upstartTime
-		watchdogState.RUnlock()
-
-		uptime := int64(0)
-		if !upstartTime.IsZero() {
-			uptime = int64(time.Since(upstartTime).Seconds())
-		}
-
-		resp := StatusResponse{
-			Success:             true,
-			Healthy:             healthy,
-			Reason:              reason,
-			Connected:           connected,
-			LoggedIn:            loggedIn,
-			JID:                 jid,
-			AutoReconnectErrors: autoReconnectErrors,
-			UptimeSeconds:       uptime,
-			Watchdog:            watchdogStatus,
-		}
-
-		if !lastSuccessfulConnect.IsZero() {
-			resp.LastSuccessfulConnect = lastSuccessfulConnect.Format(time.RFC3339)
-		}
-
-		nanos := lastEventAtNanos.Load()
-		if nanos > 0 {
-			resp.LastEventAt = time.Unix(0, nanos).Format(time.RFC3339)
-		}
-
-		json.NewEncoder(w).Encode(resp)
 	})
 
-	rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+	// The load-bearing case: a bridge that is up but not usable must still
+	// answer 200. Returning 503 here would make "process dead" (connection
+	// refused) indistinguishable from "process alive, session logged out".
+	t.Run("nil client answers 200 with healthy=false and a reason", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	var resp StatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.Healthy {
-		t.Errorf("healthy = true, want false")
-	}
-	if resp.Reason == "" {
-		t.Errorf("reason is empty, want non-empty")
-	}
-	if !strings.Contains(resp.Reason, "not logged in") && !strings.Contains(resp.Reason, "disconnected") {
-		t.Errorf("reason = %q, expected to mention 'not logged in' or 'disconnected'", resp.Reason)
-	}
-}
-
-// TestStatusEndpointMethodNotAllowed verifies that non-GET methods return 405 (T003).
-func TestStatusEndpointMethodNotAllowed(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — an unusable bridge must still answer 200 (body: %s)",
+				rec.Code, rec.Body.String())
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(StatusResponse{Success: true})
+		var resp StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+		}
+		if !resp.Success {
+			t.Error("Success = false; it means 'I answered', not 'all is well', so it should be true")
+		}
+		if resp.Healthy {
+			t.Error("Healthy = true with no client")
+		}
+		if resp.Reason == "" {
+			t.Error("Reason is empty — 'not healthy' without a reason does not say what to do")
+		}
+		if resp.Connected || resp.LoggedIn {
+			t.Errorf("Connected=%v LoggedIn=%v, want both false", resp.Connected, resp.LoggedIn)
+		}
+		// Zero timestamps must be omitted rather than serialized as year 1.
+		if resp.LastSuccessfulConnect != "" {
+			t.Errorf("LastSuccessfulConnect = %q, want omitted while zero", resp.LastSuccessfulConnect)
+		}
 	})
 
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		t.Run(method, func(t *testing.T) {
-			rec := doHandlerRequest(t, handler, method, nil)
-			if rec.Code != http.StatusMethodNotAllowed {
-				t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
-			}
-		})
-	}
+	t.Run("content type is JSON", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+	})
 }
 
 // setupPollStore gives a test a real MessageStore on a throwaway database.
