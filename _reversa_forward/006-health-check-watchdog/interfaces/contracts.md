@@ -12,6 +12,7 @@ type WatchdogStatus struct {
     Reconnects      int    `json:"reconnects"`
     LastAction      string `json:"last_action,omitempty"`     // "none" | "reconnect" | "logged-out"
     LastActionAt    string `json:"last_action_at,omitempty"`  // RFC3339
+    LastTickAt      string `json:"last_tick_at,omitempty"`    // RFC3339
 }
 
 type StatusResponse struct {
@@ -37,6 +38,12 @@ Regras do handler:
   se está bem lê `Healthy`.
 - `client == nil` → `Connected:false`, `LoggedIn:false`, `Healthy:false`, com `Reason` dizendo que o
   client não foi inicializado.
+- **`LastTickAt`** (acrescentado ao planejar o smoke): é como um chamador distingue watchdog vivo de
+  watchdog morto. Um watchdog saudável **só loga quando age**, então rodando e travado são
+  indistinguíveis de fora — a mesma cegueira que este endpoint existe para remover, um nível acima.
+  Deve avançar a cada `IntervalSeconds`. Vazio só é esperado logo depois do start.
+- **`IntervalSeconds` vem do valor que o laço resolveu na inicialização**, não de uma releitura do
+  ambiente pelo handler. Reportar um número que o laço não está usando é pior que não reportar.
 - Campos vindos direto da lib: `client.IsConnected()`, `client.Store.ID != nil` (logado),
   `client.Store.ID.String()`, `client.LastSuccessfulConnect`, `client.AutoReconnectErrors`.
 - `LastSuccessfulConnect` e `LastEventAt` **omitidos quando zero** — data zero formatada engana mais

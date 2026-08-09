@@ -73,6 +73,14 @@ var watchdogState struct {
 	loggedOutWarnTick     int              // tick counter for logged-out warning rate-limiting
 	upstartTime           time.Time        // when the bridge started
 	lastSuccessfulConnect time.Time        // last time client.IsConnected() returned true
+	// lastTickAt and effectiveInterval make the watchdog itself observable. A
+	// healthy watchdog only logs when it acts, so a running one and a dead one
+	// look identical from outside — the same blindness this endpoint exists to
+	// remove, one level up. effectiveInterval is the value the loop actually
+	// resolved at startup, not a re-read of the environment: reporting a number
+	// the loop is not using would be worse than reporting none.
+	lastTickAt        time.Time
+	effectiveInterval int
 }
 
 // lastEventAtNanos stores the unix nanoseconds of the last event (any type).
@@ -119,11 +127,11 @@ func handleStatus(client *whatsmeow.Client) http.HandlerFunc {
 
 		// Get watchdog state
 		watchdogState.RLock()
-		watchdogInterval := 60 // default
-		if portStr := os.Getenv("WHATSAPP_WATCHDOG_INTERVAL"); portStr != "" {
-			if parsed, err := strconv.Atoi(portStr); err == nil && parsed >= 10 {
-				watchdogInterval = parsed
-			}
+		// Reports what the loop resolved at startup. Zero means the loop has not
+		// started yet, and 60 is the same default it would have picked.
+		watchdogInterval := watchdogState.effectiveInterval
+		if watchdogInterval == 0 {
+			watchdogInterval = 60
 		}
 		watchdogStatus := WatchdogStatus{
 			IntervalSeconds: watchdogInterval,
@@ -132,6 +140,9 @@ func handleStatus(client *whatsmeow.Client) http.HandlerFunc {
 		if watchdogState.lastAction != watchdogNone && !watchdogState.lastActionAt.IsZero() {
 			watchdogStatus.LastAction = string(watchdogState.lastAction)
 			watchdogStatus.LastActionAt = watchdogState.lastActionAt.Format(time.RFC3339)
+		}
+		if !watchdogState.lastTickAt.IsZero() {
+			watchdogStatus.LastTickAt = watchdogState.lastTickAt.Format(time.RFC3339)
 		}
 		upstartTime := watchdogState.upstartTime
 		watchdogState.RUnlock()
@@ -552,6 +563,10 @@ type WatchdogStatus struct {
 	Reconnects      int    `json:"reconnects"`
 	LastAction      string `json:"last_action,omitempty"`    // "none" | "reconnect" | "logged-out"
 	LastActionAt    string `json:"last_action_at,omitempty"` // RFC3339
+	// LastTickAt is how a caller tells a live watchdog from a dead one: it must
+	// keep advancing by roughly IntervalSeconds. Empty means it has not ticked
+	// yet — expected right after startup, suspicious any later.
+	LastTickAt string `json:"last_tick_at,omitempty"` // RFC3339
 }
 
 // StatusResponse represents the response for GET /api/status.
@@ -4740,10 +4755,23 @@ func watchdogLoop(client *whatsmeow.Client, logger waLog.Logger) {
 	}
 	logger.Infof("Watchdog starting with interval %d seconds", interval)
 
+	// Publish the interval the loop actually resolved, so /api/status reports
+	// what is in force instead of re-reading the environment on its own.
+	watchdogState.Lock()
+	watchdogState.effectiveInterval = interval
+	watchdogState.Unlock()
+
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		// Stamped before any early return, so a tick counts as a tick even when
+		// there is nothing to do — that is precisely the case a caller needs to
+		// distinguish from a dead loop.
+		watchdogState.Lock()
+		watchdogState.lastTickAt = time.Now()
+		watchdogState.Unlock()
+
 		if client == nil {
 			continue
 		}
