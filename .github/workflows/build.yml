@@ -56,6 +56,17 @@ jobs:
       - name: test
         run: go test ./...
 
+      # The race detector needs CGO, so it can only run on the two jobs that
+      # have it — which is also why it cannot run on the maintainer's Windows
+      # machine, where the whole point of the port is needing no C toolchain.
+      # Without this step, the shared state between the watchdog goroutine, the
+      # whatsmeow event callback and /api/status is only ever checked by reading.
+      # Detection is probabilistic, so -count=3 buys a few more interleavings:
+      # a reintroduced unsynchronized read was caught in 3 of 6 single runs.
+      - name: test with race detector
+        if: matrix.cgo == '1'
+        run: go test -race -count=3 ./...
+
   gofmt:
     # Linux only: the Windows runner checks out with CRLF, which gofmt reports as
     # unformatted for every file, so running this on all three would be noise.
