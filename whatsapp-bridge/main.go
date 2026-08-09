@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -130,6 +133,31 @@ func NewMessageStore() (*MessageStore, error) {
 		-- answer for a few thousand.
 		CREATE INDEX IF NOT EXISTS idx_messages_audio_pending ON messages(chat_jid)
 			WHERE media_type = 'audio' AND (content IS NULL OR content = '');
+
+		-- Gap #11: polls and votes (T001)
+		CREATE TABLE IF NOT EXISTS polls (
+			id TEXT,
+			chat_jid TEXT,
+			sender TEXT,
+			name TEXT,
+			options TEXT,
+			selectable_count INTEGER,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (id, chat_jid),
+			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+		);
+
+		CREATE TABLE IF NOT EXISTS poll_votes (
+			poll_id TEXT,
+			chat_jid TEXT,
+			voter_jid TEXT,
+			selected TEXT,
+			resolved INTEGER NOT NULL DEFAULT 1,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (poll_id, chat_jid, voter_jid)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_id, chat_jid);
 	`)
 	if err != nil {
 		db.Close()
@@ -818,6 +846,67 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+
+	// Gap #11: Handle polls (T003)
+	// PollCreationMessage: store poll and treat as message with question as content
+	if poll := msg.Message.GetPollCreationMessage(); poll != nil {
+		optionNames := make([]string, 0)
+		for _, opt := range poll.GetOptions() {
+			optionNames = append(optionNames, opt.GetOptionName())
+		}
+		optionsJSON, _ := json.Marshal(optionNames)
+		if err := messageStore.StorePoll(
+			msg.Info.ID,
+			chatJID,
+			senderJID,
+			poll.GetName(),
+			string(optionsJSON),
+			int(poll.GetSelectableOptionsCount()),
+			msg.Info.Timestamp.Unix(),
+		); err != nil {
+			logger.Warnf("Failed to store poll: %v", err)
+		}
+		// Set content to question so poll appears in history (RN-02)
+		content = poll.GetName()
+		// Continue to StoreMessage below, do not return
+	}
+
+	// PollUpdateMessage: handle vote
+	if upd := msg.Message.GetPollUpdateMessage(); upd != nil {
+		vote, err := client.DecryptPollVote(context.Background(), msg)
+		if err != nil {
+			logger.Warnf("Failed to decrypt poll vote: %v", err)
+		} else {
+			pollID := upd.GetPollCreationMessageKey().GetID()
+			voterJID := resolveToPN(client, msg.Info.Sender).String()
+
+			// Try to get poll; if not found, store vote as unresolved (RN-05)
+			_, optionsJSON, _, _, err := messageStore.GetPoll(pollID, chatJID)
+			if err != nil {
+				// Poll unknown (created before this feature, or the bridge was
+				// offline when it was sent). The vote is still recorded, as
+				// unresolved, instead of vanishing (RN-05).
+				if err != sql.ErrNoRows {
+					logger.Warnf("Failed to load poll %s for vote: %v", pollID, err)
+				}
+				optionsJSON = ""
+			}
+			selectedJSON, resolved := resolvePollVote(optionsJSON, vote.GetSelectedOptions())
+
+			if err := messageStore.UpsertPollVote(
+				pollID,
+				chatJID,
+				voterJID,
+				selectedJSON,
+				resolved,
+				msg.Info.Timestamp.Unix(),
+			); err != nil {
+				logger.Warnf("Failed to upsert poll vote: %v", err)
+			}
+		}
+		// Vote does not go to messages table (RN per contracts)
+		return
+	}
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -1710,6 +1799,439 @@ func handleProfilePicture(client *whatsmeow.Client) http.HandlerFunc {
 	}
 }
 
+// Gap #11: Poll types and handlers (T004)
+
+type CreatePollRequest struct {
+	ChatJID         string   `json:"chat_jid"`
+	Question        string   `json:"question"`
+	Options         []string `json:"options"`
+	SelectableCount int      `json:"selectable_count"`
+}
+
+type CreatePollResponse struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	MessageID string `json:"message_id,omitempty"`
+}
+
+type VotePollRequest struct {
+	ChatJID string   `json:"chat_jid"`
+	PollID  string   `json:"poll_id"`
+	Options []string `json:"options"`
+}
+
+type PollResultsRequest struct {
+	ChatJID string `json:"chat_jid"`
+	PollID  string `json:"poll_id"`
+}
+
+type PollOptionResult struct {
+	Option string   `json:"option"`
+	Count  int      `json:"count"`
+	Voters []string `json:"voters,omitempty"`
+}
+
+type PollResultsResponse struct {
+	Success         bool               `json:"success"`
+	Message         string             `json:"message"`
+	Question        string             `json:"question,omitempty"`
+	Results         []PollOptionResult `json:"results,omitempty"`
+	TotalVoters     int                `json:"total_voters"`
+	UnresolvedVotes int                `json:"unresolved_votes"`
+}
+
+// handleCreatePoll returns the handler for POST /api/create_poll
+func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req CreatePollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request: could not decode JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Validation
+		req.ChatJID = strings.TrimSpace(req.ChatJID)
+		if req.ChatJID == "" {
+			http.Error(w, "Invalid request: chat_jid required", http.StatusBadRequest)
+			return
+		}
+
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			http.Error(w, "Invalid chat_jid", http.StatusBadRequest)
+			return
+		}
+
+		req.Question = strings.TrimSpace(req.Question)
+		if req.Question == "" {
+			http.Error(w, "Invalid request: question cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Options) < 2 || len(req.Options) > 12 {
+			http.Error(w, "Invalid options: must have between 2 and 12 options", http.StatusBadRequest)
+			return
+		}
+
+		// Trim in place, not just in the loop variable: the trimmed form is what
+		// gets validated, so it has to also be what is sent and stored. Otherwise
+		// " Sim" passes the duplicate check as "Sim" but reaches WhatsApp — and
+		// polls.options — with the leading space still on it.
+		seenOptions := make(map[string]bool)
+		for i, opt := range req.Options {
+			opt = strings.TrimSpace(opt)
+			if opt == "" {
+				http.Error(w, "Invalid options: names must be unique and non-empty", http.StatusBadRequest)
+				return
+			}
+			if seenOptions[opt] {
+				http.Error(w, "Invalid options: names must be unique and non-empty", http.StatusBadRequest)
+				return
+			}
+			seenOptions[opt] = true
+			req.Options[i] = opt
+		}
+
+		if req.SelectableCount < 1 || req.SelectableCount > len(req.Options) {
+			http.Error(w, "Invalid request: selectable_count must be between 1 and number of options", http.StatusBadRequest)
+			return
+		}
+
+		// Check client connection
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(CreatePollResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+
+		// Build and send poll
+		msg := client.BuildPollCreation(req.Question, req.Options, req.SelectableCount)
+		resp, err := client.SendMessage(r.Context(), chatJID, msg)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(CreatePollResponse{Success: false, Message: fmt.Sprintf("SendMessage error: %v", err)})
+			return
+		}
+
+		// The chat row has to exist first: polls carries a foreign key to
+		// chats(jid) and foreign keys are enforced on this connection, so
+		// storing a poll in a chat we've never written would fail outright —
+		// the poll would go out on WhatsApp and then be unknown to vote_poll
+		// and poll_results.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			if ensureErr := messageStore.EnsureChat(chatJID.String(), resp.Timestamp); ensureErr != nil {
+				fmt.Printf("Failed to ensure chat row for poll: %v\n", ensureErr)
+			}
+		}
+
+		// Store poll in database
+		optionsJSON, _ := json.Marshal(req.Options)
+		if err := messageStore.StorePoll(
+			resp.ID,
+			chatJID.String(),
+			client.Store.ID.String(),
+			req.Question,
+			string(optionsJSON),
+			req.SelectableCount,
+			time.Now().Unix(),
+		); err != nil {
+			// Log but don't fail the response - poll was sent even if storage failed
+			fmt.Printf("Failed to store poll in database: %v\n", err)
+		}
+
+		// Persist the poll as a message too, for the same reason /api/send does
+		// it (main.go, sendWhatsAppMessage): on a single-device account the
+		// multi-device echo never fires, so handleMessage never sees our own
+		// poll and RN-02 would hold only for polls received from other people.
+		// Without this, create_poll leaves a hole in list_messages exactly where
+		// the poll is.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			if storeErr := messageStore.StoreMessage(
+				resp.ID, chatJID.String(), client.Store.ID.User, req.Question,
+				resp.Timestamp, true, "", "", "", nil, nil, nil, 0,
+			); storeErr != nil {
+				fmt.Printf("Failed to store poll message: %v\n", storeErr)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(CreatePollResponse{
+			Success:   true,
+			Message:   "Poll created and sent",
+			MessageID: resp.ID,
+		})
+	}
+}
+
+// handleVotePoll returns the handler for POST /api/vote_poll
+func handleVotePoll(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req VotePollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" || req.PollID == "" {
+			http.Error(w, "Invalid request: chat_jid and poll_id required", http.StatusBadRequest)
+			return
+		}
+
+		// Get poll from database
+		_, optionsJSON, selectableCount, senderJID, err := messageStore.GetPoll(req.PollID, req.ChatJID)
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Poll not found. The bridge may not know this poll if it was created before this feature was enabled.",
+			})
+			return
+		}
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+
+		// Validate options exist in poll
+		var pollOptions []string
+		if err := json.Unmarshal([]byte(optionsJSON), &pollOptions); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Failed to parse poll options",
+			})
+			return
+		}
+
+		pollOptionsMap := make(map[string]bool)
+		for _, opt := range pollOptions {
+			pollOptionsMap[opt] = true
+		}
+
+		var invalidOptions []string
+		for _, opt := range req.Options {
+			if !pollOptionsMap[opt] {
+				invalidOptions = append(invalidOptions, opt)
+			}
+		}
+		if len(invalidOptions) > 0 {
+			http.Error(w, fmt.Sprintf("Invalid options: %v", invalidOptions), http.StatusBadRequest)
+			return
+		}
+
+		// Validate selectable_count
+		if selectableCount > 0 && len(req.Options) > selectableCount {
+			http.Error(w, "Too many options selected", http.StatusBadRequest)
+			return
+		}
+
+		// Check client connection
+		if client == nil || !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "WhatsApp client not connected",
+			})
+			return
+		}
+
+		// Reconstruct MessageInfo for the poll creation message
+		pollJID, _ := types.ParseJID(req.ChatJID)
+		senderJIDParsed, _ := types.ParseJID(senderJID)
+		pollInfo := types.MessageInfo{
+			ID: req.PollID,
+			MessageSource: types.MessageSource{
+				Chat:   pollJID,
+				Sender: senderJIDParsed,
+			},
+		}
+
+		// Build and send vote
+		msg, err := client.BuildPollVote(r.Context(), &pollInfo, req.Options)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("BuildPollVote error: %v", err),
+			})
+			return
+		}
+		resp, err := client.SendMessage(r.Context(), pollJID, msg)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("SendMessage error: %v", err),
+			})
+			return
+		}
+
+		// Record our own vote directly, for the same reason handleCreatePoll
+		// stores its own message: on a single-device account the multi-device
+		// echo never fires, so handleMessage never sees this PollUpdateMessage
+		// and the vote we just cast would be missing from our own tally. Found
+		// by smoke — the vote sent fine and poll_results stayed at zero.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			selectedJSON, err := json.Marshal(req.Options)
+			if err != nil {
+				fmt.Printf("Failed to encode own vote: %v\n", err)
+			} else if storeErr := messageStore.UpsertPollVote(
+				req.PollID, req.ChatJID, client.Store.ID.ToNonAD().String(),
+				string(selectedJSON), 1, resp.Timestamp.Unix(),
+			); storeErr != nil {
+				fmt.Printf("Failed to store own poll vote: %v\n", storeErr)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Vote submitted",
+		})
+	}
+}
+
+// handlePollResults returns the handler for POST /api/poll_results
+func handlePollResults(messageStore *MessageStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req PollResultsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" || req.PollID == "" {
+			http.Error(w, "Invalid request: chat_jid and poll_id required", http.StatusBadRequest)
+			return
+		}
+
+		// Get poll
+		question, optionsJSON, _, _, err := messageStore.GetPoll(req.PollID, req.ChatJID)
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(PollResultsResponse{
+				Success: false,
+				Message: "Poll not found",
+			})
+			return
+		}
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(PollResultsResponse{
+				Success: false,
+				Message: fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+
+		// Parse poll options
+		var pollOptions []string
+		if err := json.Unmarshal([]byte(optionsJSON), &pollOptions); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(PollResultsResponse{
+				Success: false,
+				Message: "Failed to parse poll options",
+			})
+			return
+		}
+
+		// Get all votes
+		votes, err := messageStore.GetPollVotes(req.PollID, req.ChatJID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(PollResultsResponse{
+				Success: false,
+				Message: fmt.Sprintf("Database error: %v", err),
+			})
+			return
+		}
+
+		// Build results
+		optionCounts := make(map[string]int)
+		optionVoters := make(map[string]map[string]bool)
+		totalVoters := 0
+		unresolvedVotes := 0
+
+		for _, option := range pollOptions {
+			optionVoters[option] = make(map[string]bool)
+		}
+
+		for _, vote := range votes {
+			if vote.Resolved == 0 {
+				unresolvedVotes++
+				continue
+			}
+
+			var selectedOptions []string
+			if err := json.Unmarshal([]byte(vote.SelectedJSON), &selectedOptions); err != nil {
+				continue
+			}
+
+			// A withdrawn vote (empty selection) is a resolved, understood vote,
+			// but it is not a voter: counting it would let total_voters exceed
+			// the sum of the per-option counts, and "3 people voted" would be
+			// read as three actual choices.
+			if len(selectedOptions) == 0 {
+				continue
+			}
+			totalVoters++
+
+			for _, opt := range selectedOptions {
+				optionCounts[opt]++
+				optionVoters[opt][vote.VoterJID] = true
+			}
+		}
+
+		// Build response with all options in original order
+		results := make([]PollOptionResult, 0, len(pollOptions))
+		for _, option := range pollOptions {
+			voters := make([]string, 0)
+			for voter := range optionVoters[option] {
+				voters = append(voters, voter)
+			}
+			// Sort for consistent output
+			sort.Strings(voters)
+
+			results = append(results, PollOptionResult{
+				Option: option,
+				Count:  optionCounts[option],
+				Voters: voters,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PollResultsResponse{
+			Success:         true,
+			Message:         "Poll results retrieved",
+			Question:        question,
+			Results:         results,
+			TotalVoters:     totalVoters,
+			UnresolvedVotes: unresolvedVotes,
+		})
+	}
+}
+
 // ChatPresenceRequest represents a request to send a typing/recording indicator.
 type ChatPresenceRequest struct {
 	ChatJID string `json:"chat_jid"`
@@ -2108,6 +2630,121 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, str
 	).Scan(&mediaType, &filename, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
 
 	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err
+}
+
+// Gap #11: Poll store methods (T002)
+
+// resolvePollVote maps the SHA-256 option hashes in a poll vote back to option
+// names, using the poll's stored option list. It returns the JSON array to
+// persist in poll_votes.selected and the resolved flag for that column.
+//
+// A vote carries only hashes (HashPollOptions is sha256 of the option name), so
+// without the original option list it is meaningless. Every path that can't
+// produce a complete mapping — unknown poll (empty optionsJSON), unparseable
+// stored options, or a hash that matches none of them — yields resolved=0 so
+// the vote is still recorded and reported as unresolved rather than dropped or,
+// worse, counted as if it had been understood (RN-05).
+//
+// Kept as a pure function on purpose: the hash mapping is the one piece of this
+// feature that can be wrong in a way no HTTP test would reveal.
+func resolvePollVote(optionsJSON string, selected [][]byte) (selectedJSON string, resolved int) {
+	var optionNames []string
+	if optionsJSON == "" {
+		return "[]", 0
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &optionNames); err != nil {
+		return "[]", 0
+	}
+	nameByHash := make(map[string]string, len(optionNames))
+	for _, name := range optionNames {
+		hash := sha256.Sum256([]byte(name))
+		nameByHash[hex.EncodeToString(hash[:])] = name
+	}
+	names := make([]string, 0, len(selected))
+	for _, hash := range selected {
+		if name, ok := nameByHash[hex.EncodeToString(hash)]; ok {
+			names = append(names, name)
+		}
+	}
+	encoded, err := json.Marshal(names)
+	if err != nil {
+		return "[]", 0
+	}
+	// An empty selection is a legitimate, fully-understood vote: it means the
+	// voter withdrew their choice. Only a partial mapping is unresolved.
+	if len(names) != len(selected) {
+		return string(encoded), 0
+	}
+	return string(encoded), 1
+}
+
+// StorePoll stores a poll in the polls table
+func (store *MessageStore) StorePoll(id, chatJID, sender, name, optionsJSON string, selectableCount int, timestamp int64) error {
+	_, err := store.db.Exec(
+		`INSERT INTO polls (id, chat_jid, sender, name, options, selectable_count, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender = excluded.sender,
+			name = excluded.name,
+			options = excluded.options,
+			selectable_count = excluded.selectable_count,
+			timestamp = excluded.timestamp`,
+		id, chatJID, sender, name, optionsJSON, selectableCount, timestamp,
+	)
+	return err
+}
+
+// GetPoll retrieves a poll from the polls table
+func (store *MessageStore) GetPoll(pollID, chatJID string) (name, optionsJSON string, selectableCount int, senderJID string, err error) {
+	err = store.db.QueryRow(
+		"SELECT name, options, selectable_count, sender FROM polls WHERE id = ? AND chat_jid = ?",
+		pollID, chatJID,
+	).Scan(&name, &optionsJSON, &selectableCount, &senderJID)
+	return
+}
+
+// UpsertPollVote stores or updates a poll vote with timestamp guard (RN-04)
+func (store *MessageStore) UpsertPollVote(pollID, chatJID, voterJID, selectedJSON string, resolved int, timestamp int64) error {
+	_, err := store.db.Exec(
+		`INSERT INTO poll_votes (poll_id, chat_jid, voter_jid, selected, resolved, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(poll_id, chat_jid, voter_jid) DO UPDATE SET
+			selected = excluded.selected,
+			resolved = excluded.resolved,
+			timestamp = excluded.timestamp
+		WHERE excluded.timestamp >= poll_votes.timestamp`,
+		pollID, chatJID, voterJID, selectedJSON, resolved, timestamp,
+	)
+	return err
+}
+
+// PollVote represents a single vote record
+type PollVote struct {
+	VoterJID     string
+	SelectedJSON string
+	Resolved     int
+}
+
+// GetPollVotes retrieves all votes for a poll
+func (store *MessageStore) GetPollVotes(pollID, chatJID string) ([]PollVote, error) {
+	rows, err := store.db.Query(
+		"SELECT voter_jid, selected, resolved FROM poll_votes WHERE poll_id = ? AND chat_jid = ? ORDER BY timestamp",
+		pollID, chatJID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var votes []PollVote
+	for rows.Next() {
+		var v PollVote
+		if err := rows.Scan(&v.VoterJID, &v.SelectedJSON, &v.Resolved); err != nil {
+			return nil, err
+		}
+		votes = append(votes, v)
+	}
+	return votes, rows.Err()
 }
 
 // safeMediaPath builds a media file path inside chatDir, rejecting any message
@@ -3792,6 +4429,11 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 	// T003 — Gap #10: user info
 	http.HandleFunc("/api/user_info", handleUserInfo(client))
 	http.HandleFunc("/api/profile_picture", handleProfilePicture(client))
+
+	// T004 — Gap #11: polls
+	http.HandleFunc("/api/create_poll", handleCreatePoll(client, messageStore))
+	http.HandleFunc("/api/vote_poll", handleVotePoll(client, messageStore))
+	http.HandleFunc("/api/poll_results", handlePollResults(messageStore))
 
 	// Handler for sending a typing/recording indicator to a chat.
 	http.HandleFunc("/api/chat_presence", handleChatPresence(client))

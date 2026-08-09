@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -907,4 +911,521 @@ func TestMergeUserInfoResults(t *testing.T) {
 			t.Fatalf("results[0].JID = %q, want the resolved non-AD JID %q", results[0].JID, nonAD.String())
 		}
 	})
+}
+
+// TestHashPollOptions verifies that hash→name mapping is consistent and deterministic.
+func TestHashPollOptions(t *testing.T) {
+	t.Run("SHA256 hash consistency", func(t *testing.T) {
+		options := []string{"Option A", "Option B"}
+
+		// Compute hashes twice to verify determinism
+		hashMap1 := make(map[string]string)
+		hashMap2 := make(map[string]string)
+
+		for _, opt := range options {
+			hash := sha256.Sum256([]byte(opt))
+			hashStr := hex.EncodeToString(hash[:])
+			hashMap1[hashStr] = opt
+			hashMap2[hashStr] = opt
+		}
+
+		if len(hashMap1) != len(options) {
+			t.Fatalf("hashMap1 has %d entries, want %d", len(hashMap1), len(options))
+		}
+		if len(hashMap2) != len(options) {
+			t.Fatalf("hashMap2 has %d entries, want %d", len(hashMap2), len(options))
+		}
+
+		// Verify hashes are identical on second computation
+		for _, opt := range options {
+			hash1 := sha256.Sum256([]byte(opt))
+			hash2 := sha256.Sum256([]byte(opt))
+			if hash1 != hash2 {
+				t.Errorf("hash mismatch for %q", opt)
+			}
+		}
+	})
+
+	t.Run("unique options produce unique hashes", func(t *testing.T) {
+		options := []string{"Yes", "No", "Maybe"}
+		hashes := make(map[string]bool)
+
+		for _, opt := range options {
+			hash := sha256.Sum256([]byte(opt))
+			hashStr := hex.EncodeToString(hash[:])
+			if hashes[hashStr] {
+				t.Errorf("hash collision detected for %q", opt)
+			}
+			hashes[hashStr] = true
+		}
+	})
+}
+
+// TestCreatePollEndpoint validates POST /api/create_poll behavior.
+// The poll endpoint tests below replace an earlier version that built the
+// request with httptest.NewRequest and then discarded it (`_ = req`), never
+// calling the handler. Those passed with the validation code deleted, so RF-06
+// had no coverage at all. These go through doHandlerRequest, which actually
+// invokes the handler and returns the recorded response.
+//
+// A nil *whatsmeow.Client is fine here: every case is rejected during request
+// validation, before the handler touches the client.
+
+func TestHandleCreatePoll(t *testing.T) {
+	handler := handleCreatePoll(nil, nil)
+	valid := func() CreatePollRequest {
+		return CreatePollRequest{
+			ChatJID:         "120363000000000000@g.us",
+			Question:        "smoke?",
+			Options:         []string{"alpha", "beta"},
+			SelectableCount: 1,
+		}
+	}
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	rejected := []struct {
+		name   string
+		mutate func(*CreatePollRequest)
+	}{
+		{"empty chat_jid", func(r *CreatePollRequest) { r.ChatJID = "" }},
+		{"blank question", func(r *CreatePollRequest) { r.Question = "   " }},
+		{"single option", func(r *CreatePollRequest) { r.Options = []string{"alpha"} }},
+		{"thirteen options", func(r *CreatePollRequest) {
+			r.Options = make([]string, 13)
+			for i := range r.Options {
+				r.Options[i] = string(rune('a' + i))
+			}
+			r.SelectableCount = 1
+		}},
+		{"duplicate options", func(r *CreatePollRequest) { r.Options = []string{"alpha", "alpha"} }},
+		// " alpha" and "alpha" are the same option once trimmed; accepting both
+		// would produce two entries with the same SHA-256, making any vote for
+		// them ambiguous by construction (RN-08).
+		{"options differing only by surrounding space", func(r *CreatePollRequest) {
+			r.Options = []string{"alpha", " alpha "}
+		}},
+		{"blank option", func(r *CreatePollRequest) { r.Options = []string{"alpha", "  "} }},
+		// selectable_count 0 must not be forwarded: whatsmeow silently rewrites
+		// an out-of-range value to 0, which means "no limit" — a different poll
+		// from the one that was asked for (RN-07).
+		{"selectable_count zero", func(r *CreatePollRequest) { r.SelectableCount = 0 }},
+		{"selectable_count above option count", func(r *CreatePollRequest) { r.SelectableCount = 99 }},
+		{"negative selectable_count", func(r *CreatePollRequest) { r.SelectableCount = -1 }},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name+" returns 400", func(t *testing.T) {
+			req := valid()
+			tc.mutate(&req)
+			body, _ := json.Marshal(req)
+			rec := doHandlerRequest(t, handler, http.MethodPost, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// Guards the boundary from the other side: a request that satisfies every
+	// rule must get past validation. Without this, a handler that returned 400
+	// unconditionally would pass all the cases above.
+	t.Run("valid request passes validation and reaches the client guard", func(t *testing.T) {
+		body, _ := json.Marshal(valid())
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (nil client), got body: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestHandleVotePoll(t *testing.T) {
+	handler := handleVotePoll(nil, nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		req  VotePollRequest
+	}{
+		{"missing chat_jid", VotePollRequest{PollID: "MSG1", Options: []string{"alpha"}}},
+		{"missing poll_id", VotePollRequest{ChatJID: "120363000000000000@g.us", Options: []string{"alpha"}}},
+	} {
+		t.Run(tc.name+" returns 400", func(t *testing.T) {
+			body, _ := json.Marshal(tc.req)
+			rec := doHandlerRequest(t, handler, http.MethodPost, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestPollResultsTally drives handlePollResults against a real temp DB, which
+// is the only way to cover the tally arithmetic — the validation-only tests
+// below never reach it.
+func TestPollResultsTally(t *testing.T) {
+	store := setupPollStore(t)
+
+	const pollID, chatJID = "POLL1", "120363000000000000@g.us"
+	// polls has a foreign key to chats(jid), enforced on this connection —
+	// same reason handleCreatePoll calls EnsureChat before StorePoll.
+	if err := store.EnsureChat(chatJID, time.Now()); err != nil {
+		t.Fatalf("EnsureChat: %v", err)
+	}
+	if err := store.StorePoll(pollID, chatJID, "me@s.whatsapp.net", "smoke?",
+		`["alpha","beta","gama"]`, 1, time.Now().Unix()); err != nil {
+		t.Fatalf("StorePoll: %v", err)
+	}
+	seed := []struct {
+		voter    string
+		selected string
+		resolved int
+	}{
+		{"a@s.whatsapp.net", `["alpha"]`, 1},
+		{"b@s.whatsapp.net", `["alpha"]`, 1},
+		{"c@s.whatsapp.net", `[]`, 1}, // withdrew their vote
+		{"d@s.whatsapp.net", `[]`, 0}, // poll options unknown to the bridge
+	}
+	for _, s := range seed {
+		if err := store.UpsertPollVote(pollID, chatJID, s.voter, s.selected, s.resolved, time.Now().Unix()); err != nil {
+			t.Fatalf("UpsertPollVote(%s): %v", s.voter, err)
+		}
+	}
+
+	body, _ := json.Marshal(PollResultsRequest{ChatJID: chatJID, PollID: pollID})
+	rec := doHandlerRequest(t, handlePollResults(store), http.MethodPost, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp PollResultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Every option is reported, in the stored order, including the ones nobody
+	// picked — omitting them would read as "that option did not exist".
+	if len(resp.Results) != 3 {
+		t.Fatalf("got %d options, want 3: %+v", len(resp.Results), resp.Results)
+	}
+	for i, want := range []string{"alpha", "beta", "gama"} {
+		if resp.Results[i].Option != want {
+			t.Errorf("Results[%d].Option = %q, want %q", i, resp.Results[i].Option, want)
+		}
+	}
+	if resp.Results[0].Count != 2 {
+		t.Errorf("alpha count = %d, want 2", resp.Results[0].Count)
+	}
+	if resp.Results[1].Count != 0 || resp.Results[2].Count != 0 {
+		t.Errorf("unpicked options should be 0, got beta=%d gama=%d", resp.Results[1].Count, resp.Results[2].Count)
+	}
+	// The withdrawn vote is understood but is not a voter: total_voters must
+	// never exceed the sum of the per-option counts.
+	if resp.TotalVoters != 2 {
+		t.Errorf("TotalVoters = %d, want 2 (withdrawn vote must not count)", resp.TotalVoters)
+	}
+	if resp.UnresolvedVotes != 1 {
+		t.Errorf("UnresolvedVotes = %d, want 1", resp.UnresolvedVotes)
+	}
+}
+
+func TestHandlePollResults(t *testing.T) {
+	handler := handlePollResults(nil)
+
+	t.Run("non-POST returns 405", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	t.Run("malformed JSON returns 400", func(t *testing.T) {
+		rec := doHandlerRequest(t, handler, http.MethodPost, []byte("{not json"))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("missing poll_id returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(PollResultsRequest{ChatJID: "120363000000000000@g.us"})
+		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestPollVotesUpsertBehavior(t *testing.T) {
+	t.Run("vote upsert overwrites on later timestamp", func(t *testing.T) {
+		// Create temp DB
+		store := setupPollStore(t)
+		db := store.db
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+		oldTime := time.Now().Unix() - 100
+		newTime := time.Now().Unix()
+
+		// First vote
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, oldTime)
+		if err != nil {
+			t.Fatalf("first upsert failed: %v", err)
+		}
+
+		// Second vote with later timestamp
+		err = store.UpsertPollVote(pollID, chatJID, voterJID, `["B"]`, 1, newTime)
+		if err != nil {
+			t.Fatalf("second upsert failed: %v", err)
+		}
+
+		// Verify second vote is stored
+		row := db.QueryRow(
+			`SELECT selected FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var selected string
+		if err := row.Scan(&selected); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if selected != `["B"]` {
+			t.Errorf("expected ['B'], got %q", selected)
+		}
+	})
+
+	t.Run("vote upsert ignores older timestamp", func(t *testing.T) {
+		store := setupPollStore(t)
+		db := store.db
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+		newTime := time.Now().Unix()
+		oldTime := newTime - 100
+
+		// First vote with new timestamp
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, newTime)
+		if err != nil {
+			t.Fatalf("first upsert failed: %v", err)
+		}
+
+		// Second vote with old timestamp
+		err = store.UpsertPollVote(pollID, chatJID, voterJID, `["B"]`, 1, oldTime)
+		if err != nil {
+			t.Fatalf("second upsert failed: %v", err)
+		}
+
+		// Verify first vote is still stored (not overwritten)
+		row := db.QueryRow(
+			`SELECT selected FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var selected string
+		if err := row.Scan(&selected); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if selected != `["A"]` {
+			t.Errorf("expected ['A'], got %q", selected)
+		}
+	})
+
+	t.Run("unresolved vote stored even when poll unknown", func(t *testing.T) {
+		store := setupPollStore(t)
+		db := store.db
+
+		pollID := "unknown_poll"
+		chatJID := "chat@s.whatsapp.net"
+		voterJID := "voter@s.whatsapp.net"
+
+		// Upsert unresolved vote (poll doesn't exist in DB)
+		err := store.UpsertPollVote(pollID, chatJID, voterJID, `[]`, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("upsert unresolved failed: %v", err)
+		}
+
+		// Verify vote is stored with resolved=0
+		row := db.QueryRow(
+			`SELECT resolved FROM poll_votes WHERE poll_id=? AND chat_jid=? AND voter_jid=?`,
+			pollID, chatJID, voterJID,
+		)
+		var resolved int
+		if err := row.Scan(&resolved); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if resolved != 0 {
+			t.Errorf("expected resolved=0, got %d", resolved)
+		}
+	})
+
+	t.Run("multiple voters stored correctly", func(t *testing.T) {
+		store := setupPollStore(t)
+		db := store.db
+
+		pollID := "poll1"
+		chatJID := "chat@s.whatsapp.net"
+
+		voters := []string{"voter1@s.whatsapp.net", "voter2@s.whatsapp.net"}
+		for i, voterJID := range voters {
+			err := store.UpsertPollVote(pollID, chatJID, voterJID, `["A"]`, 1, time.Now().Unix()-int64(i))
+			if err != nil {
+				t.Fatalf("upsert for voter %d failed: %v", i, err)
+			}
+		}
+
+		// Count votes
+		row := db.QueryRow(
+			`SELECT COUNT(*) FROM poll_votes WHERE poll_id=? AND chat_jid=?`,
+			pollID, chatJID,
+		)
+		var count int
+		if err := row.Scan(&count); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("expected 2 votes, got %d", count)
+		}
+	})
+}
+
+// TestPollOptionResolution verifies hash→name resolution in vote processing.
+// TestResolvePollVote exercises the real hash->name mapping. The previous
+// version of this test rebuilt the mapping inline and asserted against its own
+// arithmetic, so it passed no matter what the production code did; it is
+// replaced here by a table that calls resolvePollVote itself.
+func TestResolvePollVote(t *testing.T) {
+	hashOf := func(s string) []byte {
+		h := sha256.Sum256([]byte(s))
+		return h[:]
+	}
+	options := `["Yes","No","Maybe"]`
+
+	cases := []struct {
+		name         string
+		optionsJSON  string
+		selected     [][]byte
+		wantSelected string
+		wantResolved int
+	}{
+		{
+			name:         "every hash maps to a name",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `["Yes"]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "multiple selections keep vote order",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Maybe"), hashOf("Yes")},
+			wantSelected: `["Maybe","Yes"]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "withdrawn vote is resolved, not unknown",
+			optionsJSON:  options,
+			selected:     nil,
+			wantSelected: `[]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "hash matching no option marks the vote unresolved",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Yes"), hashOf("Something else")},
+			wantSelected: `["Yes"]`,
+			wantResolved: 0,
+		},
+		{
+			name:         "unknown poll keeps the vote but cannot name it",
+			optionsJSON:  "",
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+		// Empty selection on purpose: with a non-empty selection this case would
+		// pass even without the explicit unmarshal guard, because no hash would
+		// match and the partial-resolution branch would already return 0. An
+		// empty selection is the only input that separates "withdrawn vote we
+		// understood" from "we never parsed the options", so it is the one that
+		// actually covers the guard.
+		{
+			name:         "corrupt stored options are unresolved even with nothing selected",
+			optionsJSON:  `{not json`,
+			selected:     nil,
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+		{
+			name:         "corrupt stored options with a selection are unresolved too",
+			optionsJSON:  `{not json`,
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotSelected, gotResolved := resolvePollVote(tc.optionsJSON, tc.selected)
+			if gotSelected != tc.wantSelected {
+				t.Errorf("selected = %s, want %s", gotSelected, tc.wantSelected)
+			}
+			if gotResolved != tc.wantResolved {
+				t.Errorf("resolved = %d, want %d", gotResolved, tc.wantResolved)
+			}
+		})
+	}
+}
+
+// setupPollStore gives a test a real MessageStore on a throwaway database.
+//
+// It goes through NewMessageStore instead of sql.Open with a literal driver
+// name: the project registers a different driver per platform (mattn/go-sqlite3
+// under CGO, modernc on Windows), so a hardcoded "sqlite" compiles everywhere
+// and fails at run time on macOS and Linux — which is exactly how CI caught the
+// first version of this helper.
+//
+// Using the production opener also means the schema under test is the real
+// CREATE TABLE block, not a copy maintained by hand next to it. A column added
+// to polls or poll_votes reaches these tests automatically instead of drifting.
+func setupPollStore(t *testing.T) *MessageStore {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// Cleanups run LIFO, so registering the chdir-back after t.TempDir makes it
+	// run before TempDir removal — Windows cannot delete a process's CWD.
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }

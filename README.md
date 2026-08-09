@@ -317,6 +317,9 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 | `get_profile_picture` | URL of a user's or group's profile picture |
 | `send_chat_presence` | Send typing or recording indicators |
 | `check_whatsapp` | Check if phone numbers are registered on WhatsApp |
+| `create_poll` | Create a poll in a chat |
+| `vote_in_poll` | Vote in a poll (empty selection withdraws the vote) |
+| `get_poll_results` | Tally of the votes this bridge has seen |
 
 ---
 
