@@ -66,18 +66,109 @@ const (
 // watchdogState holds the watchdog's runtime state (protected by mutex).
 var watchdogState struct {
 	sync.RWMutex
-	lastActionAt         time.Time        // RFC3339 formatted in JSON
-	lastAction           watchdogDecision // "none", "reconnect", or "logged-out"
-	reconnects           int              // count of reconnection attempts
-	disconnectedTicks    int              // consecutive ticks with no connection
-	loggedOutWarnTick    int              // tick counter for logged-out warning rate-limiting
-	upstartTime          time.Time        // when the bridge started
-	lastSuccessfulConnect time.Time       // last time client.IsConnected() returned true
+	lastActionAt          time.Time        // RFC3339 formatted in JSON
+	lastAction            watchdogDecision // "none", "reconnect", or "logged-out"
+	reconnects            int              // count of reconnection attempts
+	disconnectedTicks     int              // consecutive ticks with no connection
+	loggedOutWarnTick     int              // tick counter for logged-out warning rate-limiting
+	upstartTime           time.Time        // when the bridge started
+	lastSuccessfulConnect time.Time        // last time client.IsConnected() returned true
 }
 
 // lastEventAtNanos stores the unix nanoseconds of the last event (any type).
 // Written by the event handler (callback), read by the HTTP status handler.
 var lastEventAtNanos atomic.Int64
+
+// handleStatus returns the handler for GET /api/status.
+//
+// Named factory, not an inline closure, for one reason: a closure registered
+// straight into the mux is unreachable from a test, and the first version of
+// this endpoint had a "test" that re-implemented the handler inside itself and
+// asserted against its own copy — it passed with the real handler returning 503.
+//
+// Always answers 200 while the process is up, even disconnected or logged out.
+// The HTTP status separates "process reachable" from "WhatsApp usable"; folding
+// them together would make connection-refused indistinguishable from a live but
+// logged-out bridge, which are different problems with different fixes.
+func handleStatus(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		connected := false
+		loggedIn := false
+		jid := ""
+		lastSuccessfulConnect := time.Time{}
+		autoReconnectErrors := 0
+
+		if client != nil {
+			connected = client.IsConnected()
+			if client.Store != nil && client.Store.ID != nil {
+				loggedIn = true
+				jid = client.Store.ID.String()
+			}
+			lastSuccessfulConnect = client.LastSuccessfulConnect
+			autoReconnectErrors = client.AutoReconnectErrors
+		}
+
+		healthy, reason := evaluateHealth(connected, loggedIn)
+
+		// Get watchdog state
+		watchdogState.RLock()
+		watchdogInterval := 60 // default
+		if portStr := os.Getenv("WHATSAPP_WATCHDOG_INTERVAL"); portStr != "" {
+			if parsed, err := strconv.Atoi(portStr); err == nil && parsed >= 10 {
+				watchdogInterval = parsed
+			}
+		}
+		watchdogStatus := WatchdogStatus{
+			IntervalSeconds: watchdogInterval,
+			Reconnects:      watchdogState.reconnects,
+		}
+		if watchdogState.lastAction != watchdogNone && !watchdogState.lastActionAt.IsZero() {
+			watchdogStatus.LastAction = string(watchdogState.lastAction)
+			watchdogStatus.LastActionAt = watchdogState.lastActionAt.Format(time.RFC3339)
+		}
+		upstartTime := watchdogState.upstartTime
+		watchdogState.RUnlock()
+
+		// Calculate uptime
+		uptime := int64(0)
+		if !upstartTime.IsZero() {
+			uptime = int64(time.Since(upstartTime).Seconds())
+		}
+
+		// Format optional fields only if they have meaningful values
+		resp := StatusResponse{
+			Success:             true,
+			Healthy:             healthy,
+			Reason:              reason,
+			Connected:           connected,
+			LoggedIn:            loggedIn,
+			JID:                 jid,
+			AutoReconnectErrors: autoReconnectErrors,
+			UptimeSeconds:       uptime,
+			Watchdog:            watchdogStatus,
+		}
+
+		// Only include LastSuccessfulConnect if non-zero
+		if !lastSuccessfulConnect.IsZero() {
+			resp.LastSuccessfulConnect = lastSuccessfulConnect.Format(time.RFC3339)
+		}
+
+		// Only include LastEventAt if non-zero
+		nanos := lastEventAtNanos.Load()
+		if nanos > 0 {
+			resp.LastEventAt = time.Unix(0, nanos).Format(time.RFC3339)
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	}
+}
 
 // evaluateHealth decides the single boolean a monitor reads, plus the reason.
 // Pure function so the decision is testable without a client.
@@ -459,8 +550,8 @@ func extractTextContent(msg *waProto.Message) string {
 type WatchdogStatus struct {
 	IntervalSeconds int    `json:"interval_seconds"`
 	Reconnects      int    `json:"reconnects"`
-	LastAction      string `json:"last_action,omitempty"`     // "none" | "reconnect" | "logged-out"
-	LastActionAt    string `json:"last_action_at,omitempty"`  // RFC3339
+	LastAction      string `json:"last_action,omitempty"`    // "none" | "reconnect" | "logged-out"
+	LastActionAt    string `json:"last_action_at,omitempty"` // RFC3339
 }
 
 // StatusResponse represents the response for GET /api/status.
@@ -473,7 +564,7 @@ type StatusResponse struct {
 	JID                   string         `json:"jid,omitempty"`
 	LastSuccessfulConnect string         `json:"last_successful_connect,omitempty"` // RFC3339
 	AutoReconnectErrors   int            `json:"auto_reconnect_errors"`
-	LastEventAt           string         `json:"last_event_at,omitempty"`           // RFC3339
+	LastEventAt           string         `json:"last_event_at,omitempty"` // RFC3339
 	UptimeSeconds         int64          `json:"uptime_seconds"`
 	Watchdog              WatchdogStatus `json:"watchdog"`
 }
@@ -3947,83 +4038,7 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 	// GET /api/status — health-check endpoint (always HTTP 200 while bridge is up).
 	// RN-01: always 200, never 503, even with client == nil.
 	// Method != GET → 405.
-	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		connected := false
-		loggedIn := false
-		jid := ""
-		lastSuccessfulConnect := time.Time{}
-		autoReconnectErrors := 0
-
-		if client != nil {
-			connected = client.IsConnected()
-			if client.Store != nil && client.Store.ID != nil {
-				loggedIn = true
-				jid = client.Store.ID.String()
-			}
-			lastSuccessfulConnect = client.LastSuccessfulConnect
-			autoReconnectErrors = client.AutoReconnectErrors
-		}
-
-		healthy, reason := evaluateHealth(connected, loggedIn)
-
-		// Get watchdog state
-		watchdogState.RLock()
-		watchdogInterval := 60 // default
-		if portStr := os.Getenv("WHATSAPP_WATCHDOG_INTERVAL"); portStr != "" {
-			if parsed, err := strconv.Atoi(portStr); err == nil && parsed >= 10 {
-				watchdogInterval = parsed
-			}
-		}
-		watchdogStatus := WatchdogStatus{
-			IntervalSeconds: watchdogInterval,
-			Reconnects:      watchdogState.reconnects,
-		}
-		if watchdogState.lastAction != watchdogNone && !watchdogState.lastActionAt.IsZero() {
-			watchdogStatus.LastAction = string(watchdogState.lastAction)
-			watchdogStatus.LastActionAt = watchdogState.lastActionAt.Format(time.RFC3339)
-		}
-		upstartTime := watchdogState.upstartTime
-		watchdogState.RUnlock()
-
-		// Calculate uptime
-		uptime := int64(0)
-		if !upstartTime.IsZero() {
-			uptime = int64(time.Since(upstartTime).Seconds())
-		}
-
-		// Format optional fields only if they have meaningful values
-		resp := StatusResponse{
-			Success:             true,
-			Healthy:             healthy,
-			Reason:              reason,
-			Connected:           connected,
-			LoggedIn:            loggedIn,
-			JID:                 jid,
-			AutoReconnectErrors: autoReconnectErrors,
-			UptimeSeconds:       uptime,
-			Watchdog:            watchdogStatus,
-		}
-
-		// Only include LastSuccessfulConnect if non-zero
-		if !lastSuccessfulConnect.IsZero() {
-			resp.LastSuccessfulConnect = lastSuccessfulConnect.Format(time.RFC3339)
-		}
-
-		// Only include LastEventAt if non-zero
-		nanos := lastEventAtNanos.Load()
-		if nanos > 0 {
-			resp.LastEventAt = time.Unix(0, nanos).Format(time.RFC3339)
-		}
-
-		json.NewEncoder(w).Encode(resp)
-	})
+	http.HandleFunc("/api/status", handleStatus(client))
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
