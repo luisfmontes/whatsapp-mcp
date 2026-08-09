@@ -882,43 +882,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 			// Try to get poll; if not found, store vote as unresolved (RN-05)
 			_, optionsJSON, _, _, err := messageStore.GetPoll(pollID, chatJID)
-			resolved := 1
-			selectedJSON := "[]"
-
-			if err == sql.ErrNoRows {
-				// Poll not found (created before feature or bridge was offline)
-				resolved = 0
-			} else if err == nil {
-				// Poll found; resolve selected option hashes to names
-				var optionNames []string
-				if err := json.Unmarshal([]byte(optionsJSON), &optionNames); err == nil {
-					// Build hash -> name map (SHA-256 of each option name)
-					hashMap := make(map[string]string)
-					for _, optionName := range optionNames {
-						hash := sha256.Sum256([]byte(optionName))
-						hashMap[hex.EncodeToString(hash[:])] = optionName
-					}
-
-					// Resolve selected option hashes to names
-					resolvedNames := make([]string, 0)
-					for _, selectedHash := range vote.GetSelectedOptions() {
-						if name, ok := hashMap[hex.EncodeToString(selectedHash)]; ok {
-							resolvedNames = append(resolvedNames, name)
-						}
-					}
-					if len(resolvedNames) == len(vote.GetSelectedOptions()) {
-						// All options resolved
-						resolved = 1
-						jsonBytes, _ := json.Marshal(resolvedNames)
-						selectedJSON = string(jsonBytes)
-					} else {
-						// Some options not resolved; mark unresolved but store what we have
-						resolved = 0
-						jsonBytes, _ := json.Marshal(resolvedNames)
-						selectedJSON = string(jsonBytes)
-					}
+			if err != nil {
+				// Poll unknown (created before this feature, or the bridge was
+				// offline when it was sent). The vote is still recorded, as
+				// unresolved, instead of vanishing (RN-05).
+				if err != sql.ErrNoRows {
+					logger.Warnf("Failed to load poll %s for vote: %v", pollID, err)
 				}
+				optionsJSON = ""
 			}
+			selectedJSON, resolved := resolvePollVote(optionsJSON, vote.GetSelectedOptions())
 
 			if err := messageStore.UpsertPollVote(
 				pollID,
@@ -1859,12 +1832,12 @@ type PollOptionResult struct {
 }
 
 type PollResultsResponse struct {
-	Success        bool               `json:"success"`
-	Message        string             `json:"message"`
-	Question       string             `json:"question,omitempty"`
-	Results        []PollOptionResult `json:"results,omitempty"`
-	TotalVoters    int                `json:"total_voters"`
-	UnresolvedVotes int               `json:"unresolved_votes"`
+	Success         bool               `json:"success"`
+	Message         string             `json:"message"`
+	Question        string             `json:"question,omitempty"`
+	Results         []PollOptionResult `json:"results,omitempty"`
+	TotalVoters     int                `json:"total_voters"`
+	UnresolvedVotes int                `json:"unresolved_votes"`
 }
 
 // handleCreatePoll returns the handler for POST /api/create_poll
@@ -2606,6 +2579,50 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, str
 
 // Gap #11: Poll store methods (T002)
 
+// resolvePollVote maps the SHA-256 option hashes in a poll vote back to option
+// names, using the poll's stored option list. It returns the JSON array to
+// persist in poll_votes.selected and the resolved flag for that column.
+//
+// A vote carries only hashes (HashPollOptions is sha256 of the option name), so
+// without the original option list it is meaningless. Every path that can't
+// produce a complete mapping — unknown poll (empty optionsJSON), unparseable
+// stored options, or a hash that matches none of them — yields resolved=0 so
+// the vote is still recorded and reported as unresolved rather than dropped or,
+// worse, counted as if it had been understood (RN-05).
+//
+// Kept as a pure function on purpose: the hash mapping is the one piece of this
+// feature that can be wrong in a way no HTTP test would reveal.
+func resolvePollVote(optionsJSON string, selected [][]byte) (selectedJSON string, resolved int) {
+	var optionNames []string
+	if optionsJSON == "" {
+		return "[]", 0
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &optionNames); err != nil {
+		return "[]", 0
+	}
+	nameByHash := make(map[string]string, len(optionNames))
+	for _, name := range optionNames {
+		hash := sha256.Sum256([]byte(name))
+		nameByHash[hex.EncodeToString(hash[:])] = name
+	}
+	names := make([]string, 0, len(selected))
+	for _, hash := range selected {
+		if name, ok := nameByHash[hex.EncodeToString(hash)]; ok {
+			names = append(names, name)
+		}
+	}
+	encoded, err := json.Marshal(names)
+	if err != nil {
+		return "[]", 0
+	}
+	// An empty selection is a legitimate, fully-understood vote: it means the
+	// voter withdrew their choice. Only a partial mapping is unresolved.
+	if len(names) != len(selected) {
+		return string(encoded), 0
+	}
+	return string(encoded), 1
+}
+
 // StorePoll stores a poll in the polls table
 func (store *MessageStore) StorePoll(id, chatJID, sender, name, optionsJSON string, selectableCount int, timestamp int64) error {
 	_, err := store.db.Exec(
@@ -2648,9 +2665,9 @@ func (store *MessageStore) UpsertPollVote(pollID, chatJID, voterJID, selectedJSO
 
 // PollVote represents a single vote record
 type PollVote struct {
-	VoterJID   string
+	VoterJID     string
 	SelectedJSON string
-	Resolved   int
+	Resolved     int
 }
 
 // GetPollVotes retrieves all votes for a poll
