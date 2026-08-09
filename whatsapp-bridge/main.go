@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -51,6 +52,73 @@ var qrState struct {
 	sync.RWMutex
 	png       []byte // nil = not waiting for QR (already authenticated or not yet started)
 	connected bool
+}
+
+// watchdogDecision represents the decision the watchdog makes about reconnection.
+type watchdogDecision string
+
+const (
+	watchdogNone      watchdogDecision = "none"
+	watchdogReconnect watchdogDecision = "reconnect"
+	watchdogLoggedOut watchdogDecision = "logged-out"
+)
+
+// watchdogState holds the watchdog's runtime state (protected by mutex).
+var watchdogState struct {
+	sync.RWMutex
+	lastActionAt         time.Time        // RFC3339 formatted in JSON
+	lastAction           watchdogDecision // "none", "reconnect", or "logged-out"
+	reconnects           int              // count of reconnection attempts
+	disconnectedTicks    int              // consecutive ticks with no connection
+	loggedOutWarnTick    int              // tick counter for logged-out warning rate-limiting
+	upstartTime          time.Time        // when the bridge started
+	lastSuccessfulConnect time.Time       // last time client.IsConnected() returned true
+}
+
+// lastEventAtNanos stores the unix nanoseconds of the last event (any type).
+// Written by the event handler (callback), read by the HTTP status handler.
+var lastEventAtNanos atomic.Int64
+
+// evaluateHealth decides the single boolean a monitor reads, plus the reason.
+// Pure function so the decision is testable without a client.
+func evaluateHealth(connected, loggedIn bool) (healthy bool, reason string) {
+	// Table from contracts.md:
+	// connected | loggedIn | healthy | reason
+	// true      | true     | true    | ""
+	// false     | true     | false   | "disconnected from WhatsApp"
+	// true      | false    | false   | "not logged in — scan the QR code at /qr"
+	// false     | false    | false   | "not logged in — scan the QR code at /qr"
+
+	if connected && loggedIn {
+		return true, ""
+	}
+	// Deslogado (not logged in) takes priority over desconectado (disconnected)
+	// because it's the actionable state.
+	if !loggedIn {
+		return false, "not logged in — scan the QR code at /qr"
+	}
+	// connected=false, loggedIn=true
+	return false, "disconnected from WhatsApp"
+}
+
+// decideWatchdogAction is the whole policy of what to do on each tick.
+// Pure function so it can be tested without a live client.
+func decideWatchdogAction(connected, loggedIn bool) watchdogDecision {
+	// Table from contracts.md:
+	// connected | loggedIn | decisão | por quê
+	// true      | true     | none    | nada a fazer
+	// true      | false    | logged-out  | conectado sem sessão: só QR resolve
+	// false     | false    | logged-out  | autoReconnect da lib nem tenta com Store.ID == nil
+	// false     | true     | reconnect   | é o único caso em que reconectar tem chance
+
+	if connected && loggedIn {
+		return watchdogNone
+	}
+	if !loggedIn {
+		return watchdogLoggedOut
+	}
+	// connected=false, loggedIn=true
+	return watchdogReconnect
 }
 
 // Message represents a chat message for our client
@@ -385,6 +453,29 @@ func extractTextContent(msg *waProto.Message) string {
 	}
 
 	return ""
+}
+
+// WatchdogStatus represents the state of the automatic reconnection watchdog.
+type WatchdogStatus struct {
+	IntervalSeconds int    `json:"interval_seconds"`
+	Reconnects      int    `json:"reconnects"`
+	LastAction      string `json:"last_action,omitempty"`     // "none" | "reconnect" | "logged-out"
+	LastActionAt    string `json:"last_action_at,omitempty"`  // RFC3339
+}
+
+// StatusResponse represents the response for GET /api/status.
+type StatusResponse struct {
+	Success               bool           `json:"success"`
+	Healthy               bool           `json:"healthy"`
+	Reason                string         `json:"reason,omitempty"`
+	Connected             bool           `json:"connected"`
+	LoggedIn              bool           `json:"logged_in"`
+	JID                   string         `json:"jid,omitempty"`
+	LastSuccessfulConnect string         `json:"last_successful_connect,omitempty"` // RFC3339
+	AutoReconnectErrors   int            `json:"auto_reconnect_errors"`
+	LastEventAt           string         `json:"last_event_at,omitempty"`           // RFC3339
+	UptimeSeconds         int64          `json:"uptime_seconds"`
+	Watchdog              WatchdogStatus `json:"watchdog"`
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -3853,6 +3944,87 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 		w.Write(png)
 	})
 
+	// GET /api/status — health-check endpoint (always HTTP 200 while bridge is up).
+	// RN-01: always 200, never 503, even with client == nil.
+	// Method != GET → 405.
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		connected := false
+		loggedIn := false
+		jid := ""
+		lastSuccessfulConnect := time.Time{}
+		autoReconnectErrors := 0
+
+		if client != nil {
+			connected = client.IsConnected()
+			if client.Store != nil && client.Store.ID != nil {
+				loggedIn = true
+				jid = client.Store.ID.String()
+			}
+			lastSuccessfulConnect = client.LastSuccessfulConnect
+			autoReconnectErrors = client.AutoReconnectErrors
+		}
+
+		healthy, reason := evaluateHealth(connected, loggedIn)
+
+		// Get watchdog state
+		watchdogState.RLock()
+		watchdogInterval := 60 // default
+		if portStr := os.Getenv("WHATSAPP_WATCHDOG_INTERVAL"); portStr != "" {
+			if parsed, err := strconv.Atoi(portStr); err == nil && parsed >= 10 {
+				watchdogInterval = parsed
+			}
+		}
+		watchdogStatus := WatchdogStatus{
+			IntervalSeconds: watchdogInterval,
+			Reconnects:      watchdogState.reconnects,
+		}
+		if watchdogState.lastAction != watchdogNone && !watchdogState.lastActionAt.IsZero() {
+			watchdogStatus.LastAction = string(watchdogState.lastAction)
+			watchdogStatus.LastActionAt = watchdogState.lastActionAt.Format(time.RFC3339)
+		}
+		upstartTime := watchdogState.upstartTime
+		watchdogState.RUnlock()
+
+		// Calculate uptime
+		uptime := int64(0)
+		if !upstartTime.IsZero() {
+			uptime = int64(time.Since(upstartTime).Seconds())
+		}
+
+		// Format optional fields only if they have meaningful values
+		resp := StatusResponse{
+			Success:             true,
+			Healthy:             healthy,
+			Reason:              reason,
+			Connected:           connected,
+			LoggedIn:            loggedIn,
+			JID:                 jid,
+			AutoReconnectErrors: autoReconnectErrors,
+			UptimeSeconds:       uptime,
+			Watchdog:            watchdogStatus,
+		}
+
+		// Only include LastSuccessfulConnect if non-zero
+		if !lastSuccessfulConnect.IsZero() {
+			resp.LastSuccessfulConnect = lastSuccessfulConnect.Format(time.RFC3339)
+		}
+
+		// Only include LastEventAt if non-zero
+		nanos := lastEventAtNanos.Load()
+		if nanos > 0 {
+			resp.LastEventAt = time.Unix(0, nanos).Format(time.RFC3339)
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -4539,6 +4711,73 @@ func requireBearerToken(token string, next http.Handler) http.Handler {
 	})
 }
 
+// watchdogLoop runs the automatic reconnection logic on an interval (T004).
+// It checks connected/loggedIn state and decides whether to reconnect.
+func watchdogLoop(client *whatsmeow.Client, logger waLog.Logger) {
+	// Parse WHATSAPP_WATCHDOG_INTERVAL, default 60s, minimum 10s
+	interval := 60
+	if portStr := os.Getenv("WHATSAPP_WATCHDOG_INTERVAL"); portStr != "" {
+		if parsed, err := strconv.Atoi(portStr); err == nil && parsed >= 10 {
+			interval = parsed
+		} else {
+			logger.Infof("Watchdog interval invalid or < 10: %s, using default 60s", portStr)
+		}
+	}
+	logger.Infof("Watchdog starting with interval %d seconds", interval)
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if client == nil {
+			continue
+		}
+
+		connected := client.IsConnected()
+		loggedIn := client.Store != nil && client.Store.ID != nil
+
+		decision := decideWatchdogAction(connected, loggedIn)
+
+		watchdogState.Lock()
+
+		switch decision {
+		case watchdogNone:
+			// Reset disconnected tick counter on any connected, logged-in state
+			watchdogState.disconnectedTicks = 0
+
+		case watchdogReconnect:
+			// Reconnect only after two consecutive ticks (RF-06)
+			watchdogState.disconnectedTicks++
+			if watchdogState.disconnectedTicks >= 2 {
+				watchdogState.lastAction = watchdogReconnect
+				watchdogState.lastActionAt = time.Now()
+				watchdogState.reconnects++
+				watchdogState.disconnectedTicks = 0
+				watchdogState.Unlock()
+
+				// Try to reconnect (log errors but don't crash the loop)
+				logger.Warnf("Watchdog: attempting reconnect (attempt %d)", watchdogState.reconnects)
+				if err := client.Connect(); err != nil {
+					logger.Warnf("Watchdog reconnect failed: %v", err)
+				}
+				watchdogState.Lock()
+			}
+
+		case watchdogLoggedOut:
+			// Rate-limit logged-out warnings to at most 1 per 10 ticks
+			watchdogState.lastAction = watchdogLoggedOut
+			watchdogState.lastActionAt = time.Now()
+			watchdogState.loggedOutWarnTick++
+			if watchdogState.loggedOutWarnTick >= 10 {
+				logger.Warnf("Watchdog: device logged out, reconnect impossible without QR scan")
+				watchdogState.loggedOutWarnTick = 0
+			}
+		}
+
+		watchdogState.Unlock()
+	}
+}
+
 func main() {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -4598,6 +4837,10 @@ func main() {
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
+		// Record the timestamp of any event (RF-02).
+		// This is read by the /api/status handler (different thread).
+		lastEventAtNanos.Store(time.Now().UnixNano())
+
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -4716,6 +4959,15 @@ func main() {
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+
+	// Initialize watchdog state
+	watchdogState.Lock()
+	watchdogState.upstartTime = time.Now()
+	watchdogState.lastAction = watchdogNone
+	watchdogState.Unlock()
+
+	// Start watchdog goroutine (T004)
+	go watchdogLoop(client, logger)
 
 	// Merge any chats stored under LID JIDs into their PN equivalents.
 	migrateLIDChats(client, messageStore, logger)
