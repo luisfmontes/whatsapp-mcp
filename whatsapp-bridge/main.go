@@ -2064,7 +2064,7 @@ func handleVotePoll(client *whatsmeow.Client, messageStore *MessageStore) http.H
 			})
 			return
 		}
-		_, err = client.SendMessage(r.Context(), pollJID, msg)
+		resp, err := client.SendMessage(r.Context(), pollJID, msg)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2073,6 +2073,23 @@ func handleVotePoll(client *whatsmeow.Client, messageStore *MessageStore) http.H
 				"message": fmt.Sprintf("SendMessage error: %v", err),
 			})
 			return
+		}
+
+		// Record our own vote directly, for the same reason handleCreatePoll
+		// stores its own message: on a single-device account the multi-device
+		// echo never fires, so handleMessage never sees this PollUpdateMessage
+		// and the vote we just cast would be missing from our own tally. Found
+		// by smoke — the vote sent fine and poll_results stayed at zero.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			selectedJSON, err := json.Marshal(req.Options)
+			if err != nil {
+				fmt.Printf("Failed to encode own vote: %v\n", err)
+			} else if storeErr := messageStore.UpsertPollVote(
+				req.PollID, req.ChatJID, client.Store.ID.ToNonAD().String(),
+				string(selectedJSON), 1, resp.Timestamp.Unix(),
+			); storeErr != nil {
+				fmt.Printf("Failed to store own poll vote: %v\n", storeErr)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
