@@ -1179,3 +1179,30 @@ def get_poll_results(chat_jid: str, poll_id: str) -> Tuple[bool, str, Optional[d
         return False, f"Request error: {str(e)}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
+
+
+def get_bridge_status() -> Tuple[bool, str, Optional[dict]]:
+    """Get bridge health status (T005, RF-06).
+
+    Returns (healthy, reason, status_dict).
+
+    Key insight from contracts: healthy:false with reason "not logged in" means
+    you need to scan the QR code at /qr — reconnecting won't help. If the bridge
+    is unreachable (transport error), that's a different problem: the process is down.
+    """
+    try:
+        # Use 5-second timeout: a health-check that waits 30s defeats the purpose
+        response = _api_request("GET", "/status", timeout=5)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", None
+
+        healthy = bool(result.get("healthy", False))
+        reason = result.get("reason", "")
+
+        return healthy, reason, result
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None

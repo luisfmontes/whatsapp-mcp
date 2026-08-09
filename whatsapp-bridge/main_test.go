@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1396,6 +1398,244 @@ func TestResolvePollVote(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEvaluateHealth verifies the decision table for health evaluation (T001).
+// Healthy is only true when connected AND logged in; reason varies based on why not.
+func TestEvaluateHealth(t *testing.T) {
+	cases := []struct {
+		connected   bool
+		loggedIn    bool
+		wantHealthy bool
+		wantReason  string
+	}{
+		{true, true, true, ""},
+		{false, true, false, "disconnected from WhatsApp"},
+		{true, false, false, "not logged in — scan the QR code at /qr"},
+		{false, false, false, "not logged in — scan the QR code at /qr"},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("connected=%v,loggedIn=%v", tc.connected, tc.loggedIn), func(t *testing.T) {
+			healthy, reason := evaluateHealth(tc.connected, tc.loggedIn)
+			if healthy != tc.wantHealthy {
+				t.Errorf("healthy = %v, want %v", healthy, tc.wantHealthy)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestDecideWatchdogAction verifies the watchdog decision table (T001).
+func TestDecideWatchdogAction(t *testing.T) {
+	cases := []struct {
+		connected    bool
+		loggedIn     bool
+		wantDecision watchdogDecision
+	}{
+		{true, true, watchdogNone},
+		{true, false, watchdogLoggedOut},
+		{false, false, watchdogLoggedOut},
+		{false, true, watchdogReconnect},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("connected=%v,loggedIn=%v", tc.connected, tc.loggedIn), func(t *testing.T) {
+			decision := decideWatchdogAction(tc.connected, tc.loggedIn)
+			if decision != tc.wantDecision {
+				t.Errorf("decision = %q, want %q", decision, tc.wantDecision)
+			}
+		})
+	}
+}
+
+// TestStatusEndpointWithNilClient verifies that GET /api/status returns 200
+// (not 503) even when client == nil, with healthy=false and a non-empty reason (T003).
+// These replace a first version that re-implemented the handler body inside the
+// test ("mimics the actual handler") and asserted against its own copy. Proven
+// dead by mutation: making the real handler answer 503 left them green. They now
+// call handleStatus, which is why that handler had to stop being an inline
+// closure.
+// TestWatchdogStateConcurrency exists to give `go test -race` something to
+// find. The watchdog goroutine and the event callback both write state that the
+// status handler reads, but no other test ever starts them — so a green -race
+// run was proving nothing about exactly the code that needed proving. It caught
+// a real unsynchronized read once already: the loop logged the reconnect attempt
+// number by reading watchdogState.reconnects after releasing the mutex.
+//
+// Note: -race needs CGO, so this is only meaningful on the CGO builds
+// (Linux/macOS in CI, or WSL locally). On Windows it still runs, just without
+// the detector.
+func TestWatchdogStateConcurrency(t *testing.T) {
+	const goroutines = 8
+	const iterations = 200
+
+	handler := handleStatus(nil)
+	var wg sync.WaitGroup
+
+	// Writers: the watchdog ticking through every decision.
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			decisions := []watchdogDecision{watchdogNone, watchdogReconnect, watchdogLoggedOut}
+			for n := 0; n < iterations; n++ {
+				applyWatchdogDecision(decisions[(seed+n)%len(decisions)])
+			}
+		}(i)
+	}
+
+	// Writer: the whatsmeow event callback stamping the last-event time.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; n < iterations*goroutines; n++ {
+			lastEventAtNanos.Store(time.Now().UnixNano())
+		}
+	}()
+
+	// Readers: concurrent health checks, which is what a monitor actually does.
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < iterations; n++ {
+				req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Errorf("status = %d during concurrent access, want 200", rec.Code)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestApplyWatchdogDecision covers the state transitions the loop depends on,
+// which used to be buried inside the ticker and therefore untestable.
+func TestApplyWatchdogDecision(t *testing.T) {
+	reset := func() {
+		watchdogState.Lock()
+		watchdogState.disconnectedTicks = 0
+		watchdogState.loggedOutWarnTick = 0
+		watchdogState.reconnects = 0
+		watchdogState.Unlock()
+	}
+
+	t.Run("one disconnected tick is not enough to reconnect", func(t *testing.T) {
+		reset()
+		if reconnect, _, _ := applyWatchdogDecision(watchdogReconnect); reconnect {
+			t.Fatal("reconnected on the first bad tick; the library's own backoff gets one tick first")
+		}
+	})
+
+	t.Run("two consecutive disconnected ticks reconnect once", func(t *testing.T) {
+		reset()
+		applyWatchdogDecision(watchdogReconnect)
+		reconnect, attempt, _ := applyWatchdogDecision(watchdogReconnect)
+		if !reconnect {
+			t.Fatal("did not reconnect after two consecutive bad ticks")
+		}
+		if attempt != 1 {
+			t.Errorf("attempt = %d, want 1", attempt)
+		}
+		// The streak resets, so the next reconnect again needs two ticks.
+		if again, _, _ := applyWatchdogDecision(watchdogReconnect); again {
+			t.Error("reconnected again on the very next tick; the streak did not reset")
+		}
+	})
+
+	t.Run("a healthy tick clears the streak", func(t *testing.T) {
+		reset()
+		applyWatchdogDecision(watchdogReconnect)
+		applyWatchdogDecision(watchdogNone)
+		if reconnect, _, _ := applyWatchdogDecision(watchdogReconnect); reconnect {
+			t.Fatal("a single bad tick after recovery triggered a reconnect")
+		}
+	})
+
+	t.Run("logged out warns on the first tick, not the tenth", func(t *testing.T) {
+		reset()
+		_, _, warn := applyWatchdogDecision(watchdogLoggedOut)
+		if !warn {
+			t.Fatal("no warning on the first logged-out tick — a dead session would stay silent for ten ticks")
+		}
+		for i := 0; i < 8; i++ {
+			if _, _, w := applyWatchdogDecision(watchdogLoggedOut); w {
+				t.Fatalf("warned again at tick %d; it should be rate-limited", i+2)
+			}
+		}
+	})
+
+	t.Run("logged out never asks for a reconnect", func(t *testing.T) {
+		reset()
+		for i := 0; i < 25; i++ {
+			if reconnect, _, _ := applyWatchdogDecision(watchdogLoggedOut); reconnect {
+				t.Fatal("asked to reconnect while logged out; only a QR scan fixes that")
+			}
+		}
+	})
+}
+
+func TestHandleStatus(t *testing.T) {
+	handler := handleStatus(nil)
+
+	t.Run("non-GET returns 405", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", rec.Code)
+		}
+	})
+
+	// The load-bearing case: a bridge that is up but not usable must still
+	// answer 200. Returning 503 here would make "process dead" (connection
+	// refused) indistinguishable from "process alive, session logged out".
+	t.Run("nil client answers 200 with healthy=false and a reason", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — an unusable bridge must still answer 200 (body: %s)",
+				rec.Code, rec.Body.String())
+		}
+		var resp StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+		}
+		if !resp.Success {
+			t.Error("Success = false; it means 'I answered', not 'all is well', so it should be true")
+		}
+		if resp.Healthy {
+			t.Error("Healthy = true with no client")
+		}
+		if resp.Reason == "" {
+			t.Error("Reason is empty — 'not healthy' without a reason does not say what to do")
+		}
+		if resp.Connected || resp.LoggedIn {
+			t.Errorf("Connected=%v LoggedIn=%v, want both false", resp.Connected, resp.LoggedIn)
+		}
+		// Zero timestamps must be omitted rather than serialized as year 1.
+		if resp.LastSuccessfulConnect != "" {
+			t.Errorf("LastSuccessfulConnect = %q, want omitted while zero", resp.LastSuccessfulConnect)
+		}
+	})
+
+	t.Run("content type is JSON", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+	})
 }
 
 // setupPollStore gives a test a real MessageStore on a throwaway database.

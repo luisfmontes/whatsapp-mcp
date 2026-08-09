@@ -35,7 +35,8 @@ from whatsapp import (
     get_profile_picture as whatsapp_get_profile_picture,
     create_poll as whatsapp_create_poll,
     vote_in_poll as whatsapp_vote_in_poll,
-    get_poll_results as whatsapp_get_poll_results
+    get_poll_results as whatsapp_get_poll_results,
+    get_bridge_status as whatsapp_get_bridge_status
 )
 
 # Initialize FastMCP server
@@ -838,6 +839,56 @@ def get_poll_results(
     if results:
         response.update(results)
     return response
+
+
+@mcp.tool()
+def get_bridge_status() -> Dict[str, Any]:
+    """Get WhatsApp bridge health status.
+
+    Returns the bridge connection state (connected/logged_in) and automatically
+    determined health status, plus runtime watchdog state.
+
+    Key insight: `healthy:false` with reason "not logged in" means you need to
+    scan the QR code at /qr — reconnecting won't help. If the bridge is
+    unreachable (transport error), that's a different problem: the process is down,
+    not recoverable via API.
+
+    Returns:
+        {
+            "success": bool,
+            "healthy": bool (connected AND logged_in),
+            "reason": str (why not healthy, or empty if healthy),
+            "connected": bool,
+            "logged_in": bool,
+            "jid": str (your WhatsApp JID, or empty if not logged in),
+            "last_successful_connect": str (RFC3339, or omitted if never connected),
+            "auto_reconnect_errors": int,
+            "last_event_at": str (RFC3339, or omitted if no event yet),
+            "uptime_seconds": int,
+            "watchdog": {
+                "interval_seconds": int,
+                "reconnects": int,
+                "last_action": str ("none", "reconnect", "logged-out", or omitted),
+                "last_action_at": str (RFC3339, or omitted)
+            }
+        }
+    """
+    healthy, reason, status = whatsapp_get_bridge_status()
+    if status is None:
+        return {
+            "success": False,
+            "healthy": False,
+            "reason": reason,
+            "connected": False,
+            "logged_in": False,
+            "auto_reconnect_errors": 0,
+            "uptime_seconds": 0,
+            "watchdog": {
+                "interval_seconds": 0,
+                "reconnects": 0
+            }
+        }
+    return status
 
 
 if __name__ == "__main__":
