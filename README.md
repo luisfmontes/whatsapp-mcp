@@ -87,6 +87,7 @@ The backfill/recovery scripts are separate processes that read the engine vars f
 - `WHATSAPP_API_BASE_URL` env var — point the Python MCP server at a non-default bridge URL
 - `WHATSAPP_API_AUTH_TOKEN` env var — bearer token the MCP server sends as `Authorization: Bearer <token>`; required if the bridge's `API_AUTH_TOKEN` is set
 - `BIND_ADDR` env var — change the bind address of the REST API (see [Security](#security) above for the auth requirement this triggers)
+- `WHATSAPP_WATCHDOG_INTERVAL` env var — seconds between watchdog checks (default `60`, minimum `10`; anything invalid falls back to the default and logs which value is in force)
 - `API_AUTH_TOKEN` env var (bridge) — bearer token required on all `/api/*` requests once `BIND_ADDR` is non-loopback
 - Transcription env vars — see [Audio transcription](#audio-transcription-opt-in) above
 
@@ -317,6 +318,7 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 | `get_profile_picture` | URL of a user's or group's profile picture |
 | `send_chat_presence` | Send typing or recording indicators |
 | `check_whatsapp` | Check if phone numbers are registered on WhatsApp |
+| `get_bridge_status` | Whether the bridge is connected and logged in, without trying to use it |
 | `create_poll` | Create a poll in a chat |
 | `vote_in_poll` | Vote in a poll (empty selection withdraws the vote) |
 | `get_poll_results` | Tally of the votes this bridge has seen |
