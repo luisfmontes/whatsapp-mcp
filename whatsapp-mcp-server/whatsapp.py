@@ -1076,3 +1076,106 @@ def get_profile_picture(jid: str, preview: bool = False) -> Tuple[bool, str, Opt
         return False, f"Request error: {str(e)}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
+
+
+def create_poll(chat_jid: str, question: str, options: List[str], selectable_count: int = 1) -> Tuple[bool, str, str]:
+    """Create a poll in a chat.
+
+    Returns (success, message, message_id).
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required", ""
+        if not question or not question.strip():
+            return False, "question is required", ""
+        if not options or len(options) < 2 or len(options) > 12:
+            return False, "options must have between 2 and 12 items", ""
+        # Check for duplicates and empty option names
+        trimmed = [opt.strip() for opt in options]
+        if len(trimmed) != len(set(trimmed)):
+            return False, "Invalid options: names must be unique and non-empty", ""
+        if any(not opt for opt in trimmed):
+            return False, "Invalid options: names must be unique and non-empty", ""
+        if selectable_count < 1 or selectable_count > len(options):
+            return False, f"selectable_count must be between 1 and {len(options)}", ""
+        payload = {
+            "chat_jid": chat_jid,
+            "question": question,
+            "options": options,
+            "selectable_count": selectable_count,
+        }
+        response = _api_request("POST", "/create_poll", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", ""
+        return (
+            bool(result.get("success", False)),
+            result.get("message", "Unknown response"),
+            result.get("message_id", ""),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", ""
+
+
+def vote_in_poll(chat_jid: str, poll_id: str, options: List[str]) -> Tuple[bool, str]:
+    """Vote in a poll. Empty options list means removing the vote.
+
+    Returns (success, message).
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        if not poll_id or not poll_id.strip():
+            return False, "poll_id is required"
+        payload = {
+            "chat_jid": chat_jid,
+            "poll_id": poll_id,
+            "options": options,
+        }
+        response = _api_request("POST", "/vote_poll", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def get_poll_results(chat_jid: str, poll_id: str) -> Tuple[bool, str, Optional[dict]]:
+    """Get poll results by poll ID.
+
+    Returns (success, message, results_dict).
+    """
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required", None
+        if not poll_id or not poll_id.strip():
+            return False, "poll_id is required", None
+        payload = {
+            "chat_jid": chat_jid,
+            "poll_id": poll_id,
+        }
+        response = _api_request("POST", "/poll_results", json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}", None
+        if not result.get("success", False):
+            return False, result.get("message", "Unknown response"), None
+        results = {
+            "question": result.get("question", ""),
+            "results": result.get("results", []),
+            "total_voters": result.get("total_voters", 0),
+            "unresolved_votes": result.get("unresolved_votes", 0),
+        }
+        return True, result.get("message", "Unknown response"), results
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None

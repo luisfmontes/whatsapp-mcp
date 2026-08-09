@@ -32,7 +32,10 @@ from whatsapp import (
     update_group_settings as whatsapp_update_group_settings,
     set_group_photo as whatsapp_set_group_photo,
     get_user_info as whatsapp_get_user_info,
-    get_profile_picture as whatsapp_get_profile_picture
+    get_profile_picture as whatsapp_get_profile_picture,
+    create_poll as whatsapp_create_poll,
+    vote_in_poll as whatsapp_vote_in_poll,
+    get_poll_results as whatsapp_get_poll_results
 )
 
 # Initialize FastMCP server
@@ -737,6 +740,104 @@ def get_profile_picture(jid: str, preview: bool = False) -> Dict[str, Any]:
     if info:
         result.update(info)
     return result
+
+
+@mcp.tool()
+def create_poll(
+    chat_jid: str,
+    question: str,
+    options: List[str],
+    selectable_count: int = 1
+) -> Dict[str, Any]:
+    """Create a poll in a chat.
+
+    Args:
+        chat_jid: The JID of the chat where the poll will be created
+        question: The poll question/prompt
+        options: List of poll options (must be 2–12 unique, non-empty option names)
+        selectable_count: Number of options the voter can select (must be between 1
+            and the number of options; default 1)
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "message_id"?: str (ID of the created poll message)
+        }
+    """
+    success, message, message_id = whatsapp_create_poll(
+        chat_jid, question, options, selectable_count
+    )
+    return {
+        "success": success,
+        "message": message,
+        "message_id": message_id,
+    }
+
+
+@mcp.tool()
+def vote_in_poll(
+    chat_jid: str,
+    poll_id: str,
+    options: List[str]
+) -> Dict[str, Any]:
+    """Vote in a poll.
+
+    Args:
+        chat_jid: The JID of the chat containing the poll
+        poll_id: The id of the poll message (from create_poll's message_id)
+        options: List of selected option names. Pass an empty list to remove your vote.
+
+    Returns:
+        {
+            "success": bool,
+            "message": str
+        }
+    """
+    success, message = whatsapp_vote_in_poll(chat_jid, poll_id, options)
+    return {
+        "success": success,
+        "message": message,
+    }
+
+
+@mcp.tool()
+def get_poll_results(
+    chat_jid: str,
+    poll_id: str
+) -> Dict[str, Any]:
+    """Get poll results.
+
+    Args:
+        chat_jid: The JID of the chat containing the poll
+        poll_id: The id of the poll message (from create_poll's message_id)
+
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "question"?: str (the poll question),
+            "results"?: [{"option": str, "count": int, "voters"?: [str]}, ...],
+            "total_voters"?: int (unique voters who have at least one option
+                selected; someone who withdrew their vote is not counted, so
+                this never exceeds the sum of the per-option counts),
+            "unresolved_votes"?: int (number of votes for which options were unknown)
+        }
+
+    Important: The result is what this bridge saw arrive. WhatsApp offers no API to
+    query poll votes directly. A vote received while the bridge was offline is not here
+    — and there is no way to detect that it was missed. Never present this as an official
+    tally. unresolved_votes > 0 means votes from polls whose option names this bridge
+    does not know.
+    """
+    success, message, results = whatsapp_get_poll_results(chat_jid, poll_id)
+    response = {
+        "success": success,
+        "message": message,
+    }
+    if results:
+        response.update(results)
+    return response
 
 
 if __name__ == "__main__":
