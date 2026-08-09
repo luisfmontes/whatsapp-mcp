@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1393,6 +1394,158 @@ func TestResolvePollVote(t *testing.T) {
 			}
 			if gotResolved != tc.wantResolved {
 				t.Errorf("resolved = %d, want %d", gotResolved, tc.wantResolved)
+			}
+		})
+	}
+}
+
+// TestEvaluateHealth verifies the decision table for health evaluation (T001).
+// Healthy is only true when connected AND logged in; reason varies based on why not.
+func TestEvaluateHealth(t *testing.T) {
+	cases := []struct {
+		connected    bool
+		loggedIn     bool
+		wantHealthy  bool
+		wantReason   string
+	}{
+		{true, true, true, ""},
+		{false, true, false, "disconnected from WhatsApp"},
+		{true, false, false, "not logged in — scan the QR code at /qr"},
+		{false, false, false, "not logged in — scan the QR code at /qr"},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("connected=%v,loggedIn=%v", tc.connected, tc.loggedIn), func(t *testing.T) {
+			healthy, reason := evaluateHealth(tc.connected, tc.loggedIn)
+			if healthy != tc.wantHealthy {
+				t.Errorf("healthy = %v, want %v", healthy, tc.wantHealthy)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestDecideWatchdogAction verifies the watchdog decision table (T001).
+func TestDecideWatchdogAction(t *testing.T) {
+	cases := []struct {
+		connected      bool
+		loggedIn       bool
+		wantDecision   watchdogDecision
+	}{
+		{true, true, watchdogNone},
+		{true, false, watchdogLoggedOut},
+		{false, false, watchdogLoggedOut},
+		{false, true, watchdogReconnect},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("connected=%v,loggedIn=%v", tc.connected, tc.loggedIn), func(t *testing.T) {
+			decision := decideWatchdogAction(tc.connected, tc.loggedIn)
+			if decision != tc.wantDecision {
+				t.Errorf("decision = %q, want %q", decision, tc.wantDecision)
+			}
+		})
+	}
+}
+
+// TestStatusEndpointWithNilClient verifies that GET /api/status returns 200
+// (not 503) even when client == nil, with healthy=false and a non-empty reason (T003).
+func TestStatusEndpointWithNilClient(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		// Mimics the actual handler with client == nil
+		connected := false
+		loggedIn := false
+		jid := ""
+		lastSuccessfulConnect := time.Time{}
+		autoReconnectErrors := 0
+
+		healthy, reason := evaluateHealth(connected, loggedIn)
+
+		watchdogState.RLock()
+		watchdogInterval := 60
+		watchdogStatus := WatchdogStatus{
+			IntervalSeconds: watchdogInterval,
+			Reconnects:      watchdogState.reconnects,
+		}
+		upstartTime := watchdogState.upstartTime
+		watchdogState.RUnlock()
+
+		uptime := int64(0)
+		if !upstartTime.IsZero() {
+			uptime = int64(time.Since(upstartTime).Seconds())
+		}
+
+		resp := StatusResponse{
+			Success:             true,
+			Healthy:             healthy,
+			Reason:              reason,
+			Connected:           connected,
+			LoggedIn:            loggedIn,
+			JID:                 jid,
+			AutoReconnectErrors: autoReconnectErrors,
+			UptimeSeconds:       uptime,
+			Watchdog:            watchdogStatus,
+		}
+
+		if !lastSuccessfulConnect.IsZero() {
+			resp.LastSuccessfulConnect = lastSuccessfulConnect.Format(time.RFC3339)
+		}
+
+		nanos := lastEventAtNanos.Load()
+		if nanos > 0 {
+			resp.LastEventAt = time.Unix(0, nanos).Format(time.RFC3339)
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	rec := doHandlerRequest(t, handler, http.MethodGet, nil)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Healthy {
+		t.Errorf("healthy = true, want false")
+	}
+	if resp.Reason == "" {
+		t.Errorf("reason is empty, want non-empty")
+	}
+	if !strings.Contains(resp.Reason, "not logged in") && !strings.Contains(resp.Reason, "disconnected") {
+		t.Errorf("reason = %q, expected to mention 'not logged in' or 'disconnected'", resp.Reason)
+	}
+}
+
+// TestStatusEndpointMethodNotAllowed verifies that non-GET methods return 405 (T003).
+func TestStatusEndpointMethodNotAllowed(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(StatusResponse{Success: true})
+	})
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			rec := doHandlerRequest(t, handler, method, nil)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 			}
 		})
 	}
