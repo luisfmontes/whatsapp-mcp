@@ -986,8 +986,8 @@ func TestCreatePollEndpoint(t *testing.T) {
 
 	t.Run("400 on missing required fields", func(t *testing.T) {
 		testCases := []map[string]interface{}{
-			{},                              // all missing
-			{"question": "What?"},           // missing chat_jid, options
+			{},                                 // all missing
+			{"question": "What?"},              // missing chat_jid, options
 			{"chat_jid": "123@s.whatsapp.net"}, // missing question, options
 		}
 
@@ -1021,9 +1021,9 @@ func TestCreatePollEndpoint(t *testing.T) {
 
 	t.Run("400 on duplicate or empty options", func(t *testing.T) {
 		testCases := [][]string{
-			{"Option", "Option"},           // duplicate
-			{"A", ""},                      // empty
-			{" ", "B"},                     // whitespace-only (before TrimSpace)
+			{"Option", "Option"},              // duplicate
+			{"A", ""},                         // empty
+			{" ", "B"},                        // whitespace-only (before TrimSpace)
 			{"Unique1", "Unique2", "Unique2"}, // duplicate in longer list
 		}
 
@@ -1034,8 +1034,8 @@ func TestCreatePollEndpoint(t *testing.T) {
 
 	t.Run("400 on invalid selectable_count", func(t *testing.T) {
 		testCases := []struct {
-			name             string
-			options          []string
+			name            string
+			options         []string
 			selectableCount int
 		}{
 			{"zero", []string{"A", "B"}, 0},
@@ -1232,59 +1232,92 @@ func TestPollVotesUpsertBehavior(t *testing.T) {
 }
 
 // TestPollOptionResolution verifies hash→name resolution in vote processing.
-func TestPollOptionResolution(t *testing.T) {
-	t.Run("all hashes resolved sets resolved=1", func(t *testing.T) {
-		optionNames := []string{"Yes", "No"}
+// TestResolvePollVote exercises the real hash->name mapping. The previous
+// version of this test rebuilt the mapping inline and asserted against its own
+// arithmetic, so it passed no matter what the production code did; it is
+// replaced here by a table that calls resolvePollVote itself.
+func TestResolvePollVote(t *testing.T) {
+	hashOf := func(s string) []byte {
+		h := sha256.Sum256([]byte(s))
+		return h[:]
+	}
+	options := `["Yes","No","Maybe"]`
 
-		// Build hash map
-		hashMap := make(map[string]string)
-		selectedHashBytes := make([][]byte, 0)
-		for _, optionName := range optionNames {
-			hash := sha256.Sum256([]byte(optionName))
-			hashMap[hex.EncodeToString(hash[:])] = optionName
-			selectedHashBytes = append(selectedHashBytes, hash[:])
-		}
+	cases := []struct {
+		name         string
+		optionsJSON  string
+		selected     [][]byte
+		wantSelected string
+		wantResolved int
+	}{
+		{
+			name:         "every hash maps to a name",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `["Yes"]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "multiple selections keep vote order",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Maybe"), hashOf("Yes")},
+			wantSelected: `["Maybe","Yes"]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "withdrawn vote is resolved, not unknown",
+			optionsJSON:  options,
+			selected:     nil,
+			wantSelected: `[]`,
+			wantResolved: 1,
+		},
+		{
+			name:         "hash matching no option marks the vote unresolved",
+			optionsJSON:  options,
+			selected:     [][]byte{hashOf("Yes"), hashOf("Something else")},
+			wantSelected: `["Yes"]`,
+			wantResolved: 0,
+		},
+		{
+			name:         "unknown poll keeps the vote but cannot name it",
+			optionsJSON:  "",
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+		// Empty selection on purpose: with a non-empty selection this case would
+		// pass even without the explicit unmarshal guard, because no hash would
+		// match and the partial-resolution branch would already return 0. An
+		// empty selection is the only input that separates "withdrawn vote we
+		// understood" from "we never parsed the options", so it is the one that
+		// actually covers the guard.
+		{
+			name:         "corrupt stored options are unresolved even with nothing selected",
+			optionsJSON:  `{not json`,
+			selected:     nil,
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+		{
+			name:         "corrupt stored options with a selection are unresolved too",
+			optionsJSON:  `{not json`,
+			selected:     [][]byte{hashOf("Yes")},
+			wantSelected: `[]`,
+			wantResolved: 0,
+		},
+	}
 
-		// Resolve
-		resolvedNames := make([]string, 0)
-		for _, selectedHash := range selectedHashBytes {
-			if name, ok := hashMap[hex.EncodeToString(selectedHash)]; ok {
-				resolvedNames = append(resolvedNames, name)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotSelected, gotResolved := resolvePollVote(tc.optionsJSON, tc.selected)
+			if gotSelected != tc.wantSelected {
+				t.Errorf("selected = %s, want %s", gotSelected, tc.wantSelected)
 			}
-		}
-
-		if len(resolvedNames) != len(optionNames) {
-			t.Errorf("expected %d resolved, got %d", len(optionNames), len(resolvedNames))
-		}
-	})
-
-	t.Run("unknown hashes result in partial resolution", func(t *testing.T) {
-		optionNames := []string{"Yes", "No"}
-		hashMap := make(map[string]string)
-		for _, opt := range optionNames {
-			hash := sha256.Sum256([]byte(opt))
-			hashMap[hex.EncodeToString(hash[:])] = opt
-		}
-
-		// Create unknown hash
-		unknownHash := sha256.Sum256([]byte("Unknown"))
-		yesHash := sha256.Sum256([]byte("Yes"))
-		selectedHashBytes := [][]byte{
-			yesHash[:],
-			unknownHash[:],
-		}
-
-		resolvedNames := make([]string, 0)
-		for _, selectedHash := range selectedHashBytes {
-			if name, ok := hashMap[hex.EncodeToString(selectedHash)]; ok {
-				resolvedNames = append(resolvedNames, name)
+			if gotResolved != tc.wantResolved {
+				t.Errorf("resolved = %d, want %d", gotResolved, tc.wantResolved)
 			}
-		}
-
-		if len(resolvedNames) != 1 {
-			t.Errorf("expected 1 resolved, got %d", len(resolvedNames))
-		}
-	})
+		})
+	}
 }
 
 // setupTempDB creates a temporary in-memory database with poll schema.
