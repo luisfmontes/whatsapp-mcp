@@ -1083,6 +1083,71 @@ func TestHandleVotePoll(t *testing.T) {
 	}
 }
 
+// TestPollResultsTally drives handlePollResults against a real temp DB, which
+// is the only way to cover the tally arithmetic — the validation-only tests
+// below never reach it.
+func TestPollResultsTally(t *testing.T) {
+	db := setupTempDB(t)
+	defer db.Close()
+	store := &MessageStore{db: db}
+
+	const pollID, chatJID = "POLL1", "120363000000000000@g.us"
+	if err := store.StorePoll(pollID, chatJID, "me@s.whatsapp.net", "smoke?",
+		`["alpha","beta","gama"]`, 1, time.Now().Unix()); err != nil {
+		t.Fatalf("StorePoll: %v", err)
+	}
+	seed := []struct {
+		voter    string
+		selected string
+		resolved int
+	}{
+		{"a@s.whatsapp.net", `["alpha"]`, 1},
+		{"b@s.whatsapp.net", `["alpha"]`, 1},
+		{"c@s.whatsapp.net", `[]`, 1}, // withdrew their vote
+		{"d@s.whatsapp.net", `[]`, 0}, // poll options unknown to the bridge
+	}
+	for _, s := range seed {
+		if err := store.UpsertPollVote(pollID, chatJID, s.voter, s.selected, s.resolved, time.Now().Unix()); err != nil {
+			t.Fatalf("UpsertPollVote(%s): %v", s.voter, err)
+		}
+	}
+
+	body, _ := json.Marshal(PollResultsRequest{ChatJID: chatJID, PollID: pollID})
+	rec := doHandlerRequest(t, handlePollResults(store), http.MethodPost, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp PollResultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Every option is reported, in the stored order, including the ones nobody
+	// picked — omitting them would read as "that option did not exist".
+	if len(resp.Results) != 3 {
+		t.Fatalf("got %d options, want 3: %+v", len(resp.Results), resp.Results)
+	}
+	for i, want := range []string{"alpha", "beta", "gama"} {
+		if resp.Results[i].Option != want {
+			t.Errorf("Results[%d].Option = %q, want %q", i, resp.Results[i].Option, want)
+		}
+	}
+	if resp.Results[0].Count != 2 {
+		t.Errorf("alpha count = %d, want 2", resp.Results[0].Count)
+	}
+	if resp.Results[1].Count != 0 || resp.Results[2].Count != 0 {
+		t.Errorf("unpicked options should be 0, got beta=%d gama=%d", resp.Results[1].Count, resp.Results[2].Count)
+	}
+	// The withdrawn vote is understood but is not a voter: total_voters must
+	// never exceed the sum of the per-option counts.
+	if resp.TotalVoters != 2 {
+		t.Errorf("TotalVoters = %d, want 2 (withdrawn vote must not count)", resp.TotalVoters)
+	}
+	if resp.UnresolvedVotes != 1 {
+		t.Errorf("UnresolvedVotes = %d, want 1", resp.UnresolvedVotes)
+	}
+}
+
 func TestHandlePollResults(t *testing.T) {
 	handler := handlePollResults(nil)
 

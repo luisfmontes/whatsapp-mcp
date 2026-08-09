@@ -171,7 +171,11 @@ type PollResultsResponse struct {
 - Poll não encontrado → 404.
 - `Results` traz **todas** as opções do poll, na ordem original, inclusive as com `count: 0`.
   Omitir opção sem voto faria o LLM concluir que ela não existia.
-- `TotalVoters` = votantes distintos com `resolved = 1`.
+- `TotalVoters` = votantes distintos com `resolved = 1` **e pelo menos uma opção marcada**. Quem
+  retirou o voto (seleção vazia) é um voto entendido, mas não é votante — contá-lo faria
+  `total_voters` passar da soma das contagens por opção, e "3 pessoas votaram" seria lido como três
+  escolhas de verdade. Decisão tomada durante a revisão do ciclo, corrigindo o que este contrato
+  dizia originalmente.
 - `UnresolvedVotes` = linhas com `resolved = 0` (RN-05). Sempre presente, mesmo zero.
 - Não fala com o WhatsApp: é leitura de `messages.db`. Sem guard de conexão.
 

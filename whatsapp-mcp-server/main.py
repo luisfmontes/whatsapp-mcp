@@ -818,7 +818,9 @@ def get_poll_results(
             "message": str,
             "question"?: str (the poll question),
             "results"?: [{"option": str, "count": int, "voters"?: [str]}, ...],
-            "total_voters"?: int (number of unique voters with resolved votes),
+            "total_voters"?: int (unique voters who have at least one option
+                selected; someone who withdrew their vote is not counted, so
+                this never exceeds the sum of the per-option counts),
             "unresolved_votes"?: int (number of votes for which options were unknown)
         }
 
