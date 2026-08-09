@@ -1920,6 +1920,17 @@ func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http
 			return
 		}
 
+		// The chat row has to exist first: polls carries a foreign key to
+		// chats(jid) and foreign keys are enforced on this connection, so
+		// storing a poll in a chat we've never written would fail outright —
+		// the poll would go out on WhatsApp and then be unknown to vote_poll
+		// and poll_results.
+		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+			if ensureErr := messageStore.EnsureChat(chatJID.String(), resp.Timestamp); ensureErr != nil {
+				fmt.Printf("Failed to ensure chat row for poll: %v\n", ensureErr)
+			}
+		}
+
 		// Store poll in database
 		optionsJSON, _ := json.Marshal(req.Options)
 		if err := messageStore.StorePoll(
@@ -1942,9 +1953,6 @@ func handleCreatePoll(client *whatsmeow.Client, messageStore *MessageStore) http
 		// Without this, create_poll leaves a hole in list_messages exactly where
 		// the poll is.
 		if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-			if ensureErr := messageStore.EnsureChat(chatJID.String(), resp.Timestamp); ensureErr != nil {
-				fmt.Printf("Failed to ensure chat row for poll: %v\n", ensureErr)
-			}
 			if storeErr := messageStore.StoreMessage(
 				resp.ID, chatJID.String(), client.Store.ID.User, req.Question,
 				resp.Timestamp, true, "", "", "", nil, nil, nil, 0,
