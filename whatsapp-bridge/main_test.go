@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1457,6 +1458,130 @@ func TestDecideWatchdogAction(t *testing.T) {
 // dead by mutation: making the real handler answer 503 left them green. They now
 // call handleStatus, which is why that handler had to stop being an inline
 // closure.
+// TestWatchdogStateConcurrency exists to give `go test -race` something to
+// find. The watchdog goroutine and the event callback both write state that the
+// status handler reads, but no other test ever starts them — so a green -race
+// run was proving nothing about exactly the code that needed proving. It caught
+// a real unsynchronized read once already: the loop logged the reconnect attempt
+// number by reading watchdogState.reconnects after releasing the mutex.
+//
+// Note: -race needs CGO, so this is only meaningful on the CGO builds
+// (Linux/macOS in CI, or WSL locally). On Windows it still runs, just without
+// the detector.
+func TestWatchdogStateConcurrency(t *testing.T) {
+	const goroutines = 8
+	const iterations = 200
+
+	handler := handleStatus(nil)
+	var wg sync.WaitGroup
+
+	// Writers: the watchdog ticking through every decision.
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			decisions := []watchdogDecision{watchdogNone, watchdogReconnect, watchdogLoggedOut}
+			for n := 0; n < iterations; n++ {
+				applyWatchdogDecision(decisions[(seed+n)%len(decisions)])
+			}
+		}(i)
+	}
+
+	// Writer: the whatsmeow event callback stamping the last-event time.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; n < iterations*goroutines; n++ {
+			lastEventAtNanos.Store(time.Now().UnixNano())
+		}
+	}()
+
+	// Readers: concurrent health checks, which is what a monitor actually does.
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := 0; n < iterations; n++ {
+				req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Errorf("status = %d during concurrent access, want 200", rec.Code)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestApplyWatchdogDecision covers the state transitions the loop depends on,
+// which used to be buried inside the ticker and therefore untestable.
+func TestApplyWatchdogDecision(t *testing.T) {
+	reset := func() {
+		watchdogState.Lock()
+		watchdogState.disconnectedTicks = 0
+		watchdogState.loggedOutWarnTick = 0
+		watchdogState.reconnects = 0
+		watchdogState.Unlock()
+	}
+
+	t.Run("one disconnected tick is not enough to reconnect", func(t *testing.T) {
+		reset()
+		if reconnect, _, _ := applyWatchdogDecision(watchdogReconnect); reconnect {
+			t.Fatal("reconnected on the first bad tick; the library's own backoff gets one tick first")
+		}
+	})
+
+	t.Run("two consecutive disconnected ticks reconnect once", func(t *testing.T) {
+		reset()
+		applyWatchdogDecision(watchdogReconnect)
+		reconnect, attempt, _ := applyWatchdogDecision(watchdogReconnect)
+		if !reconnect {
+			t.Fatal("did not reconnect after two consecutive bad ticks")
+		}
+		if attempt != 1 {
+			t.Errorf("attempt = %d, want 1", attempt)
+		}
+		// The streak resets, so the next reconnect again needs two ticks.
+		if again, _, _ := applyWatchdogDecision(watchdogReconnect); again {
+			t.Error("reconnected again on the very next tick; the streak did not reset")
+		}
+	})
+
+	t.Run("a healthy tick clears the streak", func(t *testing.T) {
+		reset()
+		applyWatchdogDecision(watchdogReconnect)
+		applyWatchdogDecision(watchdogNone)
+		if reconnect, _, _ := applyWatchdogDecision(watchdogReconnect); reconnect {
+			t.Fatal("a single bad tick after recovery triggered a reconnect")
+		}
+	})
+
+	t.Run("logged out warns on the first tick, not the tenth", func(t *testing.T) {
+		reset()
+		_, _, warn := applyWatchdogDecision(watchdogLoggedOut)
+		if !warn {
+			t.Fatal("no warning on the first logged-out tick — a dead session would stay silent for ten ticks")
+		}
+		for i := 0; i < 8; i++ {
+			if _, _, w := applyWatchdogDecision(watchdogLoggedOut); w {
+				t.Fatalf("warned again at tick %d; it should be rate-limited", i+2)
+			}
+		}
+	})
+
+	t.Run("logged out never asks for a reconnect", func(t *testing.T) {
+		reset()
+		for i := 0; i < 25; i++ {
+			if reconnect, _, _ := applyWatchdogDecision(watchdogLoggedOut); reconnect {
+				t.Fatal("asked to reconnect while logged out; only a QR scan fixes that")
+			}
+		}
+	})
+}
+
 func TestHandleStatus(t *testing.T) {
 	handler := handleStatus(nil)
 
