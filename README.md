@@ -87,6 +87,7 @@ The backfill/recovery scripts are separate processes that read the engine vars f
 - `WHATSAPP_API_BASE_URL` env var — point the Python MCP server at a non-default bridge URL
 - `WHATSAPP_API_AUTH_TOKEN` env var — bearer token the MCP server sends as `Authorization: Bearer <token>`; required if the bridge's `API_AUTH_TOKEN` is set
 - `BIND_ADDR` env var — change the bind address of the REST API (see [Security](#security) above for the auth requirement this triggers)
+- `WHATSAPP_WATCHDOG_INTERVAL` env var — seconds between watchdog checks (default `60`, minimum `10`; anything invalid falls back to the default and logs which value is in force)
 - `API_AUTH_TOKEN` env var (bridge) — bearer token required on all `/api/*` requests once `BIND_ADDR` is non-loopback
 - Transcription env vars — see [Audio transcription](#audio-transcription-opt-in) above
 
