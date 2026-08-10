@@ -3121,10 +3121,17 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	return true, mediaType, filename, absPath, nil
 }
 
-// Extract direct path from a WhatsApp media URL
+// Extract direct path from a WhatsApp media URL.
+//
+// The query string is part of the direct path, not decoration: it carries the
+// CDN's authorization token (oh) and its expiry (oe). whatsmeow builds the
+// download URL by concatenating "&hash=..." onto whatever this returns
+// (DownloadMediaWithPath), so a path stripped of its query produces a URL with
+// no "?" and no token, and the CDN answers 403 to every media in the store.
+// Keeping the query mirrors the directPath the protobuf itself carries.
 func extractDirectPathFromURL(url string) string {
-	// The direct path is typically in the URL, we need to extract it
-	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_698058036224062_3424455886509161511_n.enc?ccb=11-4&oh=...
+	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_69805803_n.enc?ccb=11-4&oh=...&oe=...&_nc_sid=...
+	// Example return: /v/t62.7118-24/13812002_69805803_n.enc?ccb=11-4&oh=...&oe=...&_nc_sid=...
 
 	// Find the path part after the domain
 	parts := strings.SplitN(url, ".net/", 2)
@@ -3132,13 +3139,8 @@ func extractDirectPathFromURL(url string) string {
 		return url // Return original URL if parsing fails
 	}
 
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
 	// Create proper direct path format
-	return "/" + pathPart
+	return "/" + parts[1]
 }
 
 // ---------------------------------------------------------------------------

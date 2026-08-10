@@ -72,6 +72,42 @@ func TestSafeMediaPath(t *testing.T) {
 	})
 }
 
+// extractDirectPathFromURL must keep the query string. whatsmeow's
+// DownloadMediaWithPath concatenates "&hash=..." onto the direct path, so the
+// query is what supplies the "?" and the CDN authorization token (oh) — drop it
+// and every download 403s, which is exactly what happened to this bridge.
+func TestExtractDirectPathFromURL(t *testing.T) {
+	const url = "https://mmg.whatsapp.net/v/t62.7118-24/582729677_1690209148760939_n.enc" +
+		"?ccb=11-4&oh=01_Q5Aa5QEFyuE2cc8EmroSnUoZk72zv970&oe=6AA1BE81&_nc_sid=5e03e0&mms3=true"
+
+	got := extractDirectPathFromURL(url)
+
+	if !strings.HasPrefix(got, "/v/t62.7118-24/") {
+		t.Fatalf("direct path must start with the slashed path: got %q", got)
+	}
+	for _, param := range []string{"?ccb=11-4", "oh=01_Q5Aa5QEFyuE2cc8EmroSnUoZk72zv970", "oe=6AA1BE81"} {
+		if !strings.Contains(got, param) {
+			t.Errorf("direct path lost %q: got %q", param, got)
+		}
+	}
+
+	// The invariant that broke: the URL whatsmeow builds on top of this must be
+	// a single well-formed query, not a path with a stray '&'.
+	built := "https://media.example.net" + got + "&hash=abc&mms-type=image&__wa-mms="
+	if strings.Count(built, "?") != 1 {
+		t.Fatalf("built URL must have exactly one '?': %s", built)
+	}
+	if strings.Index(built, "&") < strings.Index(built, "?") {
+		t.Fatalf("built URL has a '&' before its '?': %s", built)
+	}
+
+	t.Run("unparseable URL is returned unchanged", func(t *testing.T) {
+		if got := extractDirectPathFromURL("not-a-media-url"); got != "not-a-media-url" {
+			t.Fatalf("expected the input back, got %q", got)
+		}
+	})
+}
+
 // normalizePhone must strip '+', spaces and '-' so contact resolution matches
 // regardless of formatting (parity with the Python _normalize_phone).
 func TestNormalizePhone(t *testing.T) {
