@@ -3860,6 +3860,16 @@ func startTranscriptionSweep(interval time.Duration) {
 				}
 				cmd.Env = append(cmd.Env, fmt.Sprintf("WHATSAPP_API_BASE_URL=http://%s:%s/api", host, port))
 			}
+			// transcribe.py reads WHATSAPP_API_AUTH_TOKEN, but the bridge's
+			// own auth flag is API_AUTH_TOKEN (see the BIND_ADDR check above)
+			// — different names, so os.Environ() alone never carries it
+			// through. Without this every download 401s once the bridge
+			// requires auth (any non-loopback BIND_ADDR).
+			if os.Getenv("WHATSAPP_API_AUTH_TOKEN") == "" {
+				if t := os.Getenv("API_AUTH_TOKEN"); t != "" {
+					cmd.Env = append(cmd.Env, fmt.Sprintf("WHATSAPP_API_AUTH_TOKEN=%s", t))
+				}
+			}
 			if err := cmd.Start(); err != nil {
 				fmt.Printf("transcription sweep: failed to start: %v\n", err)
 				continue
