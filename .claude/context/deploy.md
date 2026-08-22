@@ -92,12 +92,12 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 ## install.sh (para outros)
 
 - Gate Go 1.25+ (casa com go.mod). Clona em `~/.whatsapp-mcp`, compila, escreve config Claude/Cursor, cria start-bridge.sh + plist (RunAtLoad/KeepAlive=false por padrão lá).
-- One-line: `curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash`.
+- One-line: `curl -fsSL https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.sh | bash`.
 - Flags: `--service` cria unit systemd **user** `whatsapp-bridge` (Linux) / launchd KeepAlive (macOS); `--codex` registra o MCP no `~/.codex/config.toml`.
 
 ## Plugin Claude Code
 
-- Repo também é distribuído como plugin: `.claude-plugin/plugin.json` + `commands/setup.md`, via marketplace `rodrigopg/claude-plugins` (`/plugin install whatsapp-mcp@rodrigopg`).
+- Repo também é distribuído como plugin: `.claude-plugin/plugin.json` + `commands/setup.md`. **Ainda sem marketplace próprio** — instalação por `install.sh`/`install.ps1` deste repo. O marketplace `rodrigopg/claude-plugins` distribui o plugin *dele*, não este.
 - Coexistência com bridge já rodando como serviço system-scope (ex: setup de VM Linux acima): `install.sh --service` cria unit systemd **user**; se a bridge já roda como serviço **system** numa porta própria, o guard do install.sh detecta a bridge ativa e pula o setup de serviço (não duplica).
 
 ## QR / auth
@@ -114,4 +114,4 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 
 ## Git
 
-- Remotes: `rodrigopg` = fork (push aqui), `origin` = lharries upstream. main rastreia `rodrigopg/main`.
+- Remotes: `origin` = `luisfmontes/whatsapp-mcp` (push aqui), `upstream` = `rodrigopg/whatsapp-mcp` (fetch para sincronizar). main rastreia `origin/main`. Cadeia: lharries → rodrigopg → luisfmontes.
