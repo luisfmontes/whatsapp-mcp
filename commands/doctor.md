@@ -8,7 +8,7 @@ Diagnose the WhatsApp MCP setup. Read-only — never restart services, rewrite c
 
 Read `~/.claude.json`, list every `mcpServers` key starting with `whatsapp`. For each, extract `command`, `args` (the `--directory` value), and `env` (`WHATSAPP_API_BASE_URL`, `WHATSAPP_API_AUTH_TOKEN` if present).
 
-No `whatsapp*` keys found → report "No WhatsApp MCP server configured — run `/whatsapp-mcp-win:setup`" and stop here.
+No `whatsapp*` keys found → report "No WhatsApp MCP server configured — run `/whatsapp:setup`" and stop here.
 
 ## 2. Per-account checks
 

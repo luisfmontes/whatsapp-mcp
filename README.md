@@ -105,7 +105,7 @@ network (Tailscale, WireGuard, SSH tunnel) plus the token is the recommended set
 
 This fork is **not published to a marketplace yet**. The `rodrigopg/claude-plugins` marketplace distributes the *upstream* plugin, which has no Windows support and none of the fixes listed above — installing from there does not give you this fork. Until a marketplace exists, use the one-line installer below: it registers the MCP server directly, which is what the plugin does anyway.
 
-If you do load this repo as a plugin (`.claude-plugin/plugin.json` is here), run `/whatsapp-mcp-win:setup` for guided onboarding: it checks dependencies (Go 1.25+, uv, git), builds and installs the bridge as a service, and walks you through QR pairing. The plugin installs from this repo's `main` branch. The first tool call after install/update may be slow while `uv` resolves dependencies.
+If you do load this repo as a plugin (`.claude-plugin/plugin.json` is here), run `/whatsapp:setup` for guided onboarding: it checks dependencies (Go 1.25+, uv, git), builds and installs the bridge as a service, and walks you through QR pairing. The plugin installs from this repo's `main` branch. The first tool call after install/update may be slow while `uv` resolves dependencies.
 
 ---
 
