@@ -71,7 +71,7 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 ## launchd (serviço persistente — macOS)
 
 - Agent: `~/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist`. **`RunAtLoad=true` + `KeepAlive=true`** (arranca no login, reinicia se cair, ThrottleInterval 10s).
-- Roda do clone real `/Users/rodrigo/git/whatsapp-mcp/whatsapp-bridge` (NÃO de `~/.whatsapp-mcp`). Executa `start-bridge.sh`.
+- Roda do **clone de trabalho**, não de `~/.whatsapp-mcp`. Executa `start-bridge.sh`. (Herdado do upstream, onde o caminho documentado era `/Users/rodrigo/git/whatsapp-mcp/whatsapp-bridge` — a máquina macOS do Rodrigo, não a sua.)
 - **launchd NÃO herda `export` do shell** → env de transcrição vem de `transcription.env` (sourced por start-bridge.sh). Plist seta `WHATSAPP_BRIDGE_LOG` → `bridge.log`.
 - Controle:
   - Parar: `launchctl bootout gui/$(id -u)/com.whatsapp-mcp.bridge`
@@ -107,9 +107,9 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 - **Re-parear:** QR só é emitido no startup quando `client.Store.ID == nil` (sem sessão em `whatsapp.db`). Logout remoto apaga a sessão mas NÃO re-entra no loop de QR em runtime — `/qr` fica preso em "connected". Precisa reiniciar o processo (`kill <pid>`; systemd/launchd com restart automático religa sozinho). Logout pelo celular já zera `whatsmeow_device`; aí o bridge sobe limpo e gera QR.
 - History sync ao parear é limitado (poucas msgs/conversas recentes), não histórico completo — normal do multi-device. Backup `messages.db` antes (INSERT OR REPLACE pode sobrescrever).
 
-## DNS GitHub (rede do Rodrigo)
+## DNS GitHub (herdado do upstream — rede do Rodrigo, não a sua)
 
-- `api.github.com` resolve globalmente pra `4.228.31.149` (Azure) — **inalcançável desta rede** (timeout). IPs legados `140.82.x` (range oficial GitHub) roteiam OK.
+- Diagnóstico feito na rede do Rodrigo; mantido aqui porque a receita serve se você bater no mesmo bloqueio. `api.github.com` resolve globalmente pra `4.228.31.149` (Azure) — **inalcançável daquela rede** (timeout). IPs legados `140.82.x` (range oficial GitHub) roteiam OK.
 - Fix: pin em `/etc/hosts` (bloco demarcado `claude-code: GitHub pin`): api→140.82.112.6, github→140.82.112.3, codeload→140.82.112.9. Remover bloco reverte. Bloqueio é da rede/ISP, não DNS local.
 
 ## Git
