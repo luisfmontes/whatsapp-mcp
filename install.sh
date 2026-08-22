@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # WhatsApp MCP — one-line installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.sh | bash
 #        curl -fsSL … | bash -s -- [--service] [--codex]
 
-REPO_URL="https://github.com/rodrigopg/whatsapp-mcp.git"
+REPO_URL="https://github.com/luisfmontes/whatsapp-mcp.git"
 INSTALL_DIR="${WHATSAPP_MCP_DIR:-$HOME/.whatsapp-mcp}"
 BRIDGE_PORT="${WHATSAPP_BRIDGE_PORT:-8080}"
 

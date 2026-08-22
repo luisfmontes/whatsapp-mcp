@@ -21,7 +21,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - Re-parear/re-sync: `StoreMessage` preserva `content` existente via `COALESCE(NULLIF(...))` (não sobrescreve transcrição com string vazia do sync) — mas faça backup de `messages.db`/`whatsapp.db` antes de qualquer re-pareamento de qualquer forma, é operação real de produção.
 - Transcrição é **opt-in**; sem engine, sweep deve ser no-op (não marcar áudios).
 - `transcription.env` **nunca** commitado (gitignored).
-- Push em `rodrigopg` (fork), não `origin` (upstream).
+- Push em `origin` (`luisfmontes/whatsapp-mcp`, este fork), **não** em `upstream` (`rodrigopg/whatsapp-mcp`, que é só fetch para sincronizar).
 
 ## Checklist antes de abrir PR
 
@@ -31,7 +31,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - [ ] Sem path pessoal/secret vazando (transcription.env, API keys).
 - [ ] Mudou comportamento de sync/escrita? Conferir impacto em transcrições existentes.
 - [ ] README/install.sh coerentes se mudou onboarding (versão Go, env vars, troubleshooting).
-- [ ] PR contra `rodrigopg/main`.
+- [ ] PR contra `origin/main`. PR para `upstream` (rodrigopg) só quando a mudança for agnóstica de SO — o roadmap deste fork não espera por ela.
 
 ## Comandos essenciais
 

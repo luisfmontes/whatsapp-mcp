@@ -1,6 +1,6 @@
 # WhatsApp MCP Server (Community Fork)
 
-> **Why this fork?** The [upstream repo](https://github.com/lharries/whatsapp-mcp) has been frozen since early 2025 — over 30 open PRs with critical fixes (broken whatsmeow API, LID contact migration, security hardening) were left unmerged. This fork cherry-picks the best of those PRs and keeps the bridge working against current WhatsApp protocol.
+> **Why this fork?** The chain is [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) — frozen since early 2025, with 30+ open PRs carrying critical fixes (broken whatsmeow API, LID contact migration, security hardening) left unmerged — then [rodrigopg/whatsapp-mcp](https://github.com/rodrigopg/whatsapp-mcp), which cherry-picked the best of those PRs, and then this fork, which adds **native Windows support** (no WSL), a session health check with a **reconnection watchdog**, and media download fixes. Improvements from `rodrigopg` are merged in as they land.
 
 This is a Model Context Protocol (MCP) server for WhatsApp.
 
@@ -103,21 +103,16 @@ network (Tailscale, WireGuard, SSH tunnel) plus the token is the recommended set
 
 ### Install as a Claude Code plugin
 
-The fastest path for Claude Code users:
+This fork is **not published to a marketplace yet**. The `rodrigopg/claude-plugins` marketplace distributes the *upstream* plugin, which has no Windows support and none of the fixes listed above — installing from there does not give you this fork. Until a marketplace exists, use the one-line installer below: it registers the MCP server directly, which is what the plugin does anyway.
 
-```
-/plugin marketplace add rodrigopg/claude-plugins
-/plugin install whatsapp-mcp@rodrigopg
-```
-
-Then run `/whatsapp-mcp:setup` for guided onboarding: it checks dependencies (Go 1.25+, uv, git), builds and installs the bridge as a service, and walks you through QR pairing. The plugin installs from this repo's `main` branch. The first tool call after install/update may be slow while `uv` resolves dependencies.
+If you do load this repo as a plugin (`.claude-plugin/plugin.json` is here), run `/whatsapp-mcp-win:setup` for guided onboarding: it checks dependencies (Go 1.25+, uv, git), builds and installs the bridge as a service, and walks you through QR pairing. The plugin installs from this repo's `main` branch. The first tool call after install/update may be slow while `uv` resolves dependencies.
 
 ---
 
 ### One-line install (macOS / Linux / WSL)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.sh | bash
 ```
 
 The script:
@@ -139,7 +134,7 @@ Optional flags (`bash -s -- --service --codex`):
 ### Codex CLI
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh | bash -s -- --codex
+curl -fsSL https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.sh | bash -s -- --codex
 ```
 
 This writes `[mcp_servers.whatsapp]` into `~/.codex/config.toml`. The write is append-safe: if the key already exists, the file is left untouched and the snippet is printed for manual merge. To configure manually:
@@ -168,7 +163,7 @@ env = { WHATSAPP_BRIDGE_PORT = "8080" }
 1. **Clone this repository**
 
    ```bash
-   git clone https://github.com/rodrigopg/whatsapp-mcp.git
+   git clone https://github.com/luisfmontes/whatsapp-mcp.git
    cd whatsapp-mcp
    ```
 
@@ -339,5 +334,6 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 ## Credits
 
 - Original project: [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp)
+- Fork this one is based on: [rodrigopg/whatsapp-mcp](https://github.com/rodrigopg/whatsapp-mcp)
 - WhatsApp web protocol library: [whatsmeow](https://github.com/tulir/whatsmeow)
 - PRs cherry-picked from: #209 (coucaj), #221 (fpto), #239 (jayeshkaithwas), #244 (realitix)
