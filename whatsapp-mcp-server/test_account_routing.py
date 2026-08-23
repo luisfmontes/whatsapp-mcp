@@ -15,6 +15,7 @@ import signal
 import sys
 import tempfile
 import logging
+import requests
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -342,7 +343,7 @@ def test_status_agregado(bridge_processes, bridge_dirs, tmp_path):
 
 def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
     """Test D12: list_chats(account="offline") raises clear error with task name.
-    
+
     When a specified account's bridge is unreachable, the tool should raise
     ValueError with a clear message naming the account alias and the
     scheduled task name, without raw stacktrace or attempting to start
@@ -358,9 +359,9 @@ def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
                 bridge_processes['trabalho'].kill()
             except:
                 pass
-    
+
     time.sleep(0.5)  # Give it time to stop
-    
+
     # Create accounts.json: both accounts configured, but we'll not start trabalho
     accounts_file = tmp_path / "accounts.json"
     accounts_config = {
@@ -388,19 +389,194 @@ def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
         # trabalho is not running, so this should raise ValueError
         with pytest.raises(ValueError) as exc_info:
             whatsapp.list_chats(account="trabalho")
-        
+
         error_msg = str(exc_info.value)
-        
+
         # Error must mention the account alias
         assert "trabalho" in error_msg,             f"Error should mention account alias 'trabalho', got: {error_msg}"
-        
+
         # Error must mention the scheduled task name
         assert "WhatsAppMCPBridge-trabalho" in error_msg,             f"Error should mention task name 'WhatsAppMCPBridge-trabalho', got: {error_msg}"
-        
+
         # Error must NOT contain raw Python stacktrace indicators
         assert "Traceback" not in error_msg, f"Error should not include traceback"
-        
+
     finally:
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
+def test_pair_account_not_paired(tmp_path):
+    """Test D4: pair_account() derives correct URL and fetches /qr.png (not /api/qr.png).
+
+    The bug was: base_url is http://localhost:PORT/api, and concatenating /qr.png
+    gave http://localhost:PORT/api/qr.png (wrong). The fix: extract origin
+    (http://localhost:PORT) and use http://localhost:PORT/qr.png (correct).
+
+    This test mocks requests.get to validate the URL derivation is correct,
+    then simulates bridge returning PNG bytes with the correct signature.
+    """
+    # Create accounts.json
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "test_pair",
+        "accounts": {
+            "test_pair": {
+                "port": 9999,
+                "dir": "/tmp/test",
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    # Valid PNG signature
+    valid_png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100  # Minimal PNG structure
+
+    # Track which URLs were called
+    urls_called = []
+
+    # Save originals
+    original_requests_get = requests.get
+    original_requests_request = requests.request
+
+    def mock_requests_request(method, url, **kwargs):
+        urls_called.append(url)
+
+        # Mock /api/status responses
+        if url.endswith("/api/status"):
+            class MockResponse:
+                status_code = 200
+                text = '{"logged_in": false}'
+                def raise_for_status(self):
+                    pass
+                def json(self):
+                    return {"logged_in": False}
+            return MockResponse()
+
+        # Any other URL fails
+        raise requests.ConnectionError(f"Unexpected URL: {url}")
+
+    def mock_requests_get(url, **kwargs):
+        urls_called.append(url)
+
+        # /qr.png should be at http://localhost:9999/qr.png (not /api/qr.png)
+        if url == "http://localhost:9999/qr.png":
+            class MockResponse:
+                status_code = 200
+                content = valid_png
+                def raise_for_status(self):
+                    pass
+            return MockResponse()
+
+        # Any other URL should fail (this catches the bug of /api/qr.png)
+        raise requests.ConnectionError(f"Unexpected URL: {url}")
+
+    try:
+        # Replace both get and request
+        requests.get = mock_requests_get
+        requests.request = mock_requests_request
+
+        # Call pair_account
+        qr_bytes = whatsapp.pair_account("test_pair")
+
+        # Verify it called the correct URL
+        assert len(urls_called) > 0, "pair_account did not make HTTP requests"
+        assert "http://localhost:9999/qr.png" in urls_called, \
+            f"pair_account should call http://localhost:9999/qr.png, but called: {urls_called}"
+        assert not any("/api/qr.png" in url for url in urls_called), \
+            f"pair_account should NOT call /api/qr.png, but called: {urls_called}"
+
+        # Verify response
+        assert isinstance(qr_bytes, bytes), f"Should return bytes, got {type(qr_bytes)}"
+        assert qr_bytes.startswith(b'\x89PNG'), f"Should have PNG signature, got {qr_bytes[:4]!r}"
+        assert qr_bytes == valid_png, "Should return the exact PNG bytes from bridge"
+
+    finally:
+        # Restore originals
+        requests.get = original_requests_get
+        requests.request = original_requests_request
+
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
+def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
+    """Test D4: pair_account() with already-paired account returns 'already paired' message.
+
+    When a bridge's /api/status shows logged_in=true (account already paired),
+    pair_account() should raise ValueError with a message saying the account
+    is already paired, not a raw HTTP error.
+    """
+    # Simulate account already paired by having /api/status return logged_in=true
+    # We'll monkey-patch _api_request for this test
+
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {
+                "port": 3097,
+                "dir": bridge_dirs['trabalho'],
+                "jid": ""
+            },
+            "pessoal": {
+                "port": 3098,
+                "dir": bridge_dirs['pessoal'],
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    # Save original _api_request
+    original_api_request = whatsapp._api_request
+
+    def mock_api_request(method, path, base_url, timeout=30, **kwargs):
+        """Mock _api_request: return logged_in=true for /api/status (already paired)."""
+        if path == "/api/status":
+            # Return a mock response showing already logged in
+            class MockResponse:
+                status_code = 200
+                text = '{"logged_in": true, "healthy": true}'
+                def raise_for_status(self):
+                    pass
+                def json(self):
+                    return {"logged_in": True, "healthy": True}
+            return MockResponse()
+        # For other paths, call the original
+        return original_api_request(method, path, base_url, timeout, **kwargs)
+
+    try:
+        # Patch _api_request temporarily
+        whatsapp._api_request = mock_api_request
+
+        # Try to pair an already-paired account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.pair_account("trabalho")
+
+        error_msg = str(exc_info.value)
+
+        # Error message should mention the account and that it's already paired
+        assert "trabalho" in error_msg, \
+            f"Error should mention account 'trabalho', got: {error_msg}"
+        assert "already paired" in error_msg.lower(), \
+            f"Error should mention 'already paired', got: {error_msg}"
+
+    finally:
+        # Restore original _api_request
+        whatsapp._api_request = original_api_request
+
         if old_env is None:
             os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
         else:
