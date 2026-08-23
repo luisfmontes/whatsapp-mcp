@@ -85,6 +85,11 @@
     "em": "2026-08-23"
   },
   "fechar": {
-    "status": "pendente"
+    "status": "ok",
+    "acao": "merge",
+    "pr": 12,
+    "merge": "d696190",
+    "nota": "o usuario pediu PR e depois merge: o #12 saiu do draft e foi mesclado na main. O PR #15 no upstream segue OPEN por decisao (D7).",
+    "em": "2026-08-23"
   }
 }
