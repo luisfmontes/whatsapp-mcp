@@ -36,15 +36,15 @@
     "bloqueiam": 1,
     "em": "2026-08-23",
     "rodada": 4,
-    "rodadas": 6,
+    "rodadas": 7,
     "base": "b2eb4cd4a9b9e8f3f0384afd588b12a4eda024b4",
-    "head": "c67da05"
+    "head": "8ec2af9"
   },
   "verificar": {
     "status": "ok",
-    "tarefas": 9,
-    "comando": "python -m pytest -q (94 passed, exit 0); CGO_ENABLED=0 go test ./... (ok, exit 0); install.ps1 -AddAccount em dir descartavel; binario com WHATSAPP_ACCOUNT=verif",
-    "saida": "94 passed; ok whatsapp-client; porta 3123 derivada e accounts.json sem BOM (bytes 123 34), maior byte do install.ps1 = 125; whatsapp-qr-verif.png criado em %TEMP%; get_bridge_status na instalacao real devolveu a tupla classica (True, \"\", {healthy:true, logged_in:true})",
+    "tarefas": 10,
+    "comando": "curl -s http://localhost:3096/qr (com WHATSAPP_ACCOUNT=trabalho) e http://localhost:3097/qr (sem), contra o binario do HEAD mesclado",
+    "saida": "com apelido: <p>Account: trabalho (port 3096)</p>; sem apelido: 0 ocorrencias de Account: e 1 ocorrencia do titulo (sem duplicacao); go test ok; pytest 94 passed",
     "em": "2026-08-23"
   },
   "fechar": {
