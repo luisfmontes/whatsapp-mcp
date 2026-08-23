@@ -71,10 +71,14 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
   sozinho e usa 8081 como default. Em multi-account, cada new-account ganha sua porta (começando
   de 3006, pulando as já-usadas).
 - Reiniciar: `Stop-Process -Name whatsapp-bridge -Force` (não há sinal de parada limpa no Windows;
-  a tarefa religa no próximo logon, ou `Start-ScheduledTask -TaskName WhatsAppMCPBridge*`).
-  Em multi-account, reiniciar uma conta específica: `Stop-Process -Name whatsapp-bridge -Force`
-  mata todas (não há filtro por port), então use `Start-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"`
-  pra religar só a que você quer.
+  a tarefa religa no próximo logon, ou `Start-ScheduledTask -TaskName WhatsAppMCPBridge`).
+  Em multi-account, **nunca use `Stop-Process -Name whatsapp-bridge`** — mata todas as contas de uma vez.
+  Para reiniciar uma conta específica, resolva o PID pela porta (no `accounts.json`) e mate esse PID:
+  ```powershell
+  $pid = (Get-NetTCPConnection -LocalPort 3006 -State Listen).OwningProcess
+  Stop-Process -Id $pid -Force
+  Start-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"
+  ```
 - Checar porta: `Get-NetTCPConnection -LocalPort <porta> -State Listen`. Checar processo:
   `Get-Process whatsapp-bridge` (em multi-account todos aparecem como `whatsapp-bridge.exe`; 
   filtrar por porta ou olhar `Get-ScheduledTask -TaskName "WhatsAppMCPBridge*" -v` pra ver qual
