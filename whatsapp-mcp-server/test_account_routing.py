@@ -15,6 +15,7 @@ import signal
 import sys
 import tempfile
 import logging
+import requests
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -407,26 +408,24 @@ def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
             os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
 
 
-def test_pair_account_not_paired(bridge_processes, bridge_dirs, tmp_path):
-    """Test D4: pair_account("trabalho") with unpaired bridge returns QR bytes.
+def test_pair_account_not_paired(tmp_path):
+    """Test D4: pair_account() derives correct URL and fetches /qr.png (not /api/qr.png).
 
-    With the work account's bridge running but not yet paired, pair_account()
-    should fetch /qr.png from that bridge and return the PNG bytes starting
-    with the PNG signature \\x89PNG.
+    The bug was: base_url is http://localhost:PORT/api, and concatenating /qr.png
+    gave http://localhost:PORT/api/qr.png (wrong). The fix: extract origin
+    (http://localhost:PORT) and use http://localhost:PORT/qr.png (correct).
+
+    This test mocks requests.get to validate the URL derivation is correct,
+    then simulates bridge returning PNG bytes with the correct signature.
     """
-    # Create accounts.json pointing to the test bridges
+    # Create accounts.json
     accounts_file = tmp_path / "accounts.json"
     accounts_config = {
-        "default": "pessoal",
+        "default": "test_pair",
         "accounts": {
-            "trabalho": {
-                "port": 3097,
-                "dir": bridge_dirs['trabalho'],
-                "jid": ""
-            },
-            "pessoal": {
-                "port": 3098,
-                "dir": bridge_dirs['pessoal'],
+            "test_pair": {
+                "port": 9999,
+                "dir": "/tmp/test",
                 "jid": ""
             }
         }
@@ -436,26 +435,21 @@ def test_pair_account_not_paired(bridge_processes, bridge_dirs, tmp_path):
     old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
     os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
 
-    # Save original _api_request to restore later
-    original_api_request = whatsapp._api_request
+    # Valid PNG signature
+    valid_png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100  # Minimal PNG structure
 
-    # Create a minimal PNG (1x1 transparent PNG)
-    # This is a valid PNG with the correct signature
-    minimal_png = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+    # Track which URLs were called
+    urls_called = []
 
-    def mock_api_request(method, path, base_url, timeout=30, **kwargs):
-        """Mock _api_request: return PNG for /qr.png, and real status for /api/status."""
-        if path == "/qr.png":
-            # Return a mock response with PNG
-            class MockResponse:
-                status_code = 200
-                text = "PNG data"
-                content = minimal_png
-                def raise_for_status(self):
-                    pass
-            return MockResponse()
-        if path == "/api/status":
-            # Return status showing not logged in yet
+    # Save originals
+    original_requests_get = requests.get
+    original_requests_request = requests.request
+
+    def mock_requests_request(method, url, **kwargs):
+        urls_called.append(url)
+
+        # Mock /api/status responses
+        if url.endswith("/api/status"):
             class MockResponse:
                 status_code = 200
                 text = '{"logged_in": false}'
@@ -464,26 +458,49 @@ def test_pair_account_not_paired(bridge_processes, bridge_dirs, tmp_path):
                 def json(self):
                     return {"logged_in": False}
             return MockResponse()
-        # For other paths, call the original
-        return original_api_request(method, path, base_url, timeout, **kwargs)
+
+        # Any other URL fails
+        raise requests.ConnectionError(f"Unexpected URL: {url}")
+
+    def mock_requests_get(url, **kwargs):
+        urls_called.append(url)
+
+        # /qr.png should be at http://localhost:9999/qr.png (not /api/qr.png)
+        if url == "http://localhost:9999/qr.png":
+            class MockResponse:
+                status_code = 200
+                content = valid_png
+                def raise_for_status(self):
+                    pass
+            return MockResponse()
+
+        # Any other URL should fail (this catches the bug of /api/qr.png)
+        raise requests.ConnectionError(f"Unexpected URL: {url}")
 
     try:
-        # Patch _api_request temporarily
-        whatsapp._api_request = mock_api_request
+        # Replace both get and request
+        requests.get = mock_requests_get
+        requests.request = mock_requests_request
 
-        # Call pair_account for the unpaired work account
-        qr_bytes = whatsapp.pair_account("trabalho")
+        # Call pair_account
+        qr_bytes = whatsapp.pair_account("test_pair")
 
-        # Should return bytes
-        assert isinstance(qr_bytes, bytes), f"pair_account should return bytes, got {type(qr_bytes)}"
+        # Verify it called the correct URL
+        assert len(urls_called) > 0, "pair_account did not make HTTP requests"
+        assert "http://localhost:9999/qr.png" in urls_called, \
+            f"pair_account should call http://localhost:9999/qr.png, but called: {urls_called}"
+        assert not any("/api/qr.png" in url for url in urls_called), \
+            f"pair_account should NOT call /api/qr.png, but called: {urls_called}"
 
-        # Should start with PNG signature
-        assert qr_bytes.startswith(b'\x89PNG'), \
-            f"QR bytes should start with PNG signature \\x89PNG, got {qr_bytes[:4]!r}"
+        # Verify response
+        assert isinstance(qr_bytes, bytes), f"Should return bytes, got {type(qr_bytes)}"
+        assert qr_bytes.startswith(b'\x89PNG'), f"Should have PNG signature, got {qr_bytes[:4]!r}"
+        assert qr_bytes == valid_png, "Should return the exact PNG bytes from bridge"
 
     finally:
-        # Restore original _api_request
-        whatsapp._api_request = original_api_request
+        # Restore originals
+        requests.get = original_requests_get
+        requests.request = original_requests_request
 
         if old_env is None:
             os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
