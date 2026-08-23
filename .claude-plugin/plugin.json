@@ -1,12 +1,19 @@
 {
-  "name": "whatsapp-mcp",
-  "version": "1.0.0",
-  "description": "Search and send WhatsApp messages from Claude — Go bridge + MCP server with media, groups and opt-in audio transcription",
-  "author": { "name": "Rodrigo Gonçalves" },
+  "name": "whatsapp",
+  "version": "1.1.0",
+  "description": "Search and send WhatsApp messages from Claude - Go bridge + MCP server with media, groups and opt-in audio transcription. Fork with native Windows support (no WSL), session health check and reconnection watchdog.",
+  "author": {
+    "name": "Luis Montes"
+  },
   "mcpServers": {
     "whatsapp": {
       "command": "uv",
-      "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}/whatsapp-mcp-server", "run", "main.py"]
+      "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}/whatsapp-mcp-server",
+        "run",
+        "main.py"
+      ]
     }
   }
 }

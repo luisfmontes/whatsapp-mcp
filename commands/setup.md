@@ -40,7 +40,7 @@ WHATSAPP_MCP_DIR="<resolved INSTALL_DIR>" WHATSAPP_BRIDGE_PORT="<resolved BRIDGE
 Otherwise download first and verify the script supports `--service` before executing (an older published copy would silently ignore the flag):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.sh -o /tmp/whatsapp-mcp-install.sh
+curl -fsSL https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.sh -o /tmp/whatsapp-mcp-install.sh
 grep -q -- '--service' /tmp/whatsapp-mcp-install.sh
 ```
 
@@ -59,7 +59,7 @@ Otherwise download first and verify the script supports `-Service` before execut
 
 ```powershell
 $tempPath = "$env:TEMP/whatsapp-mcp-install.ps1"
-(New-Object System.Net.WebClient).DownloadFile("https://raw.githubusercontent.com/rodrigopg/whatsapp-mcp/main/install.ps1", $tempPath)
+(New-Object System.Net.WebClient).DownloadFile("https://raw.githubusercontent.com/luisfmontes/whatsapp-mcp/main/install.ps1", $tempPath)
 Select-String -Path $tempPath -Pattern '\-Service' -Quiet
 ```
 
