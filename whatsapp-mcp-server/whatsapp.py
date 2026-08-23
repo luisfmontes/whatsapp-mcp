@@ -129,9 +129,12 @@ def _api_request(method: str, path: str, base_url: str, timeout: int = REQUEST_T
 
 
 def _api_post(path: str, payload: dict, base_url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[dict]:
-    """POST to the bridge REST API. Returns the parsed JSON dict on HTTP 200,
-    or None on any failure (non-200 status, timeout, connection error, bad JSON).
-    Never raises — mirrors the old `except sqlite3.Error` behavior."""
+    """POST to the bridge REST API. Returns the parsed JSON dict on HTTP 200.
+    Raises ValueError on a 5xx response — that's a bridge-side bug, not a
+    degraded read, and it must not be silently swallowed into an empty
+    result. Returns None on 4xx, timeout, connection error, or bad JSON —
+    that degraded path is left to the ~20 read callers and to
+    _resolve_and_check_account_explicit's own online check (D12)."""
     try:
         url = f"{base_url}{path}"
         response = requests.post(url, json=payload, headers=_auth_headers(), timeout=timeout)
@@ -142,6 +145,10 @@ def _api_post(path: str, payload: dict, base_url: str, timeout: int = REQUEST_TI
                 path, response.text,
             )
             return None
+        if response.status_code >= 500:
+            raise ValueError(
+                f"Bridge API error on {path}: HTTP {response.status_code} - {response.text[:500]}"
+            )
         if response.status_code != 200:
             logger.warning("API error on %s: HTTP %s - %s", path, response.status_code, response.text)
             return None
@@ -152,6 +159,8 @@ def _api_post(path: str, payload: dict, base_url: str, timeout: int = REQUEST_TI
     except json.JSONDecodeError:
         logger.warning("Error parsing response as JSON from %s", path)
         return None
+    except ValueError:
+        raise
     except Exception as e:
         logger.warning("Unexpected error on %s: %s", path, e)
         return None
@@ -249,7 +258,13 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     if cache_key in _sender_name_cache:
         return _sender_name_cache[cache_key]
 
-    result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
+    try:
+        result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
+    except ValueError:
+        # Bridge-side error (5xx): the sender name is not the payload, and
+        # losing it is far better than losing the whole message (D6). Don't
+        # cache, so a later retry can still succeed.
+        return sender_jid
     if result is None:
         # Transport failure: don't cache, so a later retry can still succeed.
         return sender_jid
@@ -276,7 +291,11 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
         sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
+        # Surface the failure instead of silently dropping the rest of the
+        # line (the mistake this entry exists to fix elsewhere) - same
+        # pattern get_message_context already uses for a failed fetch.
         logger.warning("Error formatting message %s: %s", message.id, e)
+        output += f"[Error formatting message: {e}]\n"
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True, account: Optional[str] = None) -> str:

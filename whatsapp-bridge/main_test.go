@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1852,6 +1853,139 @@ func TestQRPageIdentifiesAccount(t *testing.T) {
 		}
 		if !strings.Contains(html, "Account: pessoal (port 3091)") {
 			t.Error("HTML should have correct account info")
+		}
+	})
+}
+
+// setupChatStore returns a MessageStore backed by the production schema in a
+// fresh temp dir, following the same os.Chdir(t.TempDir()) pattern as
+// setupPollStore above — so listChats/getChat run against the real CREATE
+// TABLE block instead of a hand-maintained copy, and the test needs no
+// machine-local database.
+func setupChatStore(t *testing.T) *MessageStore {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// Cleanups run LIFO, so registering the chdir-back after t.TempDir makes it
+	// run before TempDir removal — Windows cannot delete a process's CWD.
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// seedChatWithLastMessage inserts one chat and one message that is that
+// chat's last message: last_message_time matches messages.timestamp, which
+// is what the LEFT JOIN in listChats/getChat keys on.
+func seedChatWithLastMessage(t *testing.T, db *sql.DB, jid, name, content, sender string, isFromMe bool, ts time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`, jid, name, ts); err != nil {
+		t.Fatalf("insert chat: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?)`,
+		"msg1", jid, sender, content, ts, isFromMe); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+}
+
+// TestListChatsIncludeLastMessage is the regression test for the 500 that
+// include_last_message:false triggered in /api/chats: the SELECT projected
+// messages.content/sender/is_from_me unconditionally while the JOIN that
+// makes those columns exist was conditional ("no such column:
+// messages.content"). D1's fix keeps 6 columns in the projection always,
+// swapping in NULL literals for the message columns when the JOIN is
+// skipped, so scanAPIChatRow (shared by 4 callers) never changes.
+func TestListChatsIncludeLastMessage(t *testing.T) {
+	store := setupChatStore(t)
+	ts := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	seedChatWithLastMessage(t, store.db, "123@s.whatsapp.net", "Alice", "oi", "123@s.whatsapp.net", false, ts)
+
+	t.Run("false: no SQL error, three fields nil", func(t *testing.T) {
+		resp, err := listChats(store.db, ChatsRequest{Limit: 10, IncludeLastMessage: boolPtr(false)})
+		if err != nil {
+			t.Fatalf("listChats: %v", err)
+		}
+		if len(resp.Chats) != 1 {
+			t.Fatalf("got %d chats, want 1", len(resp.Chats))
+		}
+		chat := resp.Chats[0]
+		if chat.LastMessage != nil || chat.LastSender != nil || chat.LastIsFromMe != nil {
+			t.Errorf("expected nil last_message/last_sender/last_is_from_me, got %v / %v / %v",
+				chat.LastMessage, chat.LastSender, chat.LastIsFromMe)
+		}
+	})
+
+	t.Run("true: three fields filled", func(t *testing.T) {
+		resp, err := listChats(store.db, ChatsRequest{Limit: 10, IncludeLastMessage: boolPtr(true)})
+		if err != nil {
+			t.Fatalf("listChats: %v", err)
+		}
+		if len(resp.Chats) != 1 {
+			t.Fatalf("got %d chats, want 1", len(resp.Chats))
+		}
+		chat := resp.Chats[0]
+		if chat.LastMessage == nil || *chat.LastMessage != "oi" {
+			t.Errorf("last_message = %v, want %q", chat.LastMessage, "oi")
+		}
+		if chat.LastSender == nil || *chat.LastSender != "123@s.whatsapp.net" {
+			t.Errorf("last_sender = %v, want sender jid", chat.LastSender)
+		}
+		if chat.LastIsFromMe == nil || *chat.LastIsFromMe != false {
+			t.Errorf("last_is_from_me = %v, want false", chat.LastIsFromMe)
+		}
+	})
+}
+
+// TestGetChatIncludeLastMessage mirrors TestListChatsIncludeLastMessage for
+// /api/chat: same defect ("no such column: m.content"), same fix.
+func TestGetChatIncludeLastMessage(t *testing.T) {
+	store := setupChatStore(t)
+	ts := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
+	seedChatWithLastMessage(t, store.db, "456@s.whatsapp.net", "Bob", "tudo bem", "456@s.whatsapp.net", true, ts)
+
+	t.Run("false: no SQL error, three fields nil", func(t *testing.T) {
+		resp, err := getChat(store.db, ChatRequest{ChatJID: "456@s.whatsapp.net", IncludeLastMessage: boolPtr(false)})
+		if err != nil {
+			t.Fatalf("getChat: %v", err)
+		}
+		if resp.Chat == nil {
+			t.Fatal("expected a chat, got nil")
+		}
+		if resp.Chat.LastMessage != nil || resp.Chat.LastSender != nil || resp.Chat.LastIsFromMe != nil {
+			t.Errorf("expected nil last_message/last_sender/last_is_from_me, got %v / %v / %v",
+				resp.Chat.LastMessage, resp.Chat.LastSender, resp.Chat.LastIsFromMe)
+		}
+	})
+
+	t.Run("true: three fields filled", func(t *testing.T) {
+		resp, err := getChat(store.db, ChatRequest{ChatJID: "456@s.whatsapp.net", IncludeLastMessage: boolPtr(true)})
+		if err != nil {
+			t.Fatalf("getChat: %v", err)
+		}
+		if resp.Chat == nil {
+			t.Fatal("expected a chat, got nil")
+		}
+		if resp.Chat.LastMessage == nil || *resp.Chat.LastMessage != "tudo bem" {
+			t.Errorf("last_message = %v, want %q", resp.Chat.LastMessage, "tudo bem")
+		}
+		if resp.Chat.LastSender == nil || *resp.Chat.LastSender != "456@s.whatsapp.net" {
+			t.Errorf("last_sender = %v, want sender jid", resp.Chat.LastSender)
+		}
+		if resp.Chat.LastIsFromMe == nil || *resp.Chat.LastIsFromMe != true {
+			t.Errorf("last_is_from_me = %v, want true", resp.Chat.LastIsFromMe)
 		}
 	})
 }
