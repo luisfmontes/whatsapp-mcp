@@ -9,3 +9,11 @@ dependencies = [
     "mcp[cli]>=1.6.0",
     "requests>=2.32.3",
 ]
+
+# Os testes de multiconta usam parametrize e fixture de pytest. O pytest roda
+# tambem os testes em estilo unittest que ja existiam, entao declarar aqui
+# alinha a CI com o comando que os criterios do plano sempre usaram.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

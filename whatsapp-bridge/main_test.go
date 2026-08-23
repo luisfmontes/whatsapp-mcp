@@ -1677,6 +1677,104 @@ func TestHandleStatus(t *testing.T) {
 // setupPollStore gives a test a real MessageStore on a throwaway database.
 //
 // It goes through NewMessageStore instead of sql.Open with a literal driver
+// TestAccountScopedTempPaths validates the behavior of accountScopedTempFilename:
+// without WHATSAPP_ACCOUNT, filenames are unchanged; with it set, the account
+// name is inserted before the extension; invalid characters in the account name
+// are rejected.
+func TestAccountScopedTempPaths(t *testing.T) {
+	// Save original env to restore after test
+	orig := os.Getenv("WHATSAPP_ACCOUNT")
+	t.Cleanup(func() { os.Setenv("WHATSAPP_ACCOUNT", orig) })
+
+	t.Run("without WHATSAPP_ACCOUNT returns basename unchanged", func(t *testing.T) {
+		os.Unsetenv("WHATSAPP_ACCOUNT")
+		got, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "whatsapp-qr.png" {
+			t.Errorf("got %q, want %q", got, "whatsapp-qr.png")
+		}
+	})
+
+	t.Run("with WHATSAPP_ACCOUNT=trabalho inserts suffix before extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "whatsapp-qr-trabalho.png" {
+			t.Errorf("got %q, want %q", got, "whatsapp-qr-trabalho.png")
+		}
+	})
+
+	t.Run("with WHATSAPP_ACCOUNT=pessoal inserts suffix before extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "pessoal")
+		got, err := accountScopedTempFilename("wa_transcribe.lock")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "wa_transcribe-pessoal.lock" {
+			t.Errorf("got %q, want %q", got, "wa_transcribe-pessoal.lock")
+		}
+	})
+
+	t.Run("forward slash in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad/name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for forward slash")
+		}
+	})
+
+	t.Run("backslash in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad\\name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for backslash")
+		}
+	})
+
+	t.Run("colon in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad:name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for colon")
+		}
+	})
+
+	t.Run("double dot (..) in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad..name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for double dot")
+		}
+	})
+
+	t.Run("file without extension uses empty string as extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("lockfile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "lockfile-trabalho" {
+			t.Errorf("got %q, want %q", got, "lockfile-trabalho")
+		}
+	})
+
+	t.Run("multiple dots are handled correctly", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("archive.tar.gz")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// filepath.Ext only returns the last extension
+		if got != "archive.tar-trabalho.gz" {
+			t.Errorf("got %q, want %q", got, "archive.tar-trabalho.gz")
+		}
+	})
+}
+
 // name: the project registers a different driver per platform (mattn/go-sqlite3
 // under CGO, modernc on Windows), so a hardcoded "sqlite" compiles everywhere
 // and fails at run time on macOS and Linux — which is exactly how CI caught the
@@ -1704,4 +1802,56 @@ func setupPollStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+// TestQRPageIdentifiesAccount verifies renderQRPage() function behavior (extracted for testability).
+// When accountAlias is set, includes account identification (D8, D3).
+// When accountAlias is empty, page is unchanged from before (D1) — no duplication.
+func TestQRPageIdentifiesAccount(t *testing.T) {
+	port := 3090
+
+	t.Run("renderQRPage with account=trabalho includes account and port", func(t *testing.T) {
+		// Call the REAL function (not reimplemented)
+		html := renderQRPage("trabalho", port)
+
+		// Verify account identification is present
+		if !strings.Contains(html, "Account: trabalho (port 3090)") {
+			t.Errorf("HTML should contain 'Account: trabalho (port 3090)', got: %q", html)
+		}
+		if !strings.Contains(html, "<p>Account: trabalho (port 3090)</p>") {
+			t.Errorf("HTML should have account in <p> tag, got: %q", html)
+		}
+	})
+
+	t.Run("renderQRPage with empty account has no duplication (D1)", func(t *testing.T) {
+		// Call the REAL function with empty account
+		html := renderQRPage("", port)
+
+		// Verify heading appears exactly once (in <h2>)
+		count := strings.Count(html, "Scan with WhatsApp to connect")
+		if count != 1 {
+			t.Errorf("heading 'Scan with WhatsApp to connect' should appear exactly 1 time, got %d times", count)
+		}
+
+		// Verify no Account: line exists
+		if strings.Contains(html, "Account:") {
+			t.Errorf("HTML should not contain 'Account:' when no account specified, got: %q", html)
+		}
+	})
+
+	t.Run("renderQRPage with account preserves format", func(t *testing.T) {
+		// Call the REAL function
+		html := renderQRPage("pessoal", 3091)
+
+		// Verify format is correct
+		if !strings.Contains(html, "<!DOCTYPE html>") {
+			t.Error("HTML should have DOCTYPE")
+		}
+		if !strings.Contains(html, "<h2>Scan with WhatsApp to connect</h2>") {
+			t.Error("HTML should have correct h2 heading")
+		}
+		if !strings.Contains(html, "Account: pessoal (port 3091)") {
+			t.Error("HTML should have correct account info")
+		}
+	})
 }

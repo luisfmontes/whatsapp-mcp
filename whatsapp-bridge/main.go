@@ -4000,9 +4000,35 @@ func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
+// renderQRPage returns the HTML for the QR code pairing page.
+// When accountAlias is set, includes account identification (D8, D3).
+// When accountAlias is empty, page is unchanged from before (D1).
+// This function is extracted for testability (similar to handleStatus).
+func renderQRPage(accountAlias string, port int) string {
+	// Build account identification line if available (D1: unchanged without WHATSAPP_ACCOUNT)
+	accountLine := ""
+	if accountAlias != "" {
+		accountLine = fmt.Sprintf("<p>Account: %s (port %d)</p>\n", accountAlias, port)
+	}
+
+	return fmt.Sprintf(`<!DOCTYPE html><html><head>
+<meta http-equiv="refresh" content="20">
+<style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
+img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
+</head><body>
+<h2>Scan with WhatsApp to connect</h2>
+%s<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+<img src="/qr.png" width="300" height="300" alt="QR Code">
+<p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
+</body></html>`, accountLine)
+}
+
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// /qr — serves the current QR code as PNG (during pairing) or a status page (when connected).
 	// Open http://localhost:8080/qr in a browser to scan the QR code on first setup.
+	// If WHATSAPP_ACCOUNT is set, includes the account name and port in the page (D8, D3).
+	// Without WHATSAPP_ACCOUNT, the page is unchanged from before (D1 — the default account
+	// doesn't perceive any change).
 	http.HandleFunc("/qr", func(w http.ResponseWriter, r *http.Request) {
 		qrState.RLock()
 		png := qrState.png
@@ -4026,16 +4052,13 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		// Serve an auto-refreshing HTML page that embeds the QR as a data URI.
 		// Refreshes every 20 s so a new QR is shown if the first one expires.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html><html><head>
-<meta http-equiv="refresh" content="20">
-<style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
-img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
-</head><body>
-<h2>Scan with WhatsApp to connect</h2>
-<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
-<img src="/qr.png" width="300" height="300" alt="QR Code">
-<p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
-</body></html>`)
+
+		// Get account alias from environment (D8, D3)
+		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+
+		// Render the QR page using the extracted function
+		html := renderQRPage(accountAlias, port)
+		fmt.Fprint(w, html)
 	})
 
 	// /qr.png — raw PNG for embedding or direct download
@@ -4976,7 +4999,12 @@ func main() {
 				}
 
 				// Also save to disk for convenience.
-				qrFile := filepath.Join(os.TempDir(), "whatsapp-qr.png")
+				qrFilename, err := accountScopedTempFilename("whatsapp-qr.png")
+				if err != nil {
+					fmt.Printf("\nCould not derive QR filename: %v\n", err)
+					continue
+				}
+				qrFile := filepath.Join(os.TempDir(), qrFilename)
 				if err := goqr.WriteFile(evt.Code, goqr.Medium, 512, qrFile); err != nil {
 					// Previously this failure was swallowed by `err == nil`, so on
 					// any OS where the path was unwritable the QR just never
@@ -5322,6 +5350,35 @@ func requestHistorySync(client *whatsmeow.Client, lastKnown *types.MessageInfo, 
 // since events.Connected fires on every reconnect.
 var sweepOnce sync.Once
 
+// accountScopedTempFilename derives a temporary filename from a base name and
+// the WHATSAPP_ACCOUNT environment variable. If the variable is unset or empty,
+// it returns the base name unchanged; otherwise, it inserts the sanitized
+// account name before the file extension.
+//
+// Invalid characters (/, \, :, ..) in the account name are rejected with an error.
+func accountScopedTempFilename(basename string) (string, error) {
+	account := os.Getenv("WHATSAPP_ACCOUNT")
+	if account == "" {
+		return basename, nil
+	}
+
+	// Validate account name: reject characters that cannot appear in filenames.
+	// The checks below must align with what the OS forbids.
+	invalidChars := []string{"/", "\\", ":", ".."}
+	for _, c := range invalidChars {
+		if strings.Contains(account, c) {
+			return "", fmt.Errorf("invalid account name %q: contains %q", account, c)
+		}
+	}
+
+	// Split basename into name and extension
+	ext := filepath.Ext(basename)
+	name := basename[:len(basename)-len(ext)]
+
+	// Insert account name before extension
+	return name + "-" + account + ext, nil
+}
+
 // startTranscriptionSweep periodically shells out to the Python transcriber to
 // turn newly-arrived audio messages into searchable text. Whisper runs in a
 // separate process so it never blocks the bridge's message handling. A lockfile
@@ -5335,7 +5392,12 @@ func startTranscriptionSweep(interval time.Duration) {
 	}
 	python := venvPython(pyDir)
 	script := filepath.Join(pyDir, "transcribe.py")
-	lockPath := filepath.Join(os.TempDir(), "wa_transcribe.lock")
+	lockFilename, err := accountScopedTempFilename("wa_transcribe.lock")
+	if err != nil {
+		fmt.Printf("transcription sweep disabled: %v\n", err)
+		return
+	}
+	lockPath := filepath.Join(os.TempDir(), lockFilename)
 
 	if _, err := os.Stat(python); err != nil {
 		fmt.Printf("transcription sweep disabled: python not found at %s\n", python)
