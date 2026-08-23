@@ -67,3 +67,12 @@ arquivos: `README.md`, `.claude/context/deploy.md`
 depende de: 3, 5
 paralela: nao
 pronto quando: o README descreve o `accounts.json` com um exemplo que **casa byte a byte** com o que o `-AddAccount` gera, diz que multiconta é só Windows nesta versão e mostra o fluxo criar → parear; `deploy.md` documenta uma tarefa agendada por conta e o `transcription.env` compartilhado — provado por `python -c "import json,re; ex=re.search(r'```json\n(.*?)```', open('README.md',encoding='utf-8').read(), re.S).group(1); json.loads(ex)"` sem exceção, e pelo exemplo do README ser aceito por `accounts.resolve_account`.
+
+### 9. Matriz de erro: mapa x bridge x conta [tipo: teste]
+atende: D1, D12
+arquivos: `whatsapp-mcp-server/test_error_matrix.py`, `whatsapp-mcp-server/accounts.py`
+depende de: 5, 7
+paralela: nao
+pronto quando: com o cruzamento de mapa (ausente | 1 conta | 2 contas) x bridge (no ar | fora do ar) x conta (`None` | alias explicito), nenhuma celula levanta excecao nao prevista: sem mapa e com o bridge fora do ar, `get_bridge_status()` devolve a tupla classica `(False, <motivo>, None)` e `list_chats()` devolve `[]`; com alias explicito fora do ar, o erro cita o apelido e a tarefa — provado por `python -m pytest whatsapp-mcp-server/test_error_matrix.py -q` devolvendo `passed` sem `failed` nem `skipped`, e por repor o defeito (`account_task_name(None)` voltando a levantar) e ver a celula `[missing-False-None-tuple]` ficar vermelha.
+
+**Emenda de 2026-08-23.** Esta tarefa nao existia no plano original: ela nasceu da revisao. Duas das quatro reprovacoes foram regressoes introduzidas por consertos, as duas no mesmo canto — "sem `accounts.json`" cruzado com "bridge fora do ar" —, e as duas sobreviveram porque cada condicao tinha teste sozinha e a intersecao nao tinha nenhum. Consertar a linha impedia a ocorrencia; a matriz impede a proxima. Registrada como emenda, e nao como arquivo que apareceu sem dono, porque foi assim que o `revisar` a pegou: creep e arquivo sem tarefa, ainda que o conteudo esteja certo.

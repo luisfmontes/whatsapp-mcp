@@ -13,12 +13,13 @@
   "plano": {
     "status": "ok",
     "arquivo": "docs/rainforest/planos/2026-08-22-multiconta-bridge.md",
-    "tarefas": 8,
+    "tarefas": 9,
     "paralelas": [
       1,
       4
     ],
-    "em": "2026-08-22"
+    "em": "2026-08-23",
+    "emenda": "tarefa 9 acrescentada pela revisao"
   },
   "executar": {
     "status": "ok",
