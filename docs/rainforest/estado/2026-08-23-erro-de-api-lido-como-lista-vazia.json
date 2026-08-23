@@ -24,32 +24,44 @@
   "executar": {
     "status": "ok",
     "catraca_mutacao": "2026-08-23",
-    "tarefas_ok": 5,
-    "tarefas": 5,
+    "tarefas_ok": 7,
+    "tarefas": 7,
     "em": "2026-08-23",
     "mutacao": [
       {
         "tarefa": 1,
-        "resultado": "vermelho"
+        "resultado": "vermelho",
+        "fixture": "TestListChatsIncludeLastMessage/false:_no_SQL_error,_three_fields_nil (sitio listChats) e TestGetChatIncludeLastMessage/false:_no_SQL_error,_three_fields_nil (sitio getChat) -- os dois rodados separados"
       },
       {
         "tarefa": 2,
-        "resultado": "vermelho"
+        "resultado": "vermelho",
+        "fixture": "test_5xx_raises_value_error_with_path_status_and_body"
       },
       {
         "tarefa": 3,
         "resultado": "n/a",
-        "motivo": "tarefa move trabalho ja validado para revisao: nao ha comportamento de codigo a inverter, e a falsificacao e externa (CI do PR)"
+        "motivo": "move trabalho ja validado para revisao; a falsificacao e externa, a CI do PR"
       },
       {
         "tarefa": 4,
         "resultado": "n/a",
-        "motivo": "e o mesmo diff da tarefa 1, ja validado por mutacao nos dois sitios; aqui nao ha codigo novo, so destino"
+        "motivo": "mesmo diff da tarefa 1, ja validado por mutacao nos dois sitios; aqui so muda o destino"
       },
       {
         "tarefa": 5,
         "resultado": "n/a",
-        "motivo": "documento nao tem comportamento a inverter; a falsificacao dele e o conferir-fluxo cobertura sair 0"
+        "motivo": "documento nao tem comportamento a inverter; a falsificacao e o conferir-fluxo cobertura sair 0"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "test_get_sender_name_falls_back_on_value_error e test_format_message_survives_sender_name_500"
+      },
+      {
+        "tarefa": 7,
+        "resultado": "n/a",
+        "motivo": "regra escrita nao tem comportamento a inverter; a falsificacao e textual, o grep -c da linha antiga sair 0"
       }
     ]
   },
