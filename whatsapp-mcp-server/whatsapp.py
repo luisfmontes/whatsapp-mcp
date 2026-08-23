@@ -3,6 +3,7 @@ import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
+from urllib.parse import urlparse, urlunparse
 import os
 import os.path
 import requests
@@ -1457,8 +1458,15 @@ def pair_account(account: str) -> bytes:
         pass
 
     # Fetch QR PNG from the bridge
+    # /qr.png is NOT under the /api prefix, so derive the origin from base_url
+    # base_url is "http://localhost:PORT/api", extract "http://localhost:PORT"
     try:
-        response = _api_request("GET", "/qr.png", base_url, timeout=REQUEST_TIMEOUT)
+        parsed = urlparse(base_url)
+        # Reconstruct URL without the path (removes /api)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        qr_url = f"{origin}/qr.png"
+
+        response = requests.get(qr_url, headers=_auth_headers(), timeout=REQUEST_TIMEOUT)
 
         if response.status_code == 404:
             # QR not available - either bridge just started or account is already paired
