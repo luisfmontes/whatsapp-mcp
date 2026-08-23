@@ -21,9 +21,10 @@ WHATSAPP_API_AUTH_TOKEN = os.environ.get("WHATSAPP_API_AUTH_TOKEN", "")
 
 REQUEST_TIMEOUT = 30
 
-# Cache of sender_jid -> resolved name, avoids one HTTP round trip per message
+# Cache of (base_url, sender_jid) -> resolved name, avoids one HTTP round trip per message
 # when formatting a batch of messages (format_message is called per-message).
-_sender_name_cache: Dict[str, str] = {}
+# Key is segmented by account (base_url) to prevent data leakage between accounts.
+_sender_name_cache: Dict[Tuple[str, str], str] = {}
 
 
 def _auth_headers() -> Dict[str, str]:
@@ -243,8 +244,10 @@ def _chat_from_dict(d: dict) -> Chat:
 
 def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     base_url = accounts.resolve_account(account)
-    if sender_jid in _sender_name_cache:
-        return _sender_name_cache[sender_jid]
+    # Cache key includes base_url (account) to prevent data leakage between accounts
+    cache_key = (base_url, sender_jid)
+    if cache_key in _sender_name_cache:
+        return _sender_name_cache[cache_key]
 
     result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
     if result is None:
@@ -252,7 +255,7 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
         return sender_jid
 
     name = result.get("name", sender_jid)
-    _sender_name_cache[sender_jid] = name
+    _sender_name_cache[cache_key] = name
     return name
 
 def format_message(message: Message, show_chat_info: bool = True, account: Optional[str] = None) -> str:
@@ -372,8 +375,18 @@ def get_message_context(
     after: int = 5,
     account: Optional[str] = None
 ) -> MessageContext:
-    """Get context around a specific message."""
-    base_url = accounts.resolve_account(account)
+    """Get context around a specific message.
+
+    D12: If account is explicitly provided and its bridge is offline, raises ValueError
+    with account alias and scheduled task name instead of silently returning empty result.
+
+    D1: When account is None, falls back to default account without checking online status.
+    """
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/message_context", {
         "message_id": message_id,
         "before": before,
@@ -1076,8 +1089,18 @@ def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Tuple[bo
 
 
 def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
-    """Get group invite link (or reset if reset=True)."""
-    # D2: read operation, but needs _require_account check for consistency with other group ops
+    """Get group invite link (or reset if reset=True).
+
+    D2: When reset=True, this is a write operation and requires account to be specified
+    (fails if None and multiple accounts configured). When reset=False, this is a read
+    operation and account is optional.
+
+    D12: If account is explicitly provided, verify its bridge is online.
+    """
+    # D2: reset=True is a write operation and requires account
+    if reset:
+        _require_account(account)
+
     # D12: If account is explicitly provided, verify its bridge is online
     if account is not None:
         base_url = _resolve_and_check_account_explicit(account)
@@ -1470,7 +1493,16 @@ def get_bridge_status(account: Optional[str] = None) -> Tuple[bool, str, Optiona
 
         return healthy, reason, result
     except requests.RequestException as e:
-        return False, f"Request error: {str(e)}", None
+        # D12: Bridge is offline; generate error message with account alias and task name
+        # Resolve alias for error message (same logic as _check_account_online)
+        accounts_map = accounts._load_accounts_map()
+        resolved_account = account
+        if accounts_map:
+            if account is None:
+                resolved_account = accounts_map.get("default")
+
+        task_name = accounts.account_task_name(resolved_account)
+        return False, f"Bridge offline. Start task: {task_name}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
 

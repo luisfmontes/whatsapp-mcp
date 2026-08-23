@@ -1228,5 +1228,193 @@ def test_list_chats_without_accounts_file_bridge_offline():
         os.environ.pop('WHATSAPP_API_BASE_URL', None)
 
 
+def test_achado_1_sender_name_cache_segmentation(monkeypatch, tmp_path):
+    """Achado 1 — Cache de nomes não vaza entre contas.
+
+    Prova que o cache de sender names é segmentado por conta (base_url):
+    1. Contas DIFERENTES não compartilham entrada de cache
+    2. Mesmo sender_jid em contas diferentes resolve para nomes diferentes
+    3. account=None compartilha cache com o alias da conta default
+
+    Before fix: _sender_name_cache key was apenas sender_jid
+    After fix: _sender_name_cache key é (base_url, sender_jid)
+    """
+    # Create accounts.json with two accounts
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {"port": 3097, "dir": "/tmp/trabalho", "jid": ""},
+            "pessoal": {"port": 3098, "dir": "/tmp/pessoal", "jid": ""}
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv('WHATSAPP_ACCOUNTS_FILE', str(accounts_file))
+
+    # Mock _api_post to return different names for the same sender_jid on different accounts
+    call_count = [0]
+    def mock_api_post(path, payload, base_url, timeout=None):
+        call_count[0] += 1
+        if path != "/sender_name":
+            return None
+        sender_jid = payload.get("sender_jid")
+        # Return different names based on which account (base_url) called
+        if "3097" in base_url:  # trabalho
+            return {"name": f"Fulano-TRABALHO"}
+        elif "3098" in base_url:  # pessoal
+            return {"name": f"Fulano-PESSOAL"}
+        return {"name": sender_jid}
+
+    monkeypatch.setattr(whatsapp, "_api_post", mock_api_post)
+
+    # Test 1: Same sender_jid should resolve to different names on different accounts
+    name_trabalho = whatsapp.get_sender_name("551111111@s.whatsapp.net", account="trabalho")
+    assert name_trabalho == "Fulano-TRABALHO", f"Expected Fulano-TRABALHO, got {name_trabalho}"
+
+    name_pessoal = whatsapp.get_sender_name("551111111@s.whatsapp.net", account="pessoal")
+    assert name_pessoal == "Fulano-PESSOAL", f"Expected Fulano-PESSOAL, got {name_pessoal}"
+
+    # Test 2: Second call to trabalho should NOT return the pessoal name from cache
+    # If cache was segmented correctly, this should NOT call _api_post again (uses cache)
+    call_count[0] = 0
+    name_trabalho_2 = whatsapp.get_sender_name("551111111@s.whatsapp.net", account="trabalho")
+    assert name_trabalho_2 == "Fulano-TRABALHO", f"Expected cached Fulano-TRABALHO, got {name_trabalho_2}"
+    assert call_count[0] == 0, f"Expected cache hit (no API call), but got {call_count[0]} calls"
+
+    # Test 3: account=None should share cache with default account (pessoal)
+    call_count[0] = 0
+    name_default = whatsapp.get_sender_name("551111111@s.whatsapp.net", account=None)
+    assert name_default == "Fulano-PESSOAL", f"Expected cached Fulano-PESSOAL from default, got {name_default}"
+    assert call_count[0] == 0, f"Expected cache hit for default account, but got {call_count[0]} calls"
+
+    # Mutation proof: showing that cache was properly segmented
+    # The cache keys should be different for different accounts
+    cache_keys = list(whatsapp._sender_name_cache.keys())
+    assert len(cache_keys) == 2, f"Should have 2 cache entries, got {len(cache_keys)}: {cache_keys}"
+    # Each key should be a tuple with base_url as first element
+    assert all(isinstance(k, tuple) and len(k) == 2 for k in cache_keys), \
+        f"Cache keys should be tuples of (base_url, sender_jid), got {cache_keys}"
+
+
+def test_achado_2_get_message_context_account_check(monkeypatch, tmp_path):
+    """Achado 2 — get_message_context usa _resolve_and_check_account_explicit.
+
+    Prova que get_message_context(account='offline_account') falha com mensagem clara
+    (nomeando a conta e tarefa) em vez de um erro genérico, implementando D12.
+
+    Before fix: base_url = accounts.resolve_account(account) without checking
+    After fix: usa _resolve_and_check_account_explicit quando account != None
+    """
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "offline": {"port": 9999, "dir": "/tmp/offline", "jid": ""}
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv('WHATSAPP_ACCOUNTS_FILE', str(accounts_file))
+
+    # Mock requests.request to simulate offline bridge
+    def mock_request(*args, **kwargs):
+        raise requests.RequestException("Connection refused")
+
+    monkeypatch.setattr("requests.request", mock_request)
+
+    # Calling get_message_context with explicit account should raise ValueError with task name
+    with pytest.raises(ValueError) as exc_info:
+        whatsapp.get_message_context("msg123", account="offline")
+
+    error_msg = str(exc_info.value)
+    assert "offline" in error_msg.lower(), \
+        f"Error should mention account alias 'offline', got: {error_msg}"
+    assert "WhatsAppMCPBridge" in error_msg, \
+        f"Error should mention task name, got: {error_msg}"
+
+
+def test_achado_3_get_group_invite_link_reset_guard(monkeypatch, tmp_path):
+    """Achado 3 — get_group_invite_link(reset=True) requer account.
+
+    Prova que reset=True é uma mutação e requer account quando múltiplas contas
+    configuradas (D2), enquanto reset=False é leitura e account é opcional.
+
+    Before fix: Sem _require_account guardando reset=True
+    After fix: _require_account(account) aplicado apenas quando reset=True
+    """
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "pessoal": {"port": 3098, "dir": "/tmp/pessoal", "jid": ""},
+            "trabalho": {"port": 3097, "dir": "/tmp/trabalho", "jid": ""}
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv('WHATSAPP_ACCOUNTS_FILE', str(accounts_file))
+
+    # Test 1: reset=True without account should raise ValueError (D2 guard)
+    with pytest.raises(ValueError) as exc_info:
+        whatsapp.get_group_invite_link("123@g.us", reset=True, account=None)
+
+    error_msg = str(exc_info.value)
+    assert "account" in error_msg.lower(), \
+        f"Error should mention 'account' parameter, got: {error_msg}"
+
+    # Test 2: reset=False without account should NOT raise (it's a read op)
+    # Mock requests.request to handle the read case
+    def mock_request(*args, **kwargs):
+        class Response:
+            status_code = 200
+            text = "{}"
+            def json(self):
+                return {"success": True, "link": "https://chat.whatsapp.com/test"}
+        return Response()
+
+    monkeypatch.setattr("requests.request", mock_request)
+
+    # This should NOT raise, proving reset=False is treated as read operation
+    success, msg, link = whatsapp.get_group_invite_link("123@g.us", reset=False, account=None)
+    assert success is True, f"Expected success for read operation, got: {success}"
+
+
+def test_achado_4_get_bridge_status_error_message_alignment(monkeypatch, tmp_path):
+    """Achado 4 — get_bridge_status(account='X') offline message cita apelido e tarefa.
+
+    Prova que quando bridge está offline, a mensagem de erro é consistente entre
+    caminho agregado (múltiplas contas) e caminho explícito (conta única).
+
+    Before fix: Retornava f"Request error: {str(e)}" genérico
+    After fix: Retorna f"Bridge offline. Start task: {task_name}" (como agregado)
+    """
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "work": {"port": 9999, "dir": "/tmp/work", "jid": ""}
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv('WHATSAPP_ACCOUNTS_FILE', str(accounts_file))
+
+    # Mock requests.request to simulate offline bridge
+    def mock_request(*args, **kwargs):
+        raise requests.RequestException("Connection refused")
+
+    monkeypatch.setattr("requests.request", mock_request)
+
+    # Call get_bridge_status with explicit account when bridge is offline
+    healthy, reason, status = whatsapp.get_bridge_status(account="work")
+
+    assert healthy is False, f"Should return unhealthy status"
+    # Message should cite account and task name, NOT a generic "Request error"
+    assert "Bridge offline" in reason or "Start task" in reason, \
+        f"Error message should mention bridge offline and task, got: {reason}"
+    assert "WhatsAppMCPBridge" in reason, \
+        f"Error message should mention task name, got: {reason}"
+    # Should NOT contain generic "Request error:"
+    assert not reason.startswith("Request error:"), \
+        f"Error message should not be generic 'Request error:', got: {reason}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
