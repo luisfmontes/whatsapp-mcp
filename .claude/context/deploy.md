@@ -75,8 +75,8 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
   Em multi-account, **nunca use `Stop-Process -Name whatsapp-bridge`** — mata todas as contas de uma vez.
   Para reiniciar uma conta específica, resolva o PID pela porta (no `accounts.json`) e mate esse PID:
   ```powershell
-  $pid = (Get-NetTCPConnection -LocalPort 3006 -State Listen).OwningProcess
-  Stop-Process -Id $pid -Force
+  $bridgePid = (Get-NetTCPConnection -LocalPort 3006 -State Listen).OwningProcess
+  Stop-Process -Id $bridgePid -Force
   Start-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"
   ```
 - Checar porta: `Get-NetTCPConnection -LocalPort <porta> -State Listen`. Checar processo:
