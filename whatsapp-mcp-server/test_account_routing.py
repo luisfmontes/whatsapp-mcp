@@ -48,8 +48,15 @@ def bridge_dirs():
 
 
 def _find_or_build_bridge_binary():
-    """Locate the whatsapp-bridge binary, building it once (CGO_ENABLED=0)
-    if it isn't cached in the temp dir yet.
+    """Locate the whatsapp-bridge binary, building it once if it isn't cached
+    in the temp dir yet.
+
+    CGO_ENABLED=0 only on Windows. The SQLite layer is split by build tag:
+    sqlite_driver_windows.go uses modernc.org/sqlite (pure Go, no toolchain),
+    while sqlite_driver_cgo.go uses mattn/go-sqlite3 on every other platform
+    and REQUIRES cgo. Forcing CGO_ENABLED=0 everywhere builds fine on Linux
+    and macOS and then dies at runtime with "go-sqlite3 requires cgo to work.
+    This is a stub" -- which is exactly how this broke in CI.
 
     Shared by every test in this file that needs a real bridge process, so
     the build — potentially slow on a cold CI runner doing its first build
@@ -60,7 +67,8 @@ def _find_or_build_bridge_binary():
 
     if not binary.exists():
         build_env = os.environ.copy()
-        build_env['CGO_ENABLED'] = '0'
+        if sys.platform == 'win32':
+            build_env['CGO_ENABLED'] = '0'
 
         result = subprocess.run(
             ['go', 'build', '-o', str(binary)],
