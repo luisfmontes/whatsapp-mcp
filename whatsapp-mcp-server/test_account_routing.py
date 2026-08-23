@@ -445,7 +445,8 @@ def test_multiple_read_functions_check_offline_account(bridge_processes, bridge_
     whose bridge is unreachable should raise ValueError with account alias and
     task name, not silently return empty data.
 
-    Tests: search_contacts, get_chat, get_user_info, get_group_info, get_profile_picture
+    Tests all five read functions: search_contacts, get_chat, get_user_info,
+    get_group_info, and get_profile_picture.
     """
     # Stop the trabalho process to simulate it being offline
     if 'trabalho' in bridge_processes:
@@ -503,6 +504,20 @@ def test_multiple_read_functions_check_offline_account(bridge_processes, bridge_
         error_msg = str(exc_info.value)
         assert "trabalho" in error_msg, f"get_user_info error should mention account, got: {error_msg}"
         assert "WhatsAppMCPBridge-trabalho" in error_msg, f"get_user_info error should mention task, got: {error_msg}"
+
+        # Test 4: get_group_info with offline account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.get_group_info("123@g.us", account="trabalho")
+        error_msg = str(exc_info.value)
+        assert "trabalho" in error_msg, f"get_group_info error should mention account, got: {error_msg}"
+        assert "WhatsAppMCPBridge-trabalho" in error_msg, f"get_group_info error should mention task, got: {error_msg}"
+
+        # Test 5: get_profile_picture with offline account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.get_profile_picture("123@s.whatsapp.net", account="trabalho")
+        error_msg = str(exc_info.value)
+        assert "trabalho" in error_msg, f"get_profile_picture error should mention account, got: {error_msg}"
+        assert "WhatsAppMCPBridge-trabalho" in error_msg, f"get_profile_picture error should mention task, got: {error_msg}"
 
     finally:
         if old_env is None:
@@ -1055,8 +1070,11 @@ def test_read_without_account_falls_back_to_default_with_multiple_accounts_confi
     result = whatsapp.list_chats(account=None)
 
     assert result == []
-    assert status_calls == ["http://localhost:41031/api/status"], (
-        f"expected the health probe to hit the default account's port, got: {status_calls}"
+    # D1: When account is None, list_chats falls back to default WITHOUT checking online status
+    # (checking status only happens when account is explicitly provided).
+    # So status_calls should be empty - only /chats should be called.
+    assert status_calls == [], (
+        f"expected NO status probe when account=None (D1 + Achado 1), got: {status_calls}"
     )
     assert chats_calls == ["http://localhost:41031/api/chats"], (
         f"expected /chats to hit the default account's port, got: {chats_calls}"
@@ -1178,6 +1196,36 @@ def test_get_bridge_status_real_bridge_regression(monkeypatch):
         f"expected success=true from a live bridge's /api/status, got: {status}"
     )
     assert "connected" in status and "logged_in" in status, status
+
+
+def test_list_chats_without_accounts_file_bridge_offline():
+    """Achado 1 / D1: Single-account installation without accounts.json, bridge offline.
+
+    This is the most critical test for Achado 1. It proves that list_chats()
+    without account parameter (D1: falls back to default) must return [] and NOT
+    raise an exception when:
+    - No accounts.json exists (single-account install, production state)
+    - Bridge is unreachable (port to a dead host)
+
+    Before the fix, list_chats() called _check_account_online(None) unconditionally,
+    which would raise ValueError("No accounts configured") — violating D1.
+
+    After the fix, list_chats() only calls _check_account_online when account is
+    explicitly provided; when account=None, it just resolves the default and
+    makes the API call, which returns [] on transport failure.
+    """
+    # Point to a port that doesn't respond
+    os.environ['WHATSAPP_API_BASE_URL'] = 'http://localhost:1/api'
+    # Ensure accounts.json doesn't exist
+    os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+
+    try:
+        # This should return [] without raising, proving D1 is honored
+        result = whatsapp.list_chats()
+        assert result == [], f"Expected empty list when bridge is offline, got: {result}"
+    finally:
+        # Restore to allow other tests to run
+        os.environ.pop('WHATSAPP_API_BASE_URL', None)
 
 
 if __name__ == "__main__":
