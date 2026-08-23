@@ -263,5 +263,149 @@ def test_write_op_guard_without_account_with_multiple_accounts(tmp_path):
             os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
 
 
+
+
+def test_status_agregado(bridge_processes, bridge_dirs, tmp_path):
+    """Test D13: get_bridge_status() without account returns aggregated status.
+    
+    With two accounts configured and only the default account's bridge running,
+    get_bridge_status() without account parameter should return:
+    - Aggregated dict with status for both accounts
+    - Default account with real status from /api/status
+    - Non-default account marked as offline with task name
+    """
+    # Stop the trabalho process to simulate it being offline
+    if 'trabalho' in bridge_processes:
+        try:
+            bridge_processes['trabalho'].terminate()
+            bridge_processes['trabalho'].wait(timeout=2)
+        except:
+            try:
+                bridge_processes['trabalho'].kill()
+            except:
+                pass
+    
+    time.sleep(0.5)  # Give it time to stop
+    
+    # Create accounts.json: default (pessoal) at 3098, trabalho at 3097
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {
+                "port": 3097,
+                "dir": bridge_dirs['trabalho'],
+                "jid": ""
+            },
+            "pessoal": {
+                "port": 3098,
+                "dir": bridge_dirs['pessoal'],
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    try:
+        # Call get_bridge_status without account
+        # Since only pessoal is running, trabalho will be offline
+        healthy, reason, status_dict = whatsapp.get_bridge_status(account=None)
+        
+        # D13: Should return aggregated format
+        assert reason == "aggregated", f"Expected reason='aggregated', got '{reason}'"
+        assert isinstance(status_dict, dict), f"Expected dict status, got {type(status_dict)}"
+        
+        # Should have both accounts
+        assert "pessoal" in status_dict, f"Missing 'pessoal' in aggregated status"
+        assert "trabalho" in status_dict, f"Missing 'trabalho' in aggregated status"
+        
+        # Pessoal (default, running) should have real status
+        pessoal_status = status_dict["pessoal"]
+        assert "healthy" in pessoal_status, f"pessoal missing 'healthy'"
+        assert "reason" in pessoal_status, f"pessoal missing 'reason'"
+        assert "status" in pessoal_status, f"pessoal missing 'status'"
+        
+        # Trabalho (not running) should be marked offline with task name
+        trabalho_status = status_dict["trabalho"]
+        assert trabalho_status["healthy"] == False, f"trabalho should be unhealthy"
+        assert "WhatsAppMCPBridge-trabalho" in trabalho_status["reason"],             f"trabalho reason should cite task name, got: {trabalho_status['reason']}"
+        
+    finally:
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
+def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
+    """Test D12: list_chats(account="offline") raises clear error with task name.
+    
+    When a specified account's bridge is unreachable, the tool should raise
+    ValueError with a clear message naming the account alias and the
+    scheduled task name, without raw stacktrace or attempting to start
+    the process.
+    """
+    # Stop the trabalho process to simulate it being offline
+    if 'trabalho' in bridge_processes:
+        try:
+            bridge_processes['trabalho'].terminate()
+            bridge_processes['trabalho'].wait(timeout=2)
+        except:
+            try:
+                bridge_processes['trabalho'].kill()
+            except:
+                pass
+    
+    time.sleep(0.5)  # Give it time to stop
+    
+    # Create accounts.json: both accounts configured, but we'll not start trabalho
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {
+                "port": 3097,
+                "dir": bridge_dirs['trabalho'],
+                "jid": ""
+            },
+            "pessoal": {
+                "port": 3098,
+                "dir": bridge_dirs['pessoal'],
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    try:
+        # Try to call list_chats with offline account
+        # trabalho is not running, so this should raise ValueError
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.list_chats(account="trabalho")
+        
+        error_msg = str(exc_info.value)
+        
+        # Error must mention the account alias
+        assert "trabalho" in error_msg,             f"Error should mention account alias 'trabalho', got: {error_msg}"
+        
+        # Error must mention the scheduled task name
+        assert "WhatsAppMCPBridge-trabalho" in error_msg,             f"Error should mention task name 'WhatsAppMCPBridge-trabalho', got: {error_msg}"
+        
+        # Error must NOT contain raw Python stacktrace indicators
+        assert "Traceback" not in error_msg, f"Error should not include traceback"
+        
+    finally:
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
