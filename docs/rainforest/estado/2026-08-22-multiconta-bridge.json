@@ -23,19 +23,22 @@
   },
   "executar": {
     "status": "ok",
-    "tarefas_ok": 8,
-    "tarefas": 8,
+    "tarefas_ok": 9,
+    "tarefas": 9,
     "pendentes": [
       "tarefa-7 (regressao da instalacao atual) ainda rodando"
     ],
     "em": "2026-08-23"
   },
   "revisar": {
-    "status": "reprovado",
-    "achados": 1,
+    "status": "ok",
+    "achados": 0,
     "bloqueiam": 1,
     "em": "2026-08-23",
-    "rodada": 4
+    "rodada": 4,
+    "rodadas": 6,
+    "base": "b2eb4cd4a9b9e8f3f0384afd588b12a4eda024b4",
+    "head": "c67da05"
   },
   "verificar": {
     "status": "pendente"
