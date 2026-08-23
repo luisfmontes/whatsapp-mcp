@@ -31,6 +31,28 @@ def _auth_headers() -> Dict[str, str]:
     return {}
 
 
+def _require_account(account: Optional[str]) -> None:
+    """Guard for write operations: fail if account is None and multiple accounts are configured.
+
+    Implements D2 from design: write operations without account must fail before any HTTP
+    request when multiple accounts are configured, with a message listing known aliases.
+
+    Args:
+        account: The account alias passed to the write operation.
+
+    Raises:
+        ValueError: If account is None and multiple accounts are configured.
+    """
+    if account is None:
+        known = accounts.known_aliases()
+        if len(known) > 1:
+            raise ValueError(
+                f"Write operation requires an account. "
+                f"Multiple accounts configured: {', '.join(known)}. "
+                f"Specify one explicitly: account='<account_name>'"
+            )
+
+
 def _api_request(method: str, path: str, base_url: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
     """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
     on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
@@ -432,6 +454,7 @@ def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] 
     return _chat_from_dict(chat_data)
 
 def send_message(recipient: str, message: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         # Validate input
@@ -461,6 +484,7 @@ def send_message(recipient: str, message: str, account: Optional[str] = None) ->
         return False, f"Unexpected error: {str(e)}"
 
 def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         # Validate input
@@ -496,6 +520,7 @@ def send_file(recipient: str, media_path: str, account: Optional[str] = None) ->
         return False, f"Unexpected error: {str(e)}"
 
 def send_audio_message(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         # Validate input
@@ -599,6 +624,7 @@ def create_group(
     community_parent_jid: str = "",
     account: Optional[str] = None
 ) -> Tuple[bool, str, Optional[dict]]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not name or not name.strip():
@@ -632,6 +658,7 @@ def create_group(
 
 
 def leave_group(jid: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
@@ -649,6 +676,7 @@ def leave_group(jid: str, account: Optional[str] = None) -> Tuple[bool, str]:
 
 
 def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", timestamp: int = 0, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -671,6 +699,7 @@ def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", 
 
 
 def mark_chat_unread(chat_jid: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -715,6 +744,7 @@ def get_group_info(jid: str, account: Optional[str] = None) -> Tuple[bool, str, 
 
 
 def archive_chat(chat_jid: str, archive: bool, account: Optional[str] = None) -> Tuple[bool, str]:
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -757,6 +787,7 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
     chats; in group chats the bridge returns an error because the original
     sender's JID isn't available.
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -787,6 +818,7 @@ def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = 
     from_me is accepted for API symmetry but ignored — WhatsApp (whatsmeow's
     BuildEdit) only allows editing your own messages; the bridge never reads it.
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -818,6 +850,7 @@ def delete_message(chat_jid: str, message_id: str, from_me: bool = True, account
     chats; in group chats the bridge returns an error because the original
     sender's JID isn't available.
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -848,6 +881,7 @@ def update_group_participants(group_jid: str, participants: List[str], action: s
     has jid, is_admin, error (0 = applied, non-0 = WhatsApp error code),
     and optionally add_request (true if invitation pending).
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
@@ -881,6 +915,7 @@ def send_chat_presence(chat_jid: str, state: str, media: str = "", account: Opti
     state: 'composing' (typing) or 'paused' (stopped).
     media: '' (text, default) or 'audio' (recording).
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -931,6 +966,7 @@ def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Tuple[bo
 
 def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Get group invite link (or reset if reset=True)."""
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
@@ -984,6 +1020,7 @@ def get_group_invite_info(link: str, account: Optional[str] = None) -> Tuple[boo
 
 def join_group_with_link(link: str, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Join a group using invite link."""
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not link or not link.strip():
@@ -1008,6 +1045,7 @@ def join_group_with_link(link: str, account: Optional[str] = None) -> Tuple[bool
 def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Optional[str] = None,
                          announce: Optional[bool] = None, locked: Optional[bool] = None, account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Update group settings (name, topic, announce, locked)."""
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
@@ -1043,6 +1081,7 @@ def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Opt
 
 def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Set group photo from file or remove it."""
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
@@ -1126,6 +1165,7 @@ def create_poll(chat_jid: str, question: str, options: List[str], selectable_cou
 
     Returns (success, message, message_id).
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
@@ -1169,6 +1209,7 @@ def vote_in_poll(chat_jid: str, poll_id: str, options: List[str], account: Optio
 
     Returns (success, message).
     """
+    _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
