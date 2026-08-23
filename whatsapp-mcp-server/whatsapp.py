@@ -94,6 +94,25 @@ def _check_account_online(account: Optional[str]) -> str:
         )
 
 
+def _resolve_and_check_account_explicit(account: str) -> str:
+    """Resolve account and verify bridge is online when account is explicitly provided.
+
+    D12: Read operations called with an explicit account parameter should fail
+    with a clear error (not silently return empty data) if that account's bridge
+    is unreachable.
+
+    Args:
+        account: The account alias (NOT None). Must be explicitly provided.
+
+    Returns:
+        The base_url if the account's bridge responds to /status.
+
+    Raises:
+        ValueError: If the account does not exist or its bridge is unreachable.
+    """
+    return _check_account_online(account)
+
+
 def _api_request(method: str, path: str, base_url: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
     """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
     on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
@@ -281,7 +300,11 @@ def list_messages(
     account: Optional[str] = None
 ) -> str:
     """Get messages matching the specified criteria with optional context."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     # Validate date filters up front (same contract as before: invalid dates raise
     # a ValueError that propagates to the caller, it is NOT swallowed like transport errors).
     if after:
@@ -413,7 +436,11 @@ def list_chats(
 
 def search_contacts(query: str, account: Optional[str] = None) -> List[Contact]:
     """Search contacts by name or phone number."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/contacts/search", {"query": query}, base_url)
 
     if result is None:
@@ -437,7 +464,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optiona
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/contacts/chats", {
         "jid": jid,
         "limit": limit,
@@ -452,7 +483,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optiona
 
 def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
     """Get most recent message involving the contact."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/contacts/last_interaction", {"jid": jid}, base_url)
 
     if result is None:
@@ -474,7 +509,11 @@ def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
 
 def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional[str] = None) -> Optional[Chat]:
     """Get chat metadata by JID."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/chat", {
         "chat_jid": chat_jid,
         "include_last_message": include_last_message,
@@ -492,7 +531,11 @@ def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional
 
 def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] = None) -> Optional[Chat]:
     """Get chat metadata by sender phone number (handles LID contacts)."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     result = _api_post("/chat/by_contact", {"sender_phone_number": _normalize_phone(sender_phone_number)}, base_url)
 
     if result is None:
@@ -625,7 +668,11 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
         failure mode into a bare None left the caller unable to tell an expired
         media from a bad auth token from a bridge that is simply down.
     """
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         url = f"{base_url}/download"
         payload = {
@@ -768,7 +815,11 @@ def mark_chat_unread(chat_jid: str, account: Optional[str] = None) -> Tuple[bool
 
 
 def get_group_info(jid: str, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required", None
@@ -813,7 +864,11 @@ def archive_chat(chat_jid: str, archive: bool, account: Optional[str] = None) ->
 
 
 def resolve_contact(phone: str, account: Optional[str] = None) -> Tuple[bool, str, List[str]]:
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not phone or not phone.strip():
             return False, "phone is required", []
@@ -994,7 +1049,11 @@ def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Tuple[bo
     phones: list of phone numbers (with or without +). Each number is checked
     and result includes query (normalized), jid, is_in, and optionally verified_name.
     """
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not phones:
             return False, "phones list is required", []
@@ -1017,8 +1076,12 @@ def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Tuple[bo
 
 def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Get group invite link (or reset if reset=True)."""
-    _require_account(account)
-    base_url = accounts.resolve_account(account)
+    # D2: read operation, but needs _require_account check for consistency with other group ops
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
             return False, "group_jid is required", ""
@@ -1044,7 +1107,11 @@ def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional
 
 def get_group_invite_info(link: str, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get group info from invite link (doesn't join the group)."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not link or not link.strip():
             return False, "link is required", None
@@ -1160,7 +1227,11 @@ def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False, 
 
 def get_user_info(jids: List[str], account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Get user info for a list of JIDs."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not jids:
             return False, "jids list is required", []
@@ -1183,7 +1254,11 @@ def get_user_info(jids: List[str], account: Optional[str] = None) -> Tuple[bool,
 
 def get_profile_picture(jid: str, preview: bool = False, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get profile picture info for a user or group."""
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
             return False, "jid is required", None
@@ -1289,7 +1364,11 @@ def get_poll_results(chat_jid: str, poll_id: str, account: Optional[str] = None)
 
     Returns (success, message, results_dict).
     """
-    base_url = accounts.resolve_account(account)
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required", None
@@ -1443,7 +1522,7 @@ def pair_account(account: str) -> bytes:
 
     # Check if already paired: if bridge is logged_in, no QR available
     try:
-        response = _api_request("GET", "/api/status", base_url, timeout=5)
+        response = _api_request("GET", "/status", base_url, timeout=5)
         response.raise_for_status()
         status = response.json()
 
