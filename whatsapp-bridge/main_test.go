@@ -1803,3 +1803,55 @@ func setupPollStore(t *testing.T) *MessageStore {
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
+
+// TestQRPageIdentifiesAccount verifies renderQRPage() function behavior (extracted for testability).
+// When accountAlias is set, includes account identification (D8, D3).
+// When accountAlias is empty, page is unchanged from before (D1) — no duplication.
+func TestQRPageIdentifiesAccount(t *testing.T) {
+	port := 3090
+
+	t.Run("renderQRPage with account=trabalho includes account and port", func(t *testing.T) {
+		// Call the REAL function (not reimplemented)
+		html := renderQRPage("trabalho", port)
+
+		// Verify account identification is present
+		if !strings.Contains(html, "Account: trabalho (port 3090)") {
+			t.Errorf("HTML should contain 'Account: trabalho (port 3090)', got: %q", html)
+		}
+		if !strings.Contains(html, "<p>Account: trabalho (port 3090)</p>") {
+			t.Errorf("HTML should have account in <p> tag, got: %q", html)
+		}
+	})
+
+	t.Run("renderQRPage with empty account has no duplication (D1)", func(t *testing.T) {
+		// Call the REAL function with empty account
+		html := renderQRPage("", port)
+
+		// Verify heading appears exactly once (in <h2>)
+		count := strings.Count(html, "Scan with WhatsApp to connect")
+		if count != 1 {
+			t.Errorf("heading 'Scan with WhatsApp to connect' should appear exactly 1 time, got %d times", count)
+		}
+
+		// Verify no Account: line exists
+		if strings.Contains(html, "Account:") {
+			t.Errorf("HTML should not contain 'Account:' when no account specified, got: %q", html)
+		}
+	})
+
+	t.Run("renderQRPage with account preserves format", func(t *testing.T) {
+		// Call the REAL function
+		html := renderQRPage("pessoal", 3091)
+
+		// Verify format is correct
+		if !strings.Contains(html, "<!DOCTYPE html>") {
+			t.Error("HTML should have DOCTYPE")
+		}
+		if !strings.Contains(html, "<h2>Scan with WhatsApp to connect</h2>") {
+			t.Error("HTML should have correct h2 heading")
+		}
+		if !strings.Contains(html, "Account: pessoal (port 3091)") {
+			t.Error("HTML should have correct account info")
+		}
+	})
+}
