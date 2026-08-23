@@ -31,7 +31,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - [ ] Sem path pessoal/secret vazando (transcription.env, API keys).
 - [ ] Mudou comportamento de sync/escrita? Conferir impacto em transcrições existentes.
 - [ ] README/install.sh coerentes se mudou onboarding (versão Go, env vars, troubleshooting).
-- [ ] PR contra `origin/main`. PR para `upstream` (rodrigopg) só quando a mudança for agnóstica de SO — o roadmap deste fork não espera por ela.
+- [ ] PR contra `origin/main`. Nada de PR novo para `upstream` (rodrigopg) — o destino é este fork. Os PRs já abertos lá (#14, #15) ficam como estão; fechá-los sem motivo técnico é ruído no repositório de outra pessoa.
 
 ## Comandos essenciais
 
