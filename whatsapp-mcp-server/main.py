@@ -36,7 +36,8 @@ from whatsapp import (
     create_poll as whatsapp_create_poll,
     vote_in_poll as whatsapp_vote_in_poll,
     get_poll_results as whatsapp_get_poll_results,
-    get_bridge_status as whatsapp_get_bridge_status
+    get_bridge_status as whatsapp_get_bridge_status,
+    pair_account as whatsapp_pair_account
 )
 
 # Initialize FastMCP server
@@ -971,6 +972,55 @@ def get_bridge_status(account: Optional[str] = None) -> Dict[str, Any]:
             }
         }
     return status
+
+
+@mcp.tool()
+def pair_account(account: str) -> Dict[str, Any]:
+    """Get the QR code PNG for pairing a registered account.
+
+    Implements D4: Tool MCP that returns the QR code for an already-registered
+    account. The account alias is required (pairing the wrong account is worse
+    than an argument error). If the alias doesn't exist in the map, the error
+    says to run the installer.
+
+    Args:
+        account: Account alias to pair (required). Must be a registered account
+                created by install.ps1 -AddAccount
+
+    Returns:
+        A dictionary with:
+        - "success": True if QR retrieved, False if already paired
+        - "qr_png": The raw PNG bytes (base64 encoded) if success=True
+        - "message": Status message
+
+    Raises:
+        ValueError: If account not registered, bridge offline, or other errors
+    """
+    try:
+        qr_png_bytes = whatsapp_pair_account(account)
+
+        # Encode PNG bytes as base64 for JSON transmission
+        import base64
+        qr_base64 = base64.b64encode(qr_png_bytes).decode('utf-8')
+
+        return {
+            "success": True,
+            "message": f"QR code for account '{account}'",
+            "qr_png": qr_base64
+        }
+    except ValueError as e:
+        # Handle specific error cases
+        error_msg = str(e)
+
+        # Check if it's an "already paired" message
+        if "already paired" in error_msg:
+            return {
+                "success": False,
+                "message": error_msg
+            }
+
+        # Other errors (not found, offline, etc.) should be raised
+        raise
 
 
 if __name__ == "__main__":
