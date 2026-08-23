@@ -282,3 +282,65 @@ class TestIntegrationScenario:
             # Test account_task_name
             assert accounts.account_task_name(None) == "WhatsAppMCPBridge-pessoal"
             assert accounts.account_task_name("trabalho") == "WhatsAppMCPBridge-trabalho"
+
+
+class TestCorruptedAccountsFile:
+    """Tests for handling corrupted or invalid accounts.json files."""
+
+    def test_corrupted_json_raises_error_with_path(self, monkeypatch):
+        """When accounts.json exists but is invalid JSON, a clear error is raised with the path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "accounts.json"
+            # Write invalid JSON (not valid UTF-8 JSON structure)
+            accounts_file.write_bytes(b'{invalid json content \xff')
+
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+            # accounts_configured() should raise, not return True or False
+            with pytest.raises(ValueError) as exc:
+                accounts.accounts_configured()
+            error_msg = str(exc.value)
+            assert str(accounts_file) in error_msg
+            assert "Invalid JSON" in error_msg or "JSON" in error_msg
+
+    def test_corrupted_file_resolve_raises_error_with_path(self, monkeypatch):
+        """When trying to resolve an account from corrupted JSON, error cites the file path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "accounts.json"
+            # Write invalid JSON
+            accounts_file.write_bytes(b'{"default": "pessoal", invalid}')
+
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+            with pytest.raises(ValueError) as exc:
+                accounts.resolve_account(None)
+            error_msg = str(exc.value)
+            assert str(accounts_file) in error_msg
+            assert "Invalid JSON" in error_msg or "JSON" in error_msg
+
+    def test_empty_json_raises_error(self, monkeypatch):
+        """When accounts.json is empty or malformed, error is raised."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "accounts.json"
+            # Write empty file
+            accounts_file.write_text("")
+
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+            with pytest.raises(ValueError) as exc:
+                accounts.accounts_configured()
+            error_msg = str(exc.value)
+            assert str(accounts_file) in error_msg
+
+    def test_known_aliases_corrupted_file_raises_error(self, monkeypatch):
+        """When trying to get aliases from corrupted JSON, error is raised with path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = Path(tmpdir) / "accounts.json"
+            accounts_file.write_bytes(b'not json at all')
+
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+            with pytest.raises(ValueError) as exc:
+                accounts.known_aliases()
+            error_msg = str(exc.value)
+            assert str(accounts_file) in error_msg

@@ -27,7 +27,11 @@ def _get_accounts_file() -> Optional[Path]:
 
 
 def _load_accounts_map() -> Optional[dict]:
-    """Load and parse the accounts.json file, or None if it doesn't exist."""
+    """Load and parse the accounts.json file, or None if it doesn't exist.
+
+    Raises:
+        ValueError: If the file exists but cannot be parsed as valid JSON.
+    """
     accounts_file = _get_accounts_file()
     if not accounts_file:
         return None
@@ -35,13 +39,27 @@ def _load_accounts_map() -> Optional[dict]:
     try:
         with open(accounts_file, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(
+            f"Invalid JSON in accounts file '{accounts_file}': {e}"
+        ) from e
+    except (IOError, OSError) as e:
+        raise ValueError(
+            f"Cannot read accounts file '{accounts_file}': {e}"
+        ) from e
 
 
 def accounts_configured() -> bool:
-    """Returns True if a valid accounts.json file is readable."""
-    return _get_accounts_file() is not None
+    """Returns True if a valid accounts.json file is readable.
+
+    Returns False if no accounts file exists.
+    Raises ValueError if an accounts file exists but is invalid.
+    """
+    try:
+        return _load_accounts_map() is not None
+    except ValueError:
+        # Re-raise to indicate misconfiguration (file exists but invalid)
+        raise
 
 
 def resolve_account(alias: Optional[str] = None) -> str:
