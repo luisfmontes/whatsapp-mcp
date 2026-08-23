@@ -1507,7 +1507,7 @@ def get_bridge_status(account: Optional[str] = None) -> Tuple[bool, str, Optiona
         return False, f"Unexpected error: {str(e)}", None
 
 
-def pair_account(account: str) -> bytes:
+def pair_account(account: str) -> Dict[str, Any]:
     """
     Get the QR code PNG for pairing a registered account.
 
@@ -1516,11 +1516,17 @@ def pair_account(account: str) -> bytes:
     erro de argumento. Se o alias não existir no mapa, o erro deve dizer para rodar o
     instalador.
 
+    Task 10 (D8, D3): Return the account alias and port alongside the QR bytes so
+    the caller can identify which account is being paired.
+
     Args:
         account: Account alias to pair (required, not optional).
 
     Returns:
-        The raw PNG bytes from /qr.png, starting with PNG signature \x89PNG.
+        A dictionary with:
+        - "account": The account alias
+        - "port": The port number the bridge is running on
+        - "qr_png_bytes": The raw PNG bytes from /qr.png, starting with PNG signature \x89PNG.
 
     Raises:
         ValueError: If account is not registered, if the bridge is offline,
@@ -1574,6 +1580,11 @@ def pair_account(account: str) -> bytes:
     # base_url is "http://localhost:PORT/api", extract "http://localhost:PORT"
     try:
         parsed = urlparse(base_url)
+        # Extract port from netloc (format: "localhost:PORT" or just "localhost")
+        port = parsed.port or 80
+        if parsed.scheme == "https":
+            port = parsed.port or 443
+
         # Reconstruct URL without the path (removes /api)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         qr_url = f"{origin}/qr.png"
@@ -1590,8 +1601,12 @@ def pair_account(account: str) -> bytes:
 
         response.raise_for_status()
 
-        # Return the PNG bytes
-        return response.content
+        # Return dictionary with account, port, and PNG bytes (task 10, D8, D3)
+        return {
+            "account": account,
+            "port": port,
+            "qr_png_bytes": response.content
+        }
 
     except requests.RequestException as e:
         # Re-raise with clear message

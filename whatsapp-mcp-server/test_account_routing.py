@@ -688,7 +688,7 @@ def test_pair_account_not_paired(tmp_path):
         requests.request = mock_requests_request
 
         # Call pair_account
-        qr_bytes = whatsapp.pair_account("test_pair")
+        result = whatsapp.pair_account("test_pair")
 
         # Verify exact URLs were called
         request_urls = [url for method, http_method, url in urls_called if method == 'request']
@@ -706,9 +706,17 @@ def test_pair_account_not_paired(tmp_path):
         assert "http://localhost:9999/qr.png" in get_urls, \
             f"pair_account should call http://localhost:9999/qr.png, got gets: {get_urls}"
 
-        # Verify response
-        assert isinstance(qr_bytes, bytes), f"Should return bytes, got {type(qr_bytes)}"
-        assert qr_bytes.startswith(b'\x89PNG'), f"Should have PNG signature, got {qr_bytes[:4]!r}"
+        # Verify response format (task 10, D8, D3): returns dict with account, port, qr_png_bytes
+        assert isinstance(result, dict), f"Should return dict, got {type(result)}"
+        assert "account" in result, "Response must include 'account'"
+        assert "port" in result, "Response must include 'port'"
+        assert "qr_png_bytes" in result, "Response must include 'qr_png_bytes'"
+
+        # Verify values
+        assert result["account"] == "test_pair", f"Account should be 'test_pair', got {result['account']}"
+        assert result["port"] == 9999, f"Port should be 9999, got {result['port']}"
+        assert isinstance(result["qr_png_bytes"], bytes), f"qr_png_bytes should be bytes, got {type(result['qr_png_bytes'])}"
+        assert result["qr_png_bytes"].startswith(b'\x89PNG'), f"Should have PNG signature, got {result['qr_png_bytes'][:4]!r}"
 
     finally:
         # Restore originals

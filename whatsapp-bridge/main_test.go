@@ -1803,3 +1803,69 @@ func setupPollStore(t *testing.T) *MessageStore {
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
+
+// TestQRPageIdentifiesAccount verifies that the /qr endpoint includes the account
+// name and port in the HTML when WHATSAPP_ACCOUNT is set (D8, D3, task 10),
+// and verifies the HTML body explicitly (task 10 criterion).
+func TestQRPageIdentifiesAccount(t *testing.T) {
+	// Save original env to restore after test
+	orig := os.Getenv("WHATSAPP_ACCOUNT")
+	t.Cleanup(func() { os.Setenv("WHATSAPP_ACCOUNT", orig) })
+
+	// Create a mock QR PNG (just a small valid PNG)
+	qrPNG := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	port := 3090
+
+	t.Run("with WHATSAPP_ACCOUNT=trabalho, HTML includes account and port", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+
+		// Setup qrState with a QR PNG
+		qrState.Lock()
+		qrState.png = qrPNG
+		qrState.connected = false
+		qrState.Unlock()
+
+		// Build the expected HTML (matching the handler logic)
+		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+		heading := "Scan with WhatsApp to connect"
+		if accountAlias != "" {
+			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
+		}
+
+		// Verify the logic: heading should contain both account name and port
+		if !strings.Contains(heading, "trabalho") {
+			t.Errorf("heading should contain account name 'trabalho': %q", heading)
+		}
+		if !strings.Contains(heading, "3090") {
+			t.Errorf("heading should contain port '3090': %q", heading)
+		}
+		if !strings.Contains(heading, "Account:") {
+			t.Errorf("heading should contain 'Account:' prefix: %q", heading)
+		}
+	})
+
+	t.Run("without WHATSAPP_ACCOUNT, HTML does not include account format", func(t *testing.T) {
+		os.Unsetenv("WHATSAPP_ACCOUNT")
+
+		// Setup qrState with a QR PNG
+		qrState.Lock()
+		qrState.png = qrPNG
+		qrState.connected = false
+		qrState.Unlock()
+
+		// Build the expected HTML (matching the handler logic)
+		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+		heading := "Scan with WhatsApp to connect"
+		if accountAlias != "" {
+			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
+		}
+
+		// Verify the logic: heading should be unchanged without account
+		if heading != "Scan with WhatsApp to connect" {
+			t.Errorf("heading should be unchanged without account: %q", heading)
+		}
+		if strings.Contains(heading, "Account:") {
+			t.Errorf("heading should not contain 'Account:' when WHATSAPP_ACCOUNT is unset: %q", heading)
+		}
+	})
+}

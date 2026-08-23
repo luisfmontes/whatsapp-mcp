@@ -983,6 +983,9 @@ def pair_account(account: str) -> Dict[str, Any]:
     than an argument error). If the alias doesn't exist in the map, the error
     says to run the installer.
 
+    Task 10 (D8, D3): Include the account alias and port in the response so the
+    caller knows which account and port the QR is for.
+
     Args:
         account: Account alias to pair (required). Must be a registered account
                 created by install.ps1 -AddAccount
@@ -990,6 +993,8 @@ def pair_account(account: str) -> Dict[str, Any]:
     Returns:
         A dictionary with:
         - "success": True if QR retrieved, False if already paired
+        - "account": The account alias (included in task 10, D8, D3)
+        - "port": The port the bridge is running on (included in task 10, D8, D3)
         - "qr_png": The raw PNG bytes (base64 encoded) if success=True
         - "message": Status message
 
@@ -997,14 +1002,17 @@ def pair_account(account: str) -> Dict[str, Any]:
         ValueError: If account not registered, bridge offline, or other errors
     """
     try:
-        qr_png_bytes = whatsapp_pair_account(account)
+        result = whatsapp_pair_account(account)
 
+        # result is now a dict with account, port, qr_png_bytes
         # Encode PNG bytes as base64 for JSON transmission
         import base64
-        qr_base64 = base64.b64encode(qr_png_bytes).decode('utf-8')
+        qr_base64 = base64.b64encode(result["qr_png_bytes"]).decode('utf-8')
 
         return {
             "success": True,
+            "account": result["account"],
+            "port": result["port"],
             "message": f"QR code for account '{account}'",
             "qr_png": qr_base64
         }
@@ -1016,6 +1024,7 @@ def pair_account(account: str) -> Dict[str, Any]:
         if "already paired" in error_msg:
             return {
                 "success": False,
+                "account": account,
                 "message": error_msg
             }
 
