@@ -5,6 +5,7 @@ bridge instance by inserting distinct data in each bridge and confirming
 calls with account= reach the correct one.
 """
 
+import ast
 import pytest
 import subprocess
 import time
@@ -581,6 +582,383 @@ def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
             os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
         else:
             os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
+
+# ---------------------------------------------------------------------------
+# Tarefa 7: regressao "a instalacao pareada de hoje nao percebe a multiconta".
+#
+# D1 e o invariante mais caro da entrega: sem accounts.json no disco (o estado
+# real desta maquina hoje), as 36 tools pre-existentes continuam funcionando
+# exatamente como antes — nenhuma exige `account`, a guarda de escrita da D2
+# nunca dispara com 0 ou 1 conta configurada, a URL sai da mesma precedencia
+# de sempre, e get_bridge_status() devolve a tupla classica, nao o agregado.
+# ---------------------------------------------------------------------------
+
+
+def _load_tool_functions():
+    """Parse main.py's source with ast instead of importing the module.
+
+    main.py does `from mcp.server.fastmcp import FastMCP`, and the `mcp`
+    package is not installed in the environment that runs this suite with
+    `python -m pytest` (confirmed: `import main` raises ModuleNotFoundError
+    here, while every one of the 51 pre-existing tests only imports
+    `accounts` and `whatsapp`, never `main`). Parsing the real source keeps
+    this a check against the actual production file — just without
+    executing it — instead of silently skipping or requiring a dependency
+    the rest of the suite doesn't need.
+    """
+    main_path = Path(__file__).parent / "main.py"
+    tree = ast.parse(main_path.read_text(encoding="utf-8"), filename=str(main_path))
+    tools = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for dec in node.decorator_list:
+                if (
+                    isinstance(dec, ast.Call)
+                    and isinstance(dec.func, ast.Attribute)
+                    and dec.func.attr == "tool"
+                    and isinstance(dec.func.value, ast.Name)
+                    and dec.func.value.id == "mcp"
+                ):
+                    tools.append(node)
+                    break
+    return tools
+
+
+def _account_param_status(node):
+    """Classify the `account` parameter of a tool FunctionDef.
+
+    Returns one of: 'missing' (no such param), 'required' (present, no
+    default), 'optional_none' (default is exactly None), 'optional_other'
+    (present with some other default).
+    """
+    args = node.args.args
+    defaults = node.args.defaults
+    n_no_default = len(args) - len(defaults)
+    defaults_by_name = {
+        args[n_no_default + i].arg: d for i, d in enumerate(defaults)
+    }
+    names = [a.arg for a in args]
+    if "account" not in names:
+        return "missing"
+    if "account" not in defaults_by_name:
+        return "required"
+    d = defaults_by_name["account"]
+    if isinstance(d, ast.Constant) and d.value is None:
+        return "optional_none"
+    return "optional_other"
+
+
+class TestNoToolRequiresAccount:
+    """Systematic check across every @mcp.tool() in main.py, not just the
+    handful exercised elsewhere in this file."""
+
+    def test_at_least_36_tools_registered(self):
+        """Sanity check on the parser itself: if this drops below 36, the
+        AST walk is broken (or someone deleted tools), and the assertions
+        below would be vacuously true over an empty/tiny set."""
+        tools = _load_tool_functions()
+        names = sorted(t.name for t in tools)
+        assert len(tools) >= 36, f"Expected at least 36 tools, found {len(tools)}: {names}"
+
+    def test_no_tool_except_pair_account_requires_account(self):
+        """D1/D9: none of the pre-existing 36 tools may require `account`.
+        `pair_account` (D4, task 6) is the sole, deliberate exception and is
+        excluded here — proven separately below."""
+        tools = _load_tool_functions()
+        offenders = {}
+        for t in tools:
+            if t.name == "pair_account":
+                continue
+            status = _account_param_status(t)
+            if status != "optional_none":
+                offenders[t.name] = status
+        assert not offenders, (
+            f"Tools that require `account` or lack a `None` default (would "
+            f"break the un-migrated installation, which never passes "
+            f"account=...): {offenders}"
+        )
+
+    def test_pair_account_requires_account_by_design(self):
+        """Adversarial control for the assertion above: if the exclusion of
+        pair_account were dropped (or if pair_account's signature changed to
+        make account optional, silently weakening D4), the blanket test
+        above would need to fail. This proves the checker actually
+        discriminates instead of vacuously passing every function."""
+        tools = _load_tool_functions()
+        pair = next((t for t in tools if t.name == "pair_account"), None)
+        assert pair is not None, "pair_account tool not found in main.py"
+        assert _account_param_status(pair) == "required", (
+            "pair_account must require `account` per D4 — parear a conta "
+            "errada e pior que um erro de argumento"
+        )
+
+
+class TestWriteGuardDoesNotFireWithFewAccounts:
+    """D2: a guarda de escrita so dispara com MAIS de uma conta configurada.
+    O teste existente (test_write_op_guard_without_account_with_multiple_accounts)
+    cobre o lado que dispara; aqui cobrimos o lado que nao pode disparar —
+    exatamente o estado da instalacao de hoje (zero contas) e o primeiro
+    estado depois de uma migracao completa (uma conta so). Ambos usam HTTP
+    mockado: nao tocam rede nem o bridge real."""
+
+    def test_send_message_without_account_allowed_with_zero_accounts_configured(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+        monkeypatch.delenv("WHATSAPP_API_BASE_URL", raising=False)
+        monkeypatch.setenv("WHATSAPP_BRIDGE_PORT", "41010")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("HOME", tmpdir)
+            monkeypatch.setenv("USERPROFILE", tmpdir)
+
+            calls = []
+
+            def fake_post(url, **kwargs):
+                calls.append(url)
+
+                class R:
+                    status_code = 200
+
+                    def json(self):
+                        return {"success": True, "message": "sent"}
+
+                return R()
+
+            monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+            ok, msg = whatsapp.send_message(
+                "55119999999@s.whatsapp.net", "oi", account=None
+            )
+
+            assert ok is True, f"expected success, got ok={ok} msg={msg!r}"
+            assert calls == ["http://localhost:41010/api/send"], (
+                f"expected exactly one POST to the env-derived URL, got: {calls}"
+            )
+
+    def test_send_message_without_account_allowed_with_exactly_one_account_configured(
+        self, monkeypatch, tmp_path
+    ):
+        """Boundary case for the `len(known) > 1` check in
+        whatsapp._require_account: with exactly one configured account this
+        must NOT raise. An off-by-one (`>= 1` instead of `> 1`) would break
+        the very first account a user creates."""
+        accounts_file = tmp_path / "accounts.json"
+        accounts_config = {
+            "default": "pessoal",
+            "accounts": {
+                "pessoal": {"port": 41020, "dir": str(tmp_path), "jid": ""},
+            },
+        }
+        accounts_file.write_text(json.dumps(accounts_config))
+        monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"success": True, "message": "sent"}
+
+            return R()
+
+        monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+        ok, msg = whatsapp.send_message(
+            "55119999999@s.whatsapp.net", "oi", account=None
+        )
+
+        assert ok is True, f"expected success, got ok={ok} msg={msg!r}"
+        assert calls == ["http://localhost:41020/api/send"], (
+            f"expected exactly one POST to the configured account's URL, got: {calls}"
+        )
+
+
+def test_read_without_account_falls_back_to_default_with_multiple_accounts_configured(
+    monkeypatch, tmp_path
+):
+    """D2 asymmetry: reads never require `account`, even with more than one
+    account configured — only writes are guarded. list_chats(account=None)
+    must resolve to the DEFAULT account's port (pessoal/41031), not the
+    other one (trabalho/41032), proving the fallback picks the account the
+    production code decided, not one the test assumes."""
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "pessoal": {"port": 41031, "dir": str(tmp_path / "pessoal"), "jid": ""},
+            "trabalho": {"port": 41032, "dir": str(tmp_path / "trabalho"), "jid": ""},
+        },
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+    status_calls = []
+
+    def fake_request(method, url, **kwargs):
+        status_calls.append(url)
+
+        class R:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"healthy": True}
+
+            text = "{}"
+
+        return R()
+
+    monkeypatch.setattr(whatsapp.requests, "request", fake_request)
+
+    chats_calls = []
+
+    def fake_post(url, **kwargs):
+        chats_calls.append(url)
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"chats": []}
+
+        return R()
+
+    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+    result = whatsapp.list_chats(account=None)
+
+    assert result == []
+    assert status_calls == ["http://localhost:41031/api/status"], (
+        f"expected the health probe to hit the default account's port, got: {status_calls}"
+    )
+    assert chats_calls == ["http://localhost:41031/api/chats"], (
+        f"expected /chats to hit the default account's port, got: {chats_calls}"
+    )
+
+
+def test_get_bridge_status_classic_tuple_without_accounts_file(monkeypatch, tmp_path):
+    """D13: get_bridge_status() only aggregates when accounts_configured() is
+    True AND more than one alias exists. Without accounts.json,
+    accounts_configured() is False, so this must always hit the classic
+    branch and return the (healthy, reason, status_dict) 3-tuple — never
+    (False, "aggregated", {...}). Mocked HTTP: isolated, no real bridge."""
+    monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("WHATSAPP_API_BASE_URL", "http://localhost:41876/api")
+
+    def fake_request(method, url, **kwargs):
+        assert url == "http://localhost:41876/api/status", url
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"healthy": True, "reason": ""}
+
+            text = "{}"
+
+        return R()
+
+    monkeypatch.setattr(whatsapp.requests, "request", fake_request)
+
+    result = whatsapp.get_bridge_status()
+
+    assert result == (True, "", {"healthy": True, "reason": ""}), result
+    assert isinstance(result, tuple) and len(result) == 3
+    assert result[1] != "aggregated"
+
+
+def test_get_bridge_status_classic_tuple_with_exactly_one_account_configured(
+    monkeypatch, tmp_path
+):
+    """Boundary case for the `len(known) > 1` check that gates D13
+    aggregation in get_bridge_status(): with accounts.json present but only
+    ONE account configured (the state right after a fresh install or right
+    after this exact migration, before a second account is ever added),
+    accounts_configured() is True but aggregation must still NOT trigger.
+    An off-by-one there (`>= 1`) would turn every single-account install's
+    status check into the aggregated dict shape."""
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {"pessoal": {"port": 41877, "dir": str(tmp_path), "jid": ""}},
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+    monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+    def fake_request(method, url, **kwargs):
+        assert url == "http://localhost:41877/api/status", url
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"healthy": True, "reason": ""}
+
+            text = "{}"
+
+        return R()
+
+    monkeypatch.setattr(whatsapp.requests, "request", fake_request)
+
+    result = whatsapp.get_bridge_status()
+
+    assert result == (True, "", {"healthy": True, "reason": ""}), result
+    assert isinstance(result, tuple) and len(result) == 3
+    assert result[1] != "aggregated"
+
+
+def test_get_bridge_status_real_bridge_regression(monkeypatch):
+    """THE test for tarefa 7 / D1: com o ambiente real desta maquina (sem
+    accounts.json, WHATSAPP_API_BASE_URL apontando para o bridge de producao
+    ja rodando) uma chamada REAL a get_bridge_status() bate em
+    http://localhost:3005/api/status por GET (unica chamada de rede
+    autorizada nesta suite) e devolve o formato classico, provando que a
+    instalacao pareada de hoje nao percebe a multiconta chegou.
+
+    Deliberadamente NAO usa monkeypatch para isolar HOME/accounts — a prova
+    exige o ambiente real da instalacao. `monkeypatch` aqui so protege
+    WHATSAPP_ACCOUNTS_FILE, para o caso de outro teste tê-lo deixado setado
+    (nenhum deixa hoje: todos usam monkeypatch/finally, mas isso e
+    verificado por leitura do arquivo, nao por confianca).
+
+    Se o bridge estiver fora do ar, este teste FALHA (nao pula) — skip
+    esconderia a ausencia da infraestrutura que a tarefa pede para provar.
+    """
+    monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+
+    healthy, reason, status = whatsapp.get_bridge_status()
+
+    assert isinstance(healthy, bool), f"healthy should be bool, got {type(healthy)}: {healthy!r}"
+    assert isinstance(reason, str), f"reason should be str, got {type(reason)}: {reason!r}"
+    assert reason != "aggregated", (
+        "get_bridge_status() returned the multi-account aggregated format "
+        "even though no accounts.json exists on this machine — the paired "
+        "installation DID notice multiconta landed"
+    )
+    assert not reason.startswith("Request error:"), (
+        f"could not reach the real bridge at localhost:3005 — this test "
+        f"requires it to be up (read-only GET /api/status only): {reason}"
+    )
+    assert isinstance(status, dict), f"expected a real status dict, got {status!r}"
+    # StatusResponse.Success is always present on a 200 from handleStatus
+    # (whatsapp-bridge/main.go); asserting on it (rather than on the
+    # pairing-dependent `healthy`/`logged_in` fields) keeps this test valid
+    # regardless of whether this machine's account happens to be paired
+    # right now.
+    assert status.get("success") is True, (
+        f"expected success=true from a live bridge's /api/status, got: {status}"
+    )
+    assert "connected" in status and "logged_in" in status, status
 
 
 if __name__ == "__main__":
