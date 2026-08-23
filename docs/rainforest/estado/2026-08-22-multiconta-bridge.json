@@ -41,7 +41,11 @@
     "head": "c67da05"
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "tarefas": 9,
+    "comando": "python -m pytest -q (94 passed, exit 0); CGO_ENABLED=0 go test ./... (ok, exit 0); install.ps1 -AddAccount em dir descartavel; binario com WHATSAPP_ACCOUNT=verif",
+    "saida": "94 passed; ok whatsapp-client; porta 3123 derivada e accounts.json sem BOM (bytes 123 34), maior byte do install.ps1 = 125; whatsapp-qr-verif.png criado em %TEMP%; get_bridge_status na instalacao real devolveu a tupla classica (True, \"\", {healthy:true, logged_in:true})",
+    "em": "2026-08-23"
   },
   "fechar": {
     "status": "pendente"
