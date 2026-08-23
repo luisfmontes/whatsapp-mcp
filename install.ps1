@@ -20,10 +20,10 @@ param(
     # WSL exclusions), so the default here is 8081 and the chosen port is
     # validated against the exclusion list before anything else happens.
     [int]$BridgePort = 8081,
-    # Which repository to install from. Windows support lives on a fork/branch
-    # until it is merged upstream, and a local path works too (useful for
+    # Which repository to install from. Defaults to this fork, which is the
+    # one carrying Windows support; a local path works too (useful for
     # testing this script against a working copy).
-    [string]$RepoUrl = 'https://github.com/rodrigopg/whatsapp-mcp.git',
+    [string]$RepoUrl = 'https://github.com/luisfmontes/whatsapp-mcp.git',
     [string]$Branch
 )
 
