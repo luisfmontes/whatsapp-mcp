@@ -43,13 +43,14 @@ from whatsapp import (
 mcp = FastMCP("whatsapp")
 
 @mcp.tool()
-def search_contacts(query: str) -> List[Dict[str, Any]]:
+def search_contacts(query: str, account: Optional[str] = None) -> List[Dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
-    
+
     Args:
         query: Search term to match against contact names or phone numbers
+        account: Optional account alias to use (defaults to primary account)
     """
-    contacts = whatsapp_search_contacts(query)
+    contacts = whatsapp_search_contacts(query, account=account)
     return contacts
 
 @mcp.tool()
@@ -63,10 +64,11 @@ def list_messages(
     page: int = 0,
     include_context: bool = True,
     context_before: int = 1,
-    context_after: int = 1
-) -> List[Dict[str, Any]]:
+    context_after: int = 1,
+    account: Optional[str] = None
+) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
-    
+
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
@@ -78,6 +80,7 @@ def list_messages(
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
+        account: Optional account alias to use (defaults to primary account)
     """
     messages = whatsapp_list_messages(
         after=after,
@@ -89,7 +92,8 @@ def list_messages(
         page=page,
         include_context=include_context,
         context_before=context_before,
-        context_after=context_after
+        context_after=context_after,
+        account=account
     )
     return messages
 
@@ -99,89 +103,99 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    account: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
-    
+
     Args:
         query: Optional search term to filter chats by name or JID
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        account: Optional account alias to use (defaults to primary account)
     """
     chats = whatsapp_list_chats(
         query=query,
         limit=limit,
         page=page,
         include_last_message=include_last_message,
-        sort_by=sort_by
+        sort_by=sort_by,
+        account=account
     )
     return chats
 
 @mcp.tool()
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
+def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional[str] = None) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
-    
+
     Args:
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
+        account: Optional account alias to use (defaults to primary account)
     """
-    chat = whatsapp_get_chat(chat_jid, include_last_message)
+    chat = whatsapp_get_chat(chat_jid, include_last_message, account=account)
     return chat
 
 @mcp.tool()
-def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
+def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
-    
+
     Args:
         sender_phone_number: The phone number to search for
+        account: Optional account alias to use (defaults to primary account)
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
+    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number, account=account)
     return chat
 
 @mcp.tool()
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
+def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optional[str] = None) -> List[Dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
-    
+
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
+        account: Optional account alias to use (defaults to primary account)
     """
-    chats = whatsapp_get_contact_chats(jid, limit, page)
+    chats = whatsapp_get_contact_chats(jid, limit, page, account=account)
     return chats
 
 @mcp.tool()
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
     """Get most recent WhatsApp message involving the contact.
-    
+
     Args:
         jid: The JID of the contact to search for
+        account: Optional account alias to use (defaults to primary account)
     """
-    message = whatsapp_get_last_interaction(jid)
+    message = whatsapp_get_last_interaction(jid, account=account)
     return message
 
 @mcp.tool()
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Get context around a specific WhatsApp message.
-    
+
     Args:
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        account: Optional account alias to use (defaults to primary account)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    context = whatsapp_get_message_context(message_id, before, after, account=account)
     return context
 
 @mcp.tool()
 def send_message(
     recipient: str,
-    message: str
+    message: str,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -189,7 +203,8 @@ def send_message(
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
-    
+        account: Optional account alias to use (defaults to primary account)
+
     Returns:
         A dictionary containing success status and a status message
     """
@@ -199,64 +214,67 @@ def send_message(
             "success": False,
             "message": "Recipient must be provided"
         }
-    
+
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    success, status_message = whatsapp_send_message(recipient, message, account=account)
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
-    
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the media file to send (image, video, document)
-    
+        account: Optional account alias to use (defaults to primary account)
+
     Returns:
         A dictionary containing success status and a status message
     """
-    
+
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
+    success, status_message = whatsapp_send_file(recipient, media_path, account=account)
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_audio_message(recipient: str, media_path: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
-    
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
-    
+        account: Optional account alias to use (defaults to primary account)
+
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    success, status_message = whatsapp_audio_voice_message(recipient, media_path, account=account)
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
+def download_media(message_id: str, chat_jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
-    
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
-    
+        account: Optional account alias to use (defaults to primary account)
+
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
     """
-    file_path, status_message = whatsapp_download_media(message_id, chat_jid)
+    file_path, status_message = whatsapp_download_media(message_id, chat_jid, account=account)
 
     if file_path:
         return {
@@ -278,6 +296,7 @@ def create_group(
     participants: List[str],
     is_community: bool = False,
     community_parent_jid: str = "",
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a new WhatsApp group.
 
@@ -287,6 +306,7 @@ def create_group(
                       Your own number is added automatically.
         is_community: If True, create a community parent instead of a normal group
         community_parent_jid: If set, create as a sub-group inside this community
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         Dict with: success (bool), message (str), and on success: jid, name, participant_count.
@@ -296,6 +316,7 @@ def create_group(
         participants=participants,
         is_community=is_community,
         community_parent_jid=community_parent_jid,
+        account=account
     )
     response: Dict[str, Any] = {"success": success, "message": message}
     if success and details:
@@ -304,17 +325,18 @@ def create_group(
 
 
 @mcp.tool()
-def leave_group(jid: str) -> Dict[str, Any]:
+def leave_group(jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Leave a WhatsApp group. Note: WhatsApp has no 'delete group' — leaving is
     the closest action.
 
     Args:
         jid: The group JID (must end with @g.us)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         Dict with success (bool) and message (str).
     """
-    success, message = whatsapp_leave_group(jid)
+    success, message = whatsapp_leave_group(jid, account=account)
     return {"success": success, "message": message}
 
 
@@ -323,7 +345,8 @@ def mark_chat_as_read(
     chat_jid: str,
     message_ids: List[str],
     sender_jid: Optional[str] = None,
-    timestamp: Optional[int] = None
+    timestamp: Optional[int] = None,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Mark a WhatsApp chat as read by sending read receipts for the given messages.
 
@@ -332,33 +355,37 @@ def mark_chat_as_read(
         message_ids: List of message IDs to mark as read
         sender_jid: Optional sender JID (required for group messages)
         timestamp: Optional Unix timestamp in seconds; defaults to now
+        account: Optional account alias to use (defaults to primary account)
     """
     success, message = whatsapp_mark_chat_read(
         chat_jid,
         message_ids,
         sender_jid=sender_jid or "",
         timestamp=timestamp or 0,
+        account=account
     )
     return {"success": success, "message": message}
 
 
 @mcp.tool()
-def mark_chat_as_unread(chat_jid: str) -> Dict[str, Any]:
+def mark_chat_as_unread(chat_jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Mark a WhatsApp chat as unread (app-state sync — affects WhatsApp app badge).
 
     Args:
         chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message = whatsapp_mark_chat_unread(chat_jid)
+    success, message = whatsapp_mark_chat_unread(chat_jid, account=account)
     return {"success": success, "message": message}
 
 
 @mcp.tool()
-def get_group_info(jid: str) -> Dict[str, Any]:
+def get_group_info(jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Get a WhatsApp group's name, topic, participant list and admin-only flags.
 
     Args:
         jid: The group JID (e.g. 120363012345678901@g.us)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {"success", "message", "name", "topic", "participants",
@@ -369,7 +396,7 @@ def get_group_info(jid: str) -> Dict[str, Any]:
     get_group_invite_info cannot be used for that — the invite-link response
     carries no locked/announce data, so it always reports both as false.
     """
-    success, message, info = whatsapp_get_group_info(jid)
+    success, message, info = whatsapp_get_group_info(jid, account=account)
     result: Dict[str, Any] = {"success": success, "message": message}
     if info:
         result.update(info)
@@ -377,25 +404,27 @@ def get_group_info(jid: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def archive_chat(chat_jid: str, archive: bool = True) -> Dict[str, Any]:
+def archive_chat(chat_jid: str, archive: bool = True, account: Optional[str] = None) -> Dict[str, Any]:
     """Archive or unarchive a WhatsApp chat (app-state sync — affects WhatsApp app).
 
     Args:
         chat_jid: The JID of the chat (e.g. 5511999999999@s.whatsapp.net or group@g.us)
         archive: True to archive, False to unarchive
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message = whatsapp_archive_chat(chat_jid, archive)
+    success, message = whatsapp_archive_chat(chat_jid, archive, account=account)
     return {"success": success, "message": message}
 
 
 @mcp.tool()
-def resolve_contact(phone: str) -> Dict[str, Any]:
+def resolve_contact(phone: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Resolve a phone number to its WhatsApp JIDs (regular + LID, if any).
 
     Args:
         phone: Phone number to resolve (e.g. 5511999999999)
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message, jids = whatsapp_resolve_contact(phone)
+    success, message, jids = whatsapp_resolve_contact(phone, account=account)
     return {"success": success, "message": message, "jids": jids}
 
 
@@ -404,7 +433,8 @@ def react_to_message(
     chat_jid: str,
     message_id: str,
     emoji: str,
-    from_me: bool = True
+    from_me: bool = True,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """React to a WhatsApp message with an emoji.
 
@@ -417,8 +447,9 @@ def react_to_message(
         from_me: Whether the target message was sent by you (defaults True, your own
             message). Setting from_me=False works only in direct chats; in group
             chats it returns an error because the original sender's JID isn't available.
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message = whatsapp_react_to_message(chat_jid, message_id, emoji, from_me=from_me)
+    success, message = whatsapp_react_to_message(chat_jid, message_id, emoji, from_me=from_me, account=account)
     return {"success": success, "message": message}
 
 
@@ -427,7 +458,8 @@ def edit_message(
     chat_jid: str,
     message_id: str,
     new_text: str,
-    from_me: bool = True
+    from_me: bool = True,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Edit the text of a previously sent WhatsApp message.
 
@@ -438,8 +470,9 @@ def edit_message(
         from_me: Accepted for API symmetry with react_to_message/delete_message but
             ignored — WhatsApp only allows editing your own messages, and the bridge
             never reads this param for /api/edit.
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message = whatsapp_edit_message(chat_jid, message_id, new_text, from_me=from_me)
+    success, message = whatsapp_edit_message(chat_jid, message_id, new_text, from_me=from_me, account=account)
     return {"success": success, "message": message}
 
 
@@ -447,7 +480,8 @@ def edit_message(
 def delete_message(
     chat_jid: str,
     message_id: str,
-    from_me: bool = True
+    from_me: bool = True,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Delete a WhatsApp message for everyone (revoke).
 
@@ -457,8 +491,9 @@ def delete_message(
         from_me: Whether the target message was sent by you (defaults True, your own
             message). Setting from_me=False works only in direct chats; in group
             chats it returns an error because the original sender's JID isn't available.
+        account: Optional account alias to use (defaults to primary account)
     """
-    success, message = whatsapp_delete_message(chat_jid, message_id, from_me=from_me)
+    success, message = whatsapp_delete_message(chat_jid, message_id, from_me=from_me, account=account)
     return {"success": success, "message": message}
 
 
@@ -466,7 +501,8 @@ def delete_message(
 def update_group_participants(
     group_jid: str,
     participants: List[str],
-    action: str
+    action: str,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Update WhatsApp group participants (add/remove/promote/demote).
 
@@ -477,6 +513,7 @@ def update_group_participants(
         action: The action to perform: "add" (invite), "remove" (remove from group),
             "promote" (make admin), or "demote" (remove admin). Requires you to be a
             group admin for most actions.
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -490,7 +527,7 @@ def update_group_participants(
     and the target has privacy settings blocking group invites — the invitation becomes pending.
     """
     success, message, participants = whatsapp_update_group_participants(
-        group_jid, participants, action
+        group_jid, participants, action, account=account
     )
     return {
         "success": success,
@@ -503,7 +540,8 @@ def update_group_participants(
 def send_chat_presence(
     chat_jid: str,
     state: str,
-    media: str = ""
+    media: str = "",
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Send typing or recording indicator in a WhatsApp chat (ephemeral, no persistence).
 
@@ -511,6 +549,7 @@ def send_chat_presence(
         chat_jid: The JID of the chat (direct or group)
         state: "composing" (typing indicator) or "paused" (stopped typing)
         media: "" (text, default) or "audio" (recording indicator)
+        account: Optional account alias to use (defaults to primary account)
 
     Guidance:
         - Send "composing" before replying to show the recipient you're typing.
@@ -518,18 +557,19 @@ def send_chat_presence(
         - If you send "composing" for "audio", the recipient sees a recording indicator.
         - The indicator is ephemeral and not stored in the chat history.
     """
-    success, message = whatsapp_send_chat_presence(chat_jid, state, media)
+    success, message = whatsapp_send_chat_presence(chat_jid, state, media, account=account)
     return {"success": success, "message": message}
 
 
 @mcp.tool()
-def check_whatsapp(phones: List[str]) -> Dict[str, Any]:
+def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Dict[str, Any]:
     """Check if phone numbers are registered on WhatsApp.
 
     Args:
         phones: List of phone numbers to check (international format, with or without +).
             Digits only after normalization (8-15 digits); max 50 numbers per call.
             Small batches recommended to avoid rate-limiting.
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -552,7 +592,7 @@ def check_whatsapp(phones: List[str]) -> Dict[str, Any]:
         - Business accounts include a verified_name field (company or brand name).
         - Use small batches and avoid mass scanning to prevent rate-limiting or account restrictions.
     """
-    success, message, results = whatsapp_check_whatsapp(phones)
+    success, message, results = whatsapp_check_whatsapp(phones, account=account)
     return {
         "success": success,
         "message": message,
@@ -563,28 +603,30 @@ def check_whatsapp(phones: List[str]) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def get_group_invite_link(group_jid: str, reset: bool = False) -> Dict[str, Any]:
+def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional[str] = None) -> Dict[str, Any]:
     """Get invite link for a WhatsApp group.
 
     Args:
         group_jid: The JID of the group (must end with @g.us)
         reset: If True, revoke the old link; anyone with it loses access
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {"success": bool, "message": str, "link": str}
 
     Note: reset=True revokes the old link; anyone with it loses access.
     """
-    success, message, link = whatsapp_get_group_invite_link(group_jid, reset)
+    success, message, link = whatsapp_get_group_invite_link(group_jid, reset, account=account)
     return {"success": success, "message": message, "link": link}
 
 
 @mcp.tool()
-def get_group_invite_info(link: str) -> Dict[str, Any]:
+def get_group_invite_info(link: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Get group information from an invite link.
 
     Args:
         link: The group invite link (full URL or code only)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -602,7 +644,7 @@ def get_group_invite_info(link: str) -> Dict[str, Any]:
     Note: No locked/announce data here — WhatsApp does not include those flags
     in an invite-link lookup. Read them with get_group_info instead.
     """
-    success, message, info = whatsapp_get_group_invite_info(link)
+    success, message, info = whatsapp_get_group_invite_info(link, account=account)
     result = {"success": success, "message": message}
     if info:
         result.update(info)
@@ -610,11 +652,12 @@ def get_group_invite_info(link: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def join_group_with_link(link: str) -> Dict[str, Any]:
+def join_group_with_link(link: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Join a WhatsApp group using an invite link.
 
     Args:
         link: The group invite link (full URL or code only)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {"success": bool, "message": str, "jid"?: str}
@@ -622,7 +665,7 @@ def join_group_with_link(link: str) -> Dict[str, Any]:
     Note: This actually joins. If the group requires admin approval, the call
     succeeds as a pending membership request rather than immediate membership.
     """
-    success, message, jid = whatsapp_join_group_with_link(link)
+    success, message, jid = whatsapp_join_group_with_link(link, account=account)
     return {"success": success, "message": message, "jid": jid}
 
 
@@ -632,7 +675,8 @@ def update_group_settings(
     name: Optional[str] = None,
     topic: Optional[str] = None,
     announce: Optional[bool] = None,
-    locked: Optional[bool] = None
+    locked: Optional[bool] = None,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Update WhatsApp group settings.
 
@@ -642,6 +686,7 @@ def update_group_settings(
         topic: New group topic (or None to skip; "" to clear)
         announce: True=only admins post, False=everyone posts (or None to skip)
         locked: True=closed group, False=open (or None to skip)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -655,18 +700,19 @@ def update_group_settings(
     field may fail (e.g. not an admin) while the others apply, so check
     results[] rather than success alone. Most fields require you to be admin.
     """
-    success, message, results = whatsapp_update_group_settings(group_jid, name, topic, announce, locked)
+    success, message, results = whatsapp_update_group_settings(group_jid, name, topic, announce, locked, account=account)
     return {"success": success, "message": message, "results": results}
 
 
 @mcp.tool()
-def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) -> Dict[str, Any]:
+def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False, account: Optional[str] = None) -> Dict[str, Any]:
     """Set or remove the group profile photo.
 
     Args:
         group_jid: The JID of the group (must end with @g.us)
         media_path: Path to JPEG file on bridge host (ignored if remove=True)
         remove: If True, remove the current photo
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {"success": bool, "message": str, "picture_id"?: str}
@@ -675,16 +721,17 @@ def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) 
     bridge's host filesystem, not the caller's. JPEG only. remove=True clears
     the photo and ignores media_path.
     """
-    success, message, picture_id = whatsapp_set_group_photo(group_jid, media_path, remove)
+    success, message, picture_id = whatsapp_set_group_photo(group_jid, media_path, remove, account=account)
     return {"success": success, "message": message, "picture_id": picture_id}
 
 
 @mcp.tool()
-def get_user_info(jids: List[str]) -> Dict[str, Any]:
+def get_user_info(jids: List[str], account: Optional[str] = None) -> Dict[str, Any]:
     """Get user information for one or more WhatsApp users.
 
     Args:
         jids: List of JIDs or phone numbers (max 20 per call)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -713,17 +760,18 @@ def get_user_info(jids: List[str]) -> Dict[str, Any]:
     number actually has WhatsApp, use check_whatsapp, which answers that
     directly. Observed behavior, not inferred.
     """
-    success, message, results = whatsapp_get_user_info(jids)
+    success, message, results = whatsapp_get_user_info(jids, account=account)
     return {"success": success, "message": message, "results": results}
 
 
 @mcp.tool()
-def get_profile_picture(jid: str, preview: bool = False) -> Dict[str, Any]:
+def get_profile_picture(jid: str, preview: bool = False, account: Optional[str] = None) -> Dict[str, Any]:
     """Get profile picture information for a user or group.
 
     Args:
         jid: JID of user or group
         preview: If True, get a smaller preview image
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -735,10 +783,10 @@ def get_profile_picture(jid: str, preview: bool = False) -> Dict[str, Any]:
             "direct_path"?: str
         }
 
-    Note: Returns URL for download, not the image; success=false is normal when 
+    Note: Returns URL for download, not the image; success=false is normal when
     no photo or hidden by privacy; accepts group JID.
     """
-    success, message, info = whatsapp_get_profile_picture(jid, preview)
+    success, message, info = whatsapp_get_profile_picture(jid, preview, account=account)
     result = {"success": success, "message": message}
     if info:
         result.update(info)
@@ -750,7 +798,8 @@ def create_poll(
     chat_jid: str,
     question: str,
     options: List[str],
-    selectable_count: int = 1
+    selectable_count: int = 1,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a poll in a chat.
 
@@ -760,6 +809,7 @@ def create_poll(
         options: List of poll options (must be 2–12 unique, non-empty option names)
         selectable_count: Number of options the voter can select (must be between 1
             and the number of options; default 1)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -769,7 +819,7 @@ def create_poll(
         }
     """
     success, message, message_id = whatsapp_create_poll(
-        chat_jid, question, options, selectable_count
+        chat_jid, question, options, selectable_count, account=account
     )
     return {
         "success": success,
@@ -782,7 +832,8 @@ def create_poll(
 def vote_in_poll(
     chat_jid: str,
     poll_id: str,
-    options: List[str]
+    options: List[str],
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Vote in a poll.
 
@@ -790,6 +841,7 @@ def vote_in_poll(
         chat_jid: The JID of the chat containing the poll
         poll_id: The id of the poll message (from create_poll's message_id)
         options: List of selected option names. Pass an empty list to remove your vote.
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -797,7 +849,7 @@ def vote_in_poll(
             "message": str
         }
     """
-    success, message = whatsapp_vote_in_poll(chat_jid, poll_id, options)
+    success, message = whatsapp_vote_in_poll(chat_jid, poll_id, options, account=account)
     return {
         "success": success,
         "message": message,
@@ -807,13 +859,15 @@ def vote_in_poll(
 @mcp.tool()
 def get_poll_results(
     chat_jid: str,
-    poll_id: str
+    poll_id: str,
+    account: Optional[str] = None
 ) -> Dict[str, Any]:
     """Get poll results.
 
     Args:
         chat_jid: The JID of the chat containing the poll
         poll_id: The id of the poll message (from create_poll's message_id)
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -833,7 +887,7 @@ def get_poll_results(
     tally. unresolved_votes > 0 means votes from polls whose option names this bridge
     does not know.
     """
-    success, message, results = whatsapp_get_poll_results(chat_jid, poll_id)
+    success, message, results = whatsapp_get_poll_results(chat_jid, poll_id, account=account)
     response = {
         "success": success,
         "message": message,
@@ -844,7 +898,7 @@ def get_poll_results(
 
 
 @mcp.tool()
-def get_bridge_status() -> Dict[str, Any]:
+def get_bridge_status(account: Optional[str] = None) -> Dict[str, Any]:
     """Get WhatsApp bridge health status.
 
     Returns the bridge connection state (connected/logged_in) and automatically
@@ -854,6 +908,9 @@ def get_bridge_status() -> Dict[str, Any]:
     scan the QR code at /qr — reconnecting won't help. If the bridge is
     unreachable (transport error), that's a different problem: the process is down,
     not recoverable via API.
+
+    Args:
+        account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {
@@ -875,7 +932,7 @@ def get_bridge_status() -> Dict[str, Any]:
             }
         }
     """
-    healthy, reason, status = whatsapp_get_bridge_status()
+    healthy, reason, status = whatsapp_get_bridge_status(account=account)
     if status is None:
         return {
             "success": False,
