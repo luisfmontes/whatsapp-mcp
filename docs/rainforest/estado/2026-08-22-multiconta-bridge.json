@@ -22,11 +22,11 @@
   },
   "executar": {
     "status": "parcial",
-    "tarefas_ok": 4,
+    "tarefas_ok": 5,
     "tarefas": 8,
     "pendentes": [
-      "tarefa-2: teste nao prova roteamento, devolvida",
-      "tarefa-2 escreveu fora do worktree; principal restaurado"
+      "6 despachada",
+      "7 e 8 aguardando"
     ],
     "em": "2026-08-22"
   },
