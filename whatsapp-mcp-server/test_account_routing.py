@@ -14,12 +14,17 @@ import sqlite3
 import signal
 import sys
 import tempfile
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import accounts
 import whatsapp
+
+# Configure logging for this test module
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.WARNING)
 
 
 @pytest.fixture
@@ -41,29 +46,41 @@ def bridge_dirs():
 
 @pytest.fixture
 def bridge_processes(bridge_dirs):
-    """Start two real bridge processes and insert test data."""
+    """Start two real bridge processes and insert test data.
+
+    Builds the whatsapp-bridge binary if needed and starts two instances
+    on different ports (3097, 3098), each with a temporary directory and
+    distinct test data.
+    """
     procs = {}
     ports = {'trabalho': 3097, 'pessoal': 3098}
 
-    # Try to find or build the bridge binary
+    # Find or build the bridge binary
     binary = Path(tempfile.gettempdir()) / 'wa.exe'
-    if not binary.exists():
-        try:
-            # Try building in Windows native path
-            subprocess.run(
-                'go build -o ' + str(binary),
-                shell=True,
-                cwd='..\\..',
-                timeout=120,
-                capture_output=True
-            )
-        except:
-            pytest.skip("Could not build whatsapp-bridge binary")
-            return {}
+    bridge_src = Path(__file__).parent.parent / 'whatsapp-bridge'
 
     if not binary.exists():
-        pytest.skip("whatsapp-bridge binary not available")
-        return {}
+        # Build the binary with CGO_ENABLED=0
+        build_env = os.environ.copy()
+        build_env['CGO_ENABLED'] = '0'
+
+        result = subprocess.run(
+            ['go', 'build', '-o', str(binary)],
+            cwd=str(bridge_src),
+            env=build_env,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to build whatsapp-bridge binary:\n"
+                f"stdout: {result.stdout}\n"
+                f"stderr: {result.stderr}"
+            )
+
+    if not binary.exists():
+        raise RuntimeError(f"Bridge binary not found at {binary} after build")
 
     # Start bridge processes
     for acct, port in ports.items():
@@ -72,24 +89,29 @@ def bridge_processes(bridge_dirs):
         env['WHATSAPP_BRIDGE_PORT'] = str(port)
         env['WHATSAPP_ACCOUNT'] = acct
 
-        try:
-            proc = subprocess.Popen(
-                [str(binary)],
-                cwd=tmpdir,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            procs[acct] = proc
-            time.sleep(1)  # Give process time to create database
-        except Exception as e:
-            pytest.skip(f"Could not start bridge: {e}")
-            return {}
+        # Remove WHATSAPP_ACCOUNTS_FILE to ensure clean state
+        env.pop('WHATSAPP_ACCOUNTS_FILE', None)
+
+        proc = subprocess.Popen(
+            [str(binary)],
+            cwd=tmpdir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        procs[acct] = proc
+        time.sleep(1.5)  # Give process time to create database and listen
 
     # Insert test data into each bridge's database
     for acct, port in ports.items():
         tmpdir = bridge_dirs[acct]
         db_path = Path(tmpdir) / 'store' / 'messages.db'
+
+        # Wait a bit more for the database to be created
+        max_wait = 10
+        while not db_path.exists() and max_wait > 0:
+            time.sleep(0.5)
+            max_wait -= 1
 
         if db_path.exists():
             try:
@@ -97,7 +119,7 @@ def bridge_processes(bridge_dirs):
                 cursor = conn.cursor()
                 # Insert a test chat that only exists in this bridge
                 # Use account-specific JID to make it unique
-                test_jid = '5511000' + str(port) + '@s.whatsapp.net'
+                test_jid = f'551100{port}@s.whatsapp.net'
                 test_name = f'CHAT-{acct.upper()}'
                 cursor.execute(
                     'INSERT OR REPLACE INTO chats (jid, name, timestamp) VALUES (?, ?, ?)',
@@ -106,8 +128,7 @@ def bridge_processes(bridge_dirs):
                 conn.commit()
                 conn.close()
             except Exception as e:
-                # Database might not be ready yet, skip
-                pass
+                logger.warning(f"Failed to insert test data for {acct}: {e}")
 
     yield procs
 
@@ -135,8 +156,8 @@ def test_account_routing_with_real_bridges(bridge_processes, bridge_dirs, tmp_pa
     If the routing is broken, the HTTP requests would go to the wrong port
     and retrieve wrong or no data.
     """
-    if not bridge_processes:
-        pytest.skip("Bridge processes not available")
+    # bridge_processes fixture ensures bridges are running; if not, it raises RuntimeError
+    assert bridge_processes, "bridge_processes fixture should have started bridges"
 
     # Create accounts.json pointing to the test bridges
     accounts_file = tmp_path / "accounts.json"
@@ -199,6 +220,11 @@ def test_write_op_guard_without_account_with_multiple_accounts(tmp_path):
 
     This verifies D2 from design: "Escrita sem account com mais de uma conta é erro,
     retornando mensagem antes de qualquer HTTP."
+
+    The error message must:
+    1. Be raised BEFORE any HTTP request (proving it's a guard, not a runtime error)
+    2. Name both configured accounts
+    3. Mention 'account' to guide the user
     """
     # Create accounts.json with two accounts
     accounts_file = tmp_path / "accounts.json"
@@ -215,13 +241,20 @@ def test_write_op_guard_without_account_with_multiple_accounts(tmp_path):
     os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
 
     try:
-        # Try write operation without account
-        success, msg = whatsapp.send_message("55111234567@s.whatsapp.net", "test", account=None)
+        # Try write operation without account — should raise ValueError
+        # (not fail with False status after HTTP request)
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.send_message("55111234567@s.whatsapp.net", "test", account=None)
 
-        # Should fail with helpful error message
-        assert not success, "send_message without account should fail with multiple accounts"
-        assert any(word in msg for word in ['trabalho', 'pessoal', 'account', 'Account']), \
-            f"Error message should mention account options, got: {msg}"
+        error_msg = str(exc_info.value)
+
+        # Error must mention the configured accounts
+        assert 'trabalho' in error_msg and 'pessoal' in error_msg, \
+            f"Error should mention both accounts, got: {error_msg}"
+
+        # Error must guide toward using account parameter
+        assert 'account' in error_msg.lower(), \
+            f"Error should mention 'account' parameter, got: {error_msg}"
 
     finally:
         if old_env is None:
