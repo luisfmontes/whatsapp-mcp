@@ -22,8 +22,8 @@
     "emenda": "tarefa 10 acrescentada apos pergunta do usuario no fecho"
   },
   "executar": {
-    "status": "parcial",
-    "tarefas_ok": 9,
+    "status": "ok",
+    "tarefas_ok": 10,
     "tarefas": 10,
     "pendentes": [
       "tarefa-10: o QR nao identifica a conta"
