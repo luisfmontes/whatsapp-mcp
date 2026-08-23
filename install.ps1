@@ -24,7 +24,9 @@ param(
     # one carrying Windows support; a local path works too (useful for
     # testing this script against a working copy).
     [string]$RepoUrl = 'https://github.com/luisfmontes/whatsapp-mcp.git',
-    [string]$Branch
+    [string]$Branch,
+    # Add a new account (requires existing install at InstallDir).
+    [string]$AddAccount
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,12 +88,218 @@ function Test-PortExcluded {
     return $false
 }
 
+# Find a free port starting from a given candidate, skipping reserved ranges and already-used ports.
+function Find-FreePort {
+    param([int]$StartPort, [PSCustomObject]$AccountsMap)
+
+    # Collect already-used ports from accounts map
+    $usedPorts = @()
+    if ($AccountsMap -and $AccountsMap.accounts) {
+        foreach ($account in $AccountsMap.accounts.PSObject.Properties) {
+            if ($account.Value.port) {
+                $usedPorts += $account.Value.port
+            }
+        }
+    }
+
+    # Search for a free port
+    for ($port = $StartPort; $port -lt ($StartPort + 100); $port++) {
+        if (-not (Test-PortExcluded -Port $port) -and $usedPorts -notcontains $port) {
+            return $port
+        }
+    }
+    return 0
+}
+
+# Load or create the accounts.json map. Returns null if file does not exist.
+function Load-AccountsMap {
+    param([string]$AccountsPath)
+    if (Test-Path $AccountsPath) {
+        try {
+            $content = Get-Content -Path $AccountsPath -Raw -Encoding UTF8
+            return $content | ConvertFrom-Json
+        }
+        catch {
+            Exit-WithError "Cannot parse accounts.json at $AccountsPath : $_"
+        }
+    }
+    return $null
+}
+
+# Save accounts map to JSON without BOM.
+function Save-AccountsMap {
+    param([string]$AccountsPath, [PSCustomObject]$Map)
+    $json = $Map | ConvertTo-Json -Depth 5 -Compress
+    Write-TextNoBom -Path $AccountsPath -Content $json
+}
+
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=======================================" -ForegroundColor Green
 Write-Host "    WhatsApp MCP  -  Installer" -ForegroundColor Green
 Write-Host "=======================================" -ForegroundColor Green
 Write-Host ""
+
+# ---------------------------------------------------------------------------
+# AddAccount mode (add a new account to an existing install)
+# ---------------------------------------------------------------------------
+if ($AddAccount) {
+    if (-not (Test-Path $InstallDir)) {
+        Exit-WithError "InstallDir '$InstallDir' does not exist. Create an install first with: powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir <path>"
+    }
+
+    Write-Host ""
+    Write-Info "Adding account '$AddAccount' to install at $InstallDir"
+
+    # Ensure accounts directory exists
+    $accountsDir = Join-Path $InstallDir "accounts"
+    $null = New-Item -ItemType Directory -Path $accountsDir -Force
+
+    # Create account directory and store subdirectory
+    $accountDir = Join-Path $accountsDir $AddAccount
+    $storeDir = Join-Path $accountDir "store"
+    if (Test-Path $accountDir) {
+        Exit-WithError "Account '$AddAccount' already exists at $accountDir"
+    }
+    $null = New-Item -ItemType Directory -Path $storeDir -Force
+    Write-Ok "Account directory: $accountDir"
+
+    # Load or initialize accounts map first (to check already-used ports)
+    $accountsJsonPath = Join-Path $InstallDir "accounts.json"
+    $accountsMap = Load-AccountsMap -AccountsPath $accountsJsonPath
+
+    # Find a free port for this account (start from 3006 for second account)
+    $startPort = 3006
+    $port = Find-FreePort -StartPort $startPort -AccountsMap $accountsMap
+    if ($port -eq 0) {
+        Exit-WithError "Could not find a free port starting from $startPort"
+    }
+    Write-Ok "Account port: $port"
+    if ($null -eq $accountsMap) {
+        # First time: create structure with default account from current install
+        $accountsMap = [PSCustomObject]@{
+            default = "pessoal"
+            accounts = @{
+                pessoal = [PSCustomObject]@{
+                    dir = $InstallDir
+                    port = 3005
+                    jid = $null
+                }
+            }
+        }
+    }
+
+    # Check if account already exists in map
+    if ($accountsMap.accounts.$AddAccount) {
+        Exit-WithError "Account '$AddAccount' already exists in accounts.json"
+    }
+
+    # Add new account to map (convert to PSCustomObject for JSON serialization)
+    $newAccount = [PSCustomObject]@{
+        dir = $accountDir
+        port = $port
+        jid = $null
+    }
+
+    # Handle both PSCustomObject (has .accounts as object) and hashtable cases
+    if ($accountsMap.accounts -is [System.Collections.Hashtable]) {
+        $accountsMap.accounts[$AddAccount] = $newAccount
+    } else {
+        $accountsMap.accounts | Add-Member -NotePropertyName $AddAccount -NotePropertyValue $newAccount
+    }
+
+    # Save accounts map
+    Save-AccountsMap -AccountsPath $accountsJsonPath -Map $accountsMap
+    Write-Ok "accounts.json updated"
+
+    # Generate launcher script for this account
+    $launchScript = Join-Path $accountDir "start-bridge.ps1"
+    $transcriptionEnvPath = Join-Path $InstallDir "transcription.env"
+    $bridgeLogPath = Join-Path $accountDir "bridge.log"
+
+    $launchScriptContent = @"
+# Starts the WhatsApp MCP bridge for account '$AddAccount'. Generated by install.ps1.
+# ASCII-only on purpose (see install.ps1).
+
+`$BridgeDir = '$InstallDir\whatsapp-bridge'
+`$BridgeLog = '$bridgeLogPath'
+`$EnvFile   = '$transcriptionEnvPath'
+
+Set-Location `$BridgeDir
+
+# Load transcription config from shared location (see install.ps1 for details).
+if (Test-Path `$EnvFile) {
+    foreach (`$line in Get-Content `$EnvFile) {
+        `$entry = `$line.Trim()
+        if (`$entry -and -not `$entry.StartsWith('#')) {
+            `$entry = `$entry -replace '^export\s+', ''
+            `$kv = `$entry -split '=', 2
+            if (`$kv.Count -eq 2) {
+                `$value = `$kv[1].Trim()
+                if (`$value.Length -ge 2) {
+                    if ((`$value.StartsWith('"') -and `$value.EndsWith('"')) -or (`$value.StartsWith("'") -and `$value.EndsWith("'"))) {
+                        `$value = `$value.Substring(1, `$value.Length - 2)
+                    }
+                }
+                [Environment]::SetEnvironmentVariable(`$kv[0].Trim(), `$value, 'Process')
+            }
+        }
+    }
+}
+
+`$env:WHATSAPP_ACCOUNT = '$AddAccount'
+`$env:WHATSAPP_BRIDGE_PORT = '$port'
+`$env:WHATSAPP_BRIDGE_LOG = `$BridgeLog
+
+& '.\whatsapp-bridge.exe' *>> `$BridgeLog
+"@
+    Set-Content -Path $launchScript -Value $launchScriptContent -Encoding Ascii
+    Write-Ok "Launch script: $launchScript"
+
+    # Generate hidden launcher for Task Scheduler
+    $launchScriptHidden = Join-Path $accountDir "start-bridge-hidden.vbs"
+    $vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$launchScript""", 0, False
+"@
+    Set-Content -Path $launchScriptHidden -Value $vbsContent -Encoding Ascii
+    Write-Ok "Hidden launcher: $launchScriptHidden"
+
+    # Print task registration command (or register if -Service)
+    Write-Host ""
+    $taskName = "WhatsAppMCPBridge-$AddAccount"
+    $taskCommandLine = "wscript.exe ""$launchScriptHidden"""
+
+    if ($Service) {
+        Write-Info "Registering auto-start task..."
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$launchScriptHidden`""
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1))
+        Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Settings $settings -User $env:USERNAME -RunLevel Limited | Out-Null
+        Write-Ok "Task registered: $taskName"
+    } else {
+        Write-Info "Task Scheduler command (use -Service to register automatically):"
+        Write-Host ""
+        Write-Host "  Register-ScheduledTask -TaskName '$taskName' -Trigger (New-ScheduledTaskTrigger -AtLogOn -User `$env:USERNAME) -Action (New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '$taskCommandLine') -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1))) -User `$env:USERNAME -RunLevel Limited" -ForegroundColor Cyan
+        Write-Host ""
+    }
+
+    Write-Host ""
+    Write-Host "=======================================" -ForegroundColor Green
+    Write-Host "  Account '$AddAccount' created" -ForegroundColor Green
+    Write-Host "=======================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Next steps:" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  1. Start the bridge:" -ForegroundColor Green
+    Write-Host "     powershell -ExecutionPolicy Bypass -File $launchScript" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  2. Open this in your browser and scan the QR code with your phone:" -ForegroundColor Green
+    Write-Host "     http://localhost:$port/qr" -ForegroundColor Cyan
+    Write-Host ""
+
+    exit 0
+}
 
 # ---------------------------------------------------------------------------
 # Port
