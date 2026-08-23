@@ -43,3 +43,10 @@ start-bridge-hidden.vbs
 # proprio clone. As entradas antigas so cobriam whatsapp-bridge/.
 bridge.log
 bridge.err.log
+
+# Mapa de contas e o store de cada conta da multiconta. O accounts.json tem
+# caminhos e portas da maquina; accounts/<apelido>/store/ tem a sessao do
+# WhatsApp e as mensagens daquela conta. Nada disso e conteudo do repositorio,
+# e aqui a instalacao vive dentro do proprio clone.
+accounts.json
+accounts/
