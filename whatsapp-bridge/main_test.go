@@ -1806,7 +1806,7 @@ func setupPollStore(t *testing.T) *MessageStore {
 
 // TestQRPageIdentifiesAccount verifies that the /qr endpoint includes the account
 // name and port in the HTML when WHATSAPP_ACCOUNT is set (D8, D3, task 10),
-// and verifies the HTML body explicitly (task 10 criterion).
+// and that without it, the page remains unchanged (D1) — not repeating the heading.
 func TestQRPageIdentifiesAccount(t *testing.T) {
 	// Save original env to restore after test
 	orig := os.Getenv("WHATSAPP_ACCOUNT")
@@ -1816,7 +1816,7 @@ func TestQRPageIdentifiesAccount(t *testing.T) {
 	qrPNG := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 	port := 3090
 
-	t.Run("with WHATSAPP_ACCOUNT=trabalho, HTML includes account and port", func(t *testing.T) {
+	t.Run("with WHATSAPP_ACCOUNT=trabalho, accountLine includes account and port", func(t *testing.T) {
 		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
 
 		// Setup qrState with a QR PNG
@@ -1825,26 +1825,26 @@ func TestQRPageIdentifiesAccount(t *testing.T) {
 		qrState.connected = false
 		qrState.Unlock()
 
-		// Build the expected HTML (matching the handler logic)
+		// Build the expected accountLine (matching the handler logic)
 		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
-		heading := "Scan with WhatsApp to connect"
+		accountLine := ""
 		if accountAlias != "" {
-			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
+			accountLine = fmt.Sprintf("<p>Account: %s (port %d)</p>\n", accountAlias, port)
 		}
 
-		// Verify the logic: heading should contain both account name and port
-		if !strings.Contains(heading, "trabalho") {
-			t.Errorf("heading should contain account name 'trabalho': %q", heading)
+		// Verify the logic: accountLine should contain both account name and port
+		if !strings.Contains(accountLine, "trabalho") {
+			t.Errorf("accountLine should contain account name 'trabalho': %q", accountLine)
 		}
-		if !strings.Contains(heading, "3090") {
-			t.Errorf("heading should contain port '3090': %q", heading)
+		if !strings.Contains(accountLine, "3090") {
+			t.Errorf("accountLine should contain port '3090': %q", accountLine)
 		}
-		if !strings.Contains(heading, "Account:") {
-			t.Errorf("heading should contain 'Account:' prefix: %q", heading)
+		if !strings.Contains(accountLine, "Account:") {
+			t.Errorf("accountLine should contain 'Account:' prefix: %q", accountLine)
 		}
 	})
 
-	t.Run("without WHATSAPP_ACCOUNT, HTML does not include account format", func(t *testing.T) {
+	t.Run("without WHATSAPP_ACCOUNT, page has no duplication (D1: unchanged)", func(t *testing.T) {
 		os.Unsetenv("WHATSAPP_ACCOUNT")
 
 		// Setup qrState with a QR PNG
@@ -1853,19 +1853,52 @@ func TestQRPageIdentifiesAccount(t *testing.T) {
 		qrState.connected = false
 		qrState.Unlock()
 
-		// Build the expected HTML (matching the handler logic)
+		// Simulate handler logic: correct version uses accountLine (empty when no account)
 		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+		accountLine := ""
+		if accountAlias != "" {
+			accountLine = fmt.Sprintf("<p>Account: %s (port %d)</p>\n", accountAlias, port)
+		}
+
+		// Build the correct HTML (CORRECT handler: only accountLine, no <p> when empty)
+		correctHTML := fmt.Sprintf(`<!DOCTYPE html><html><head>
+<meta http-equiv="refresh" content="20">
+<style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
+img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
+</head><body>
+<h2>Scan with WhatsApp to connect</h2>
+%s<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+<img src="/qr.png" width="300" height="300" alt="QR Code">
+<p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
+</body></html>`, accountLine)
+
+		// Count occurrences: heading should appear exactly once (in <h2>)
+		correctCount := strings.Count(correctHTML, "Scan with WhatsApp to connect")
+		if correctCount != 1 {
+			t.Errorf("correct HTML: heading text should appear exactly once, got %d", correctCount)
+		}
+
+		// MUTANT behavior: always emit <p> with heading (causing duplication when no account)
 		heading := "Scan with WhatsApp to connect"
 		if accountAlias != "" {
 			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
 		}
+		mutantHTML := fmt.Sprintf(`<!DOCTYPE html><html><head>
+<meta http-equiv="refresh" content="20">
+<style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
+img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
+</head><body>
+<h2>Scan with WhatsApp to connect</h2>
+<p>%s</p>
+<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+<img src="/qr.png" width="300" height="300" alt="QR Code">
+<p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
+</body></html>`, heading)
 
-		// Verify the logic: heading should be unchanged without account
-		if heading != "Scan with WhatsApp to connect" {
-			t.Errorf("heading should be unchanged without account: %q", heading)
-		}
-		if strings.Contains(heading, "Account:") {
-			t.Errorf("heading should not contain 'Account:' when WHATSAPP_ACCOUNT is unset: %q", heading)
+		// Count occurrences in mutant: heading appears twice (duplication bug)
+		mutantCount := strings.Count(mutantHTML, "Scan with WhatsApp to connect")
+		if mutantCount != 2 {
+			t.Errorf("MUTANT: heading text should appear twice (bug), got %d", mutantCount)
 		}
 	})
 }

@@ -4033,10 +4033,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		// Get account alias from environment (D8, D3)
 		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
 
-		// Build the heading with account identification if available
-		heading := "Scan with WhatsApp to connect"
+		// Build account identification line if available (D1: unchanged without WHATSAPP_ACCOUNT)
+		accountLine := ""
 		if accountAlias != "" {
-			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
+			accountLine = fmt.Sprintf("<p>Account: %s (port %d)</p>\n", accountAlias, port)
 		}
 
 		fmt.Fprintf(w, `<!DOCTYPE html><html><head>
@@ -4045,11 +4045,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
 </head><body>
 <h2>Scan with WhatsApp to connect</h2>
-<p>%s</p>
-<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
+%s<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
 <img src="/qr.png" width="300" height="300" alt="QR Code">
 <p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
-</body></html>`, heading)
+</body></html>`, accountLine)
 	})
 
 	// /qr.png — raw PNG for embedding or direct download
