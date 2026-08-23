@@ -53,6 +53,46 @@ def _require_account(account: Optional[str]) -> None:
             )
 
 
+
+def _check_account_online(account: Optional[str]) -> str:
+    """Verify that an account's bridge is online by probing /status.
+
+    Implements D12 from design: when a bridge is unreachable, return a clear error
+    message naming the account alias and its scheduled task name.
+
+    Args:
+        account: The account alias to check (None = default account).
+
+    Returns:
+        The base_url if the account's bridge responds to /status.
+
+    Raises:
+        ValueError: If the account's bridge is unreachable, with a message naming
+                   the account alias and the task name (e.g., "WhatsAppMCPBridge-trabalho").
+    """
+    base_url = accounts.resolve_account(account)
+
+    # Resolve alias for error message
+    accounts_map = accounts._load_accounts_map()
+    resolved_account = account
+    if accounts_map:
+        if account is None:
+            resolved_account = accounts_map.get("default")
+
+    try:
+        # Quick probe with short timeout: if /status doesn't respond, bridge is down
+        response = _api_request("GET", "/status", base_url, timeout=5)
+        response.raise_for_status()
+        return base_url
+    except requests.RequestException:
+        # Bridge is offline; generate error message with task name
+        task_name = accounts.account_task_name(resolved_account)
+        raise ValueError(
+            f"Account '{resolved_account}' bridge is offline. "
+            f"Start the scheduled task: {task_name}"
+        )
+
+
 def _api_request(method: str, path: str, base_url: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
     """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
     on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
@@ -344,8 +384,18 @@ def list_chats(
     sort_by: str = "last_active",
     account: Optional[str] = None
 ) -> List[Chat]:
-    """Get chats matching the specified criteria."""
-    base_url = accounts.resolve_account(account)
+    """Get chats matching the specified criteria.
+    
+    D12: If account's bridge is offline, raises ValueError with account alias
+    and scheduled task name instead of silently returning empty list.
+    """
+    # D12: Check if account's bridge is online before making request
+    try:
+        base_url = _check_account_online(account)
+    except ValueError as e:
+        # Re-raise with clear error message naming account and task
+        raise
+    
     result = _api_post("/chats", {
         "query": query,
         "limit": limit,
@@ -1276,7 +1326,55 @@ def get_bridge_status(account: Optional[str] = None) -> Tuple[bool, str, Optiona
     Key insight from contracts: healthy:false with reason "not logged in" means
     you need to scan the QR code at /qr — reconnecting won't help. If the bridge
     is unreachable (transport error), that's a different problem: the process is down.
+    
+    D13: When called without account and multiple accounts are configured,
+    returns aggregated status of all accounts. Otherwise returns status of
+    the specified (or default) account.
     """
+    # D13: If no account specified and multiple configured, return aggregated status
+    if account is None and accounts.accounts_configured():
+        known = accounts.known_aliases()
+        if len(known) > 1:
+            # Aggregate status from all accounts
+            result = {}
+            for alias in known:
+                try:
+                    base_url = accounts.resolve_account(alias)
+                    try:
+                        # Use 5-second timeout for health-check
+                        response = _api_request("GET", "/status", base_url, timeout=5)
+                        try:
+                            status_data = response.json()
+                            result[alias] = {
+                                "healthy": bool(status_data.get("healthy", False)),
+                                "reason": status_data.get("reason", ""),
+                                "status": status_data
+                            }
+                        except json.JSONDecodeError:
+                            result[alias] = {
+                                "healthy": False,
+                                "reason": f"Error parsing response: {response.text}",
+                                "status": None
+                            }
+                    except requests.RequestException as e:
+                        # Account is offline - cite the task name (D12)
+                        task_name = accounts.account_task_name(alias)
+                        result[alias] = {
+                            "healthy": False,
+                            "reason": f"Bridge offline. Start task: {task_name}",
+                            "status": None
+                        }
+                except Exception as e:
+                    result[alias] = {
+                        "healthy": False,
+                        "reason": f"Error: {str(e)}",
+                        "status": None
+                    }
+            # Return aggregated result as special format
+            # We return (False, "aggregated", result_dict) to signal multi-account response
+            return False, "aggregated", result
+
+    # Single account case: original behavior
     base_url = accounts.resolve_account(account)
     try:
         # Use 5-second timeout: a health-check that waits 30s defeats the purpose

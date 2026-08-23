@@ -909,10 +909,14 @@ def get_bridge_status(account: Optional[str] = None) -> Dict[str, Any]:
     unreachable (transport error), that's a different problem: the process is down,
     not recoverable via API.
 
+    D13: When called without account and multiple accounts are configured,
+    returns aggregated status for all accounts.
+
     Args:
         account: Optional account alias to use (defaults to primary account)
 
     Returns:
+        Single-account format (when account specified or single account):
         {
             "success": bool,
             "healthy": bool (connected AND logged_in),
@@ -931,8 +935,27 @@ def get_bridge_status(account: Optional[str] = None) -> Dict[str, Any]:
                 "last_action_at": str (RFC3339, or omitted)
             }
         }
+        
+        Multi-account aggregated format (when no account specified, multiple configured):
+        {
+            "aggregated": true,
+            "accounts": {
+                "<alias>": { status object for that account },
+                ...
+            }
+        }
     """
     healthy, reason, status = whatsapp_get_bridge_status(account=account)
+    
+    # Check if this is aggregated response (D13)
+    if reason == "aggregated" and isinstance(status, dict):
+        # Multi-account aggregated response
+        return {
+            "aggregated": True,
+            "accounts": status
+        }
+    
+    # Single account response
     if status is None:
         return {
             "success": False,
