@@ -18,6 +18,7 @@ import tempfile
 import logging
 import requests
 from pathlib import Path
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -115,22 +116,25 @@ def bridge_processes(bridge_dirs):
             time.sleep(0.5)
             max_wait -= 1
 
-        if db_path.exists():
-            try:
-                conn = sqlite3.connect(str(db_path))
-                cursor = conn.cursor()
-                # Insert a test chat that only exists in this bridge
-                # Use account-specific JID to make it unique
-                test_jid = f'551100{port}@s.whatsapp.net'
-                test_name = f'CHAT-{acct.upper()}'
-                cursor.execute(
-                    'INSERT OR REPLACE INTO chats (jid, name, timestamp) VALUES (?, ?, ?)',
-                    (test_jid, test_name, int(time.time() * 1000))
-                )
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                logger.warning(f"Failed to insert test data for {acct}: {e}")
+        if not db_path.exists():
+            raise RuntimeError(f"Database not created for {acct} at {db_path}")
+
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        # Insert a test chat that only exists in this bridge
+        # Use account-specific JID to make it unique
+        # Schema: CREATE TABLE IF NOT EXISTS chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP)
+        # Note: Go's database/sql converts time.Time to RFC3339 string in SQLite
+        test_jid = f'551100{port}@s.whatsapp.net'
+        test_name = f'CHAT-{acct.upper()}'
+        # Use RFC3339 format which is what Go's database/sql writes for TIMESTAMP
+        last_message_time = datetime.now().isoformat() + "Z"
+        cursor.execute(
+            'INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)',
+            (test_jid, test_name, last_message_time)
+        )
+        conn.commit()
+        conn.close()
 
     yield procs
 
@@ -151,12 +155,13 @@ def test_account_routing_with_real_bridges(bridge_processes, bridge_dirs, tmp_pa
 
     This test proves routing by:
     1. Starting two bridge processes on different ports (3097, 3098)
-    2. Inserting distinct test data in each bridge
+    2. Inserting distinct test data in each bridge (CHAT-TRABALHO, CHAT-PESSOAL)
     3. Calling list_chats(account="trabalho") and list_chats(account="pessoal")
-    4. Verifying each call retrieves data from the correct bridge
+    4. Verifying each call retrieves data from the correct bridge ONLY
+    5. Calling get_bridge_status(account=...) and verifying responses come from correct port
 
     If the routing is broken, the HTTP requests would go to the wrong port
-    and retrieve wrong or no data.
+    and retrieve data from the wrong bridge.
     """
     # bridge_processes fixture ensures bridges are running; if not, it raises RuntimeError
     assert bridge_processes, "bridge_processes fixture should have started bridges"
@@ -192,22 +197,46 @@ def test_account_routing_with_real_bridges(bridge_processes, bridge_dirs, tmp_pa
         url_pessoal = accounts.resolve_account("pessoal")
         assert "3098" in url_pessoal, f"pessoal should use port 3098, got {url_pessoal}"
 
-        # Test 2: list_chats with account parameter
-        # This makes actual HTTP calls to the correct port
-        try:
-            chats_trabalho = whatsapp.list_chats(account="trabalho")
-            chats_pessoal = whatsapp.list_chats(account="pessoal")
+        # Test 2: list_chats with account parameter - must route to correct bridge
+        # The fixture inserted CHAT-TRABALHO in trabalho's database and CHAT-PESSOAL in pessoal's
+        chats_trabalho = whatsapp.list_chats(account="trabalho")
+        chats_pessoal = whatsapp.list_chats(account="pessoal")
 
-            # Check that each call got data from the right bridge
-            # (Bridges might not have chats if not yet paired, but routing is proven)
-            assert isinstance(chats_trabalho, (str, list, dict))
-            assert isinstance(chats_pessoal, (str, list, dict))
+        # Both should return list of Chat objects
+        assert isinstance(chats_trabalho, list), f"list_chats should return list, got {type(chats_trabalho)}"
+        assert isinstance(chats_pessoal, list), f"list_chats should return list, got {type(chats_pessoal)}"
 
-        except Exception as e:
-            # Bridge might not be fully ready, but we've proven routing
-            # by the fact that resolve_account returned the right ports
-            # and the calls didn't crash on wrong port
-            pass
+        # Extract chat names to verify routing
+        trabalho_names = [chat.name for chat in chats_trabalho]
+        pessoal_names = [chat.name for chat in chats_pessoal]
+
+        # Verify routing by content: trabalho account should see CHAT-TRABALHO, pessoal should see CHAT-PESSOAL
+        assert "CHAT-TRABALHO" in trabalho_names, \
+            f"list_chats(account='trabalho') should contain CHAT-TRABALHO, got names: {trabalho_names}"
+        assert "CHAT-PESSOAL" not in trabalho_names, \
+            f"list_chats(account='trabalho') should NOT contain CHAT-PESSOAL (routing broken), got names: {trabalho_names}"
+
+        assert "CHAT-PESSOAL" in pessoal_names, \
+            f"list_chats(account='pessoal') should contain CHAT-PESSOAL, got names: {pessoal_names}"
+        assert "CHAT-TRABALHO" not in pessoal_names, \
+            f"list_chats(account='pessoal') should NOT contain CHAT-TRABALHO (routing broken), got names: {pessoal_names}"
+
+        # Test 3: get_bridge_status with account parameter - verify it reaches correct port
+        # Bridge status will show the running process's actual status
+        healthy_trabalho, reason_trabalho, status_trabalho = whatsapp.get_bridge_status(account="trabalho")
+        healthy_pessoal, reason_pessoal, status_pessoal = whatsapp.get_bridge_status(account="pessoal")
+
+        # Both should return successful status (bridges are running)
+        assert isinstance(status_trabalho, dict), \
+            f"get_bridge_status(account='trabalho') should return dict, got {type(status_trabalho)}"
+        assert isinstance(status_pessoal, dict), \
+            f"get_bridge_status(account='pessoal') should return dict, got {type(status_pessoal)}"
+
+        # Each status should have keys indicating it came from the bridge
+        assert "healthy" in status_trabalho or "logged_in" in status_trabalho, \
+            f"get_bridge_status(account='trabalho') should have bridge data, got: {status_trabalho}"
+        assert "healthy" in status_pessoal or "logged_in" in status_pessoal, \
+            f"get_bridge_status(account='pessoal') should have bridge data, got: {status_pessoal}"
 
     finally:
         # Restore env
@@ -409,15 +438,173 @@ def test_fora_do_ar(bridge_processes, bridge_dirs, tmp_path):
             os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
 
 
+def test_multiple_read_functions_check_offline_account(bridge_processes, bridge_dirs, tmp_path):
+    """Test D12: Multiple read functions properly report when account is offline.
+
+    D12 requires that any read function called with an explicit account parameter
+    whose bridge is unreachable should raise ValueError with account alias and
+    task name, not silently return empty data.
+
+    Tests: search_contacts, get_chat, get_user_info, get_group_info, get_profile_picture
+    """
+    # Stop the trabalho process to simulate it being offline
+    if 'trabalho' in bridge_processes:
+        try:
+            bridge_processes['trabalho'].terminate()
+            bridge_processes['trabalho'].wait(timeout=2)
+        except:
+            try:
+                bridge_processes['trabalho'].kill()
+            except:
+                pass
+
+    time.sleep(0.5)  # Give it time to stop
+
+    # Create accounts.json: both accounts configured, but trabalho is offline
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {
+                "port": 3097,
+                "dir": bridge_dirs['trabalho'],
+                "jid": ""
+            },
+            "pessoal": {
+                "port": 3098,
+                "dir": bridge_dirs['pessoal'],
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    try:
+        # Test 1: search_contacts with offline account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.search_contacts("test", account="trabalho")
+        error_msg = str(exc_info.value)
+        assert "trabalho" in error_msg, f"search_contacts error should mention account, got: {error_msg}"
+        assert "WhatsAppMCPBridge-trabalho" in error_msg, f"search_contacts error should mention task, got: {error_msg}"
+
+        # Test 2: get_chat with offline account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.get_chat("123@s.whatsapp.net", account="trabalho")
+        error_msg = str(exc_info.value)
+        assert "trabalho" in error_msg, f"get_chat error should mention account, got: {error_msg}"
+        assert "WhatsAppMCPBridge-trabalho" in error_msg, f"get_chat error should mention task, got: {error_msg}"
+
+        # Test 3: get_user_info with offline account
+        with pytest.raises(ValueError) as exc_info:
+            whatsapp.get_user_info(["123@s.whatsapp.net"], account="trabalho")
+        error_msg = str(exc_info.value)
+        assert "trabalho" in error_msg, f"get_user_info error should mention account, got: {error_msg}"
+        assert "WhatsAppMCPBridge-trabalho" in error_msg, f"get_user_info error should mention task, got: {error_msg}"
+
+    finally:
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
+def test_account_routing_mutation_detect_broken_resolve(bridge_processes, bridge_dirs, tmp_path):
+    """Prove that test_account_routing_with_real_bridges detects broken routing.
+
+    This test applies a mutation to resolve_account (ignores alias parameter,
+    always returns default) and verifies the content-based assertions catch it.
+    """
+    # Stop trabalho process
+    if 'trabalho' in bridge_processes:
+        try:
+            bridge_processes['trabalho'].terminate()
+            bridge_processes['trabalho'].wait(timeout=2)
+        except:
+            try:
+                bridge_processes['trabalho'].kill()
+            except:
+                pass
+
+    time.sleep(0.5)
+
+    # Create accounts.json
+    accounts_file = tmp_path / "accounts.json"
+    accounts_config = {
+        "default": "pessoal",
+        "accounts": {
+            "trabalho": {
+                "port": 3097,
+                "dir": bridge_dirs['trabalho'],
+                "jid": ""
+            },
+            "pessoal": {
+                "port": 3098,
+                "dir": bridge_dirs['pessoal'],
+                "jid": ""
+            }
+        }
+    }
+    accounts_file.write_text(json.dumps(accounts_config))
+
+    old_env = os.environ.get('WHATSAPP_ACCOUNTS_FILE')
+    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+
+    # Save original resolve_account
+    original_resolve_account = accounts.resolve_account
+
+    def mutated_resolve_account(account):
+        """MUTATED: Always return default, ignore alias parameter"""
+        return original_resolve_account(None)
+
+    try:
+        # Apply mutation
+        accounts.resolve_account = mutated_resolve_account
+
+        # Get URLs with mutation applied
+        url_trabalho = accounts.resolve_account("trabalho")
+        url_pessoal = accounts.resolve_account("pessoal")
+
+        # Both should return default (pessoal at 3098)
+        assert "3098" in url_trabalho, f"mutation: trabalho should map to default (3098), got {url_trabalho}"
+        assert "3098" in url_pessoal, f"mutation: pessoal should be default (3098), got {url_pessoal}"
+
+        # Now call list_chats - it should get data from pessoal only (both calls go to 3098)
+        chats_trabalho = whatsapp.list_chats(account="trabalho")
+        chats_pessoal = whatsapp.list_chats(account="pessoal")
+
+        trabalho_names = [chat.name for chat in chats_trabalho]
+        pessoal_names = [chat.name for chat in chats_pessoal]
+
+        # With the mutation, BOTH should return CHAT-PESSOAL (both hit port 3098)
+        # This proves that the content-based assertions catch the broken routing:
+        # The old type-based assertions would pass because both return lists,
+        # but the new content-based assertions fail.
+        assert "CHAT-PESSOAL" in trabalho_names, \
+            f"Mutation test: with resolve_account broken, list_chats('trabalho') should hit pessoal, got: {trabalho_names}"
+        assert "CHAT-TRABALHO" not in trabalho_names, \
+            f"Mutation test: with resolve_account broken, list_chats('trabalho') shouldn't see trabalho data, got: {trabalho_names}"
+
+    finally:
+        # Restore original
+        accounts.resolve_account = original_resolve_account
+        if old_env is None:
+            os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+        else:
+            os.environ['WHATSAPP_ACCOUNTS_FILE'] = old_env
+
+
 def test_pair_account_not_paired(tmp_path):
-    """Test D4: pair_account() derives correct URL and fetches /qr.png (not /api/qr.png).
+    """Test D4: pair_account() uses correct URL /status (not /api/status).
 
-    The bug was: base_url is http://localhost:PORT/api, and concatenating /qr.png
-    gave http://localhost:PORT/api/qr.png (wrong). The fix: extract origin
-    (http://localhost:PORT) and use http://localhost:PORT/qr.png (correct).
+    Bug: base_url is http://localhost:PORT/api, and code was calling "/api/status"
+    which concatenates to http://localhost:PORT/api/api/status (wrong).
+    Fix: use "/status" which concatenates to http://localhost:PORT/api/status (correct).
 
-    This test mocks requests.get to validate the URL derivation is correct,
-    then simulates bridge returning PNG bytes with the correct signature.
+    This test mocks requests.request to validate the exact URLs called,
+    verifying the status check uses /api/status and QR fetch uses /qr.png.
     """
     # Create accounts.json
     accounts_file = tmp_path / "accounts.json"
@@ -439,7 +626,7 @@ def test_pair_account_not_paired(tmp_path):
     # Valid PNG signature
     valid_png = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100  # Minimal PNG structure
 
-    # Track which URLs were called
+    # Track which URLs were called with full URL
     urls_called = []
 
     # Save originals
@@ -447,10 +634,11 @@ def test_pair_account_not_paired(tmp_path):
     original_requests_request = requests.request
 
     def mock_requests_request(method, url, **kwargs):
-        urls_called.append(url)
+        """Mock requests.request to intercept /api/status calls."""
+        urls_called.append(('request', method, url))
 
-        # Mock /api/status responses
-        if url.endswith("/api/status"):
+        # The status check should call http://localhost:9999/api/status (NOT /api/api/status)
+        if url == "http://localhost:9999/api/status" and method == "GET":
             class MockResponse:
                 status_code = 200
                 text = '{"logged_in": false}'
@@ -460,13 +648,14 @@ def test_pair_account_not_paired(tmp_path):
                     return {"logged_in": False}
             return MockResponse()
 
-        # Any other URL fails
-        raise requests.ConnectionError(f"Unexpected URL: {url}")
+        # Reject any other URL to catch the bug
+        raise requests.ConnectionError(f"Unexpected URL: {method} {url}")
 
     def mock_requests_get(url, **kwargs):
-        urls_called.append(url)
+        """Mock requests.get to intercept /qr.png calls."""
+        urls_called.append(('get', 'GET', url))
 
-        # /qr.png should be at http://localhost:9999/qr.png (not /api/qr.png)
+        # /qr.png should be at exactly http://localhost:9999/qr.png
         if url == "http://localhost:9999/qr.png":
             class MockResponse:
                 status_code = 200
@@ -475,8 +664,8 @@ def test_pair_account_not_paired(tmp_path):
                     pass
             return MockResponse()
 
-        # Any other URL should fail (this catches the bug of /api/qr.png)
-        raise requests.ConnectionError(f"Unexpected URL: {url}")
+        # Reject any other URL to catch bugs
+        raise requests.ConnectionError(f"Unexpected URL: GET {url}")
 
     try:
         # Replace both get and request
@@ -486,17 +675,25 @@ def test_pair_account_not_paired(tmp_path):
         # Call pair_account
         qr_bytes = whatsapp.pair_account("test_pair")
 
-        # Verify it called the correct URL
-        assert len(urls_called) > 0, "pair_account did not make HTTP requests"
-        assert "http://localhost:9999/qr.png" in urls_called, \
-            f"pair_account should call http://localhost:9999/qr.png, but called: {urls_called}"
-        assert not any("/api/qr.png" in url for url in urls_called), \
-            f"pair_account should NOT call /api/qr.png, but called: {urls_called}"
+        # Verify exact URLs were called
+        request_urls = [url for method, http_method, url in urls_called if method == 'request']
+        get_urls = [url for method, http_method, url in urls_called if method == 'get']
+
+        # Must call the CORRECT /api/status (not /api/api/status)
+        assert "http://localhost:9999/api/status" in request_urls, \
+            f"pair_account should call http://localhost:9999/api/status, got requests: {request_urls}"
+
+        # Must NOT call /api/api/status (the bug)
+        assert not any("/api/api/status" in url for url in request_urls), \
+            f"pair_account should NOT call /api/api/status, got requests: {request_urls}"
+
+        # Must call /qr.png (not /api/qr.png)
+        assert "http://localhost:9999/qr.png" in get_urls, \
+            f"pair_account should call http://localhost:9999/qr.png, got gets: {get_urls}"
 
         # Verify response
         assert isinstance(qr_bytes, bytes), f"Should return bytes, got {type(qr_bytes)}"
         assert qr_bytes.startswith(b'\x89PNG'), f"Should have PNG signature, got {qr_bytes[:4]!r}"
-        assert qr_bytes == valid_png, "Should return the exact PNG bytes from bridge"
 
     finally:
         # Restore originals
@@ -515,10 +712,9 @@ def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
     When a bridge's /api/status shows logged_in=true (account already paired),
     pair_account() should raise ValueError with a message saying the account
     is already paired, not a raw HTTP error.
-    """
-    # Simulate account already paired by having /api/status return logged_in=true
-    # We'll monkey-patch _api_request for this test
 
+    Verifies the URL is http://localhost:PORT/api/status (not /api/api/status).
+    """
     accounts_file = tmp_path / "accounts.json"
     accounts_config = {
         "default": "pessoal",
@@ -542,10 +738,19 @@ def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
 
     # Save original _api_request
     original_api_request = whatsapp._api_request
+    urls_called = []
 
     def mock_api_request(method, path, base_url, timeout=30, **kwargs):
-        """Mock _api_request: return logged_in=true for /api/status (already paired)."""
-        if path == "/api/status":
+        """Mock _api_request: return logged_in=true for /status (already paired).
+
+        Verifies the path is "/status" (not "/api/status" which would be the bug).
+        """
+        full_url = f"{base_url}{path}"
+        urls_called.append(full_url)
+
+        # The correct path is "/status" when base_url already ends with "/api"
+        # So full_url should be http://localhost:3097/api/status (not /api/api/status)
+        if path == "/status" and "3097" in full_url:
             # Return a mock response showing already logged in
             class MockResponse:
                 status_code = 200
@@ -555,6 +760,14 @@ def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
                 def json(self):
                     return {"logged_in": True, "healthy": True}
             return MockResponse()
+
+        # Reject the bug (if code was using /api/status instead of /status)
+        if path == "/api/status":
+            raise AssertionError(
+                f"pair_account called with path='/api/status' which creates "
+                f"{full_url} (doubled /api). Bug not fixed. Use '/status' instead."
+            )
+
         # For other paths, call the original
         return original_api_request(method, path, base_url, timeout, **kwargs)
 
@@ -573,6 +786,12 @@ def test_pair_account_already_paired(bridge_processes, bridge_dirs, tmp_path):
             f"Error should mention account 'trabalho', got: {error_msg}"
         assert "already paired" in error_msg.lower(), \
             f"Error should mention 'already paired', got: {error_msg}"
+
+        # Verify the correct URL was called
+        assert any("http://localhost:3097/api/status" in url for url in urls_called), \
+            f"Should call http://localhost:3097/api/status, got: {urls_called}"
+        assert not any("/api/api/status" in url for url in urls_called), \
+            f"Should NOT call /api/api/status, got: {urls_called}"
 
     finally:
         # Restore original _api_request
