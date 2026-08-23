@@ -1,0 +1,90 @@
+{
+  "slug": "2026-08-23-erro-de-api-lido-como-lista-vazia",
+  "titulo": "O 500 do include_last_message, e o erro de API que lê como lista vazia",
+  "criado_em": "2026-08-23",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-08-23-erro-de-api-lido-como-lista-vazia.md",
+    "em": "2026-08-23"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-08-23-erro-de-api-lido-como-lista-vazia.md",
+    "tarefas": 7,
+    "paralelas": [
+      1,
+      2,
+      7
+    ],
+    "em": "2026-08-23"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-08-23",
+    "tarefas_ok": 7,
+    "tarefas": 7,
+    "em": "2026-08-23",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "TestListChatsIncludeLastMessage/false:_no_SQL_error,_three_fields_nil (sitio listChats) e TestGetChatIncludeLastMessage/false:_no_SQL_error,_three_fields_nil (sitio getChat) -- os dois rodados separados"
+      },
+      {
+        "tarefa": 2,
+        "resultado": "vermelho",
+        "fixture": "test_5xx_raises_value_error_with_path_status_and_body"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "n/a",
+        "motivo": "move trabalho ja validado para revisao; a falsificacao e externa, a CI do PR"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "n/a",
+        "motivo": "mesmo diff da tarefa 1, ja validado por mutacao nos dois sitios; aqui so muda o destino"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "n/a",
+        "motivo": "documento nao tem comportamento a inverter; a falsificacao e o conferir-fluxo cobertura sair 0"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "test_get_sender_name_falls_back_on_value_error e test_format_message_survives_sender_name_500"
+      },
+      {
+        "tarefa": 7,
+        "resultado": "n/a",
+        "motivo": "regra escrita nao tem comportamento a inverter; a falsificacao e textual, o grep -c da linha antiga sair 0"
+      }
+    ]
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "a15203166080a1bc7b55bff9aa6d3b302a784978",
+      "caminhos_sujos": []
+    },
+    "achados": 2,
+    "em": "2026-08-23",
+    "bloqueiam": 0,
+    "base": "f77d6e5b7699170f77e3790931ec1837913dac73",
+    "head": "a15203166080a1bc7b55bff9aa6d3b302a784978"
+  },
+  "verificar": {
+    "status": "ok",
+    "tarefas": 7,
+    "comando": "7 criterios rodados um por um, na ordem do plano",
+    "saida": "t1: go test -run ListChats|GetChat -v = 4 PASS + ponta a ponta contra copia do store real (2477 chats/121249 msgs) com os 4 cruzamentos em 200, null quando false e preenchido quando true; t2+t6: pytest test_api_errors.py -q = 8 passed, suite = 102 passed; t3: gh pr view 12 = OPEN, head a0554df, checks 14/14 SUCCESS, nenhum FAILURE/PENDING; t4: gh pr diff 15 mostra hunks em func listChats E func getChat, state OPEN; t5: git diff --stat lista os 3 artefatos e conferir-fluxo cobertura sai 0; t7: grep -c da linha antiga do AGENTS.md = 0 e a linha nova traz as duas metades",
+    "em": "2026-08-23"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
