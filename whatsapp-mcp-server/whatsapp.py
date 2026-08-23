@@ -8,6 +8,7 @@ import os.path
 import requests
 import json
 import audio
+import accounts
 
 # This server runs over MCP's stdio transport, where stdout carries JSON-RPC
 # framing — a stray print() either corrupts that stream or is silently
@@ -15,7 +16,6 @@ import audio
 # stderr, which stdio-transport MCP servers can safely use for diagnostics.
 logger = logging.getLogger(__name__)
 
-WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://localhost:8080/api")
 WHATSAPP_API_AUTH_TOKEN = os.environ.get("WHATSAPP_API_AUTH_TOKEN", "")
 
 REQUEST_TIMEOUT = 30
@@ -31,12 +31,12 @@ def _auth_headers() -> Dict[str, str]:
     return {}
 
 
-def _api_request(method: str, path: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
+def _api_request(method: str, path: str, base_url: str, timeout: int = REQUEST_TIMEOUT, **kwargs) -> requests.Response:
     """GET/POST to the bridge with auth header + timeout, raising requests.RequestException
     on 401 with an actionable message. Used by the Tuple[bool, str, ...]-returning action
     functions below, which need the raw Response (they parse .json() and build their own
     return tuple) rather than _api_post's Optional[dict] shape."""
-    url = f"{WHATSAPP_API_BASE_URL}{path}"
+    url = f"{base_url}{path}"
     response = requests.request(method, url, headers=_auth_headers(), timeout=timeout, **kwargs)
     if response.status_code == 401:
         raise requests.RequestException(
@@ -45,12 +45,12 @@ def _api_request(method: str, path: str, timeout: int = REQUEST_TIMEOUT, **kwarg
     return response
 
 
-def _api_post(path: str, payload: dict, timeout: int = REQUEST_TIMEOUT) -> Optional[dict]:
+def _api_post(path: str, payload: dict, base_url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[dict]:
     """POST to the bridge REST API. Returns the parsed JSON dict on HTTP 200,
     or None on any failure (non-200 status, timeout, connection error, bad JSON).
     Never raises — mirrors the old `except sqlite3.Error` behavior."""
     try:
-        url = f"{WHATSAPP_API_BASE_URL}{path}"
+        url = f"{base_url}{path}"
         response = requests.post(url, json=payload, headers=_auth_headers(), timeout=timeout)
         if response.status_code == 401:
             logger.warning(
@@ -159,11 +159,12 @@ def _chat_from_dict(d: dict) -> Chat:
     )
 
 
-def get_sender_name(sender_jid: str) -> str:
+def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
+    base_url = accounts.resolve_account(account)
     if sender_jid in _sender_name_cache:
         return _sender_name_cache[sender_jid]
 
-    result = _api_post("/sender_name", {"sender_jid": sender_jid})
+    result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
     if result is None:
         # Transport failure: don't cache, so a later retry can still succeed.
         return sender_jid
@@ -172,8 +173,8 @@ def get_sender_name(sender_jid: str) -> str:
     _sender_name_cache[sender_jid] = name
     return name
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
-    """Print a single message with consistent formatting."""
+def format_message(message: Message, show_chat_info: bool = True, account: Optional[str] = None) -> str:
+    """Format a single message with consistent formatting."""
     output = ""
     ts_str = f"{message.timestamp:%Y-%m-%d %H:%M:%S}" if message.timestamp else "unknown time"
 
@@ -187,20 +188,20 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
 
     try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
+        sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
         logger.warning("Error formatting message %s: %s", message.id, e)
     return output
 
-def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
+def format_messages_list(messages: List[Message], show_chat_info: bool = True, account: Optional[str] = None) -> str:
     output = ""
     if not messages:
         output += "No messages to display."
         return output
 
     for message in messages:
-        output += format_message(message, show_chat_info)
+        output += format_message(message, show_chat_info, account)
     return output
 
 def list_messages(
@@ -213,9 +214,11 @@ def list_messages(
     page: int = 0,
     include_context: bool = True,
     context_before: int = 1,
-    context_after: int = 1
-) -> List[Message]:
+    context_after: int = 1,
+    account: Optional[str] = None
+) -> str:
     """Get messages matching the specified criteria with optional context."""
+    base_url = accounts.resolve_account(account)
     # Validate date filters up front (same contract as before: invalid dates raise
     # a ValueError that propagates to the caller, it is NOT swallowed like transport errors).
     if after:
@@ -240,9 +243,9 @@ def list_messages(
         "page": page,
     }
 
-    result = _api_post("/messages", payload)
+    result = _api_post("/messages", payload, base_url)
     if result is None:
-        return []
+        return ""
 
     messages = [_message_from_dict(m) for m in result.get("messages", [])]
 
@@ -251,7 +254,7 @@ def list_messages(
         context_failures = []
         for msg in messages:
             try:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(msg.id, context_before, context_after, account)
                 messages_with_context.extend(context.before)
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
@@ -266,7 +269,7 @@ def list_messages(
                 context_failures.append(f"{msg.id} ({e})")
                 messages_with_context.append(msg)
 
-        output = format_messages_list(messages_with_context, show_chat_info=True)
+        output = format_messages_list(messages_with_context, show_chat_info=True, account=account)
         if context_failures:
             output += (
                 f"\n[Warning: context lookup failed for {len(context_failures)} message(s), "
@@ -274,20 +277,22 @@ def list_messages(
             )
         return output
 
-    return format_messages_list(messages, show_chat_info=True)
+    return format_messages_list(messages, show_chat_info=True, account=account)
 
 
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    account: Optional[str] = None
 ) -> MessageContext:
     """Get context around a specific message."""
+    base_url = accounts.resolve_account(account)
     result = _api_post("/message_context", {
         "message_id": message_id,
         "before": before,
         "after": after,
-    })
+    }, base_url)
 
     if result is None:
         # Transport/server failure - mirror old `except ... raise` behavior for
@@ -314,16 +319,18 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    account: Optional[str] = None
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
+    base_url = accounts.resolve_account(account)
     result = _api_post("/chats", {
         "query": query,
         "limit": limit,
         "page": page,
         "include_last_message": include_last_message,
         "sort_by": sort_by,
-    })
+    }, base_url)
 
     if result is None:
         return []
@@ -331,9 +338,10 @@ def list_chats(
     return [_chat_from_dict(c) for c in result.get("chats", [])]
 
 
-def search_contacts(query: str) -> List[Contact]:
+def search_contacts(query: str, account: Optional[str] = None) -> List[Contact]:
     """Search contacts by name or phone number."""
-    result = _api_post("/contacts/search", {"query": query})
+    base_url = accounts.resolve_account(account)
+    result = _api_post("/contacts/search", {"query": query}, base_url)
 
     if result is None:
         return []
@@ -348,7 +356,7 @@ def search_contacts(query: str) -> List[Contact]:
     ]
 
 
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
+def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optional[str] = None) -> List[Chat]:
     """Get all chats involving the contact.
 
     Args:
@@ -356,11 +364,12 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    base_url = accounts.resolve_account(account)
     result = _api_post("/contacts/chats", {
         "jid": jid,
         "limit": limit,
         "page": page,
-    })
+    }, base_url)
 
     if result is None:
         return []
@@ -368,9 +377,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
     return [_chat_from_dict(c) for c in result.get("chats", [])]
 
 
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
     """Get most recent message involving the contact."""
-    result = _api_post("/contacts/last_interaction", {"jid": jid})
+    base_url = accounts.resolve_account(account)
+    result = _api_post("/contacts/last_interaction", {"jid": jid}, base_url)
 
     if result is None:
         return None
@@ -386,15 +396,16 @@ def get_last_interaction(jid: str) -> str:
         return None
 
     message = _message_from_dict(msg_data)
-    return format_message(message)
+    return format_message(message, account=account)
 
 
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
+def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional[str] = None) -> Optional[Chat]:
     """Get chat metadata by JID."""
+    base_url = accounts.resolve_account(account)
     result = _api_post("/chat", {
         "chat_jid": chat_jid,
         "include_last_message": include_last_message,
-    })
+    }, base_url)
 
     if result is None:
         return None
@@ -406,9 +417,10 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
     return _chat_from_dict(chat_data)
 
 
-def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
+def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] = None) -> Optional[Chat]:
     """Get chat metadata by sender phone number (handles LID contacts)."""
-    result = _api_post("/chat/by_contact", {"sender_phone_number": _normalize_phone(sender_phone_number)})
+    base_url = accounts.resolve_account(account)
+    result = _api_post("/chat/by_contact", {"sender_phone_number": _normalize_phone(sender_phone_number)}, base_url)
 
     if result is None:
         return None
@@ -419,13 +431,14 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
 
     return _chat_from_dict(chat_data)
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
+        url = f"{base_url}/send"
         payload = {
             "recipient": recipient,
             "message": message,
@@ -447,7 +460,8 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
+def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         # Validate input
         if not recipient:
@@ -459,7 +473,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
+        url = f"{base_url}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
@@ -481,7 +495,8 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
+def send_audio_message(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         # Validate input
         if not recipient:
@@ -499,7 +514,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
+        url = f"{base_url}/send"
         payload = {
             "recipient": recipient,
             "media_path": media_path
@@ -521,7 +536,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def download_media(message_id: str, chat_jid: str) -> Tuple[Optional[str], str]:
+def download_media(message_id: str, chat_jid: str, account: Optional[str] = None) -> Tuple[Optional[str], str]:
     """Download media from a message and return the local file path.
 
     Args:
@@ -534,8 +549,9 @@ def download_media(message_id: str, chat_jid: str) -> Tuple[Optional[str], str]:
         failure mode into a bare None left the caller unable to tell an expired
         media from a bad auth token from a bridge that is simply down.
     """
+    base_url = accounts.resolve_account(account)
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
+        url = f"{base_url}/download"
         payload = {
             "message_id": message_id,
             "chat_jid": chat_jid
@@ -581,13 +597,15 @@ def create_group(
     participants: List[str],
     is_community: bool = False,
     community_parent_jid: str = "",
+    account: Optional[str] = None
 ) -> Tuple[bool, str, Optional[dict]]:
+    base_url = accounts.resolve_account(account)
     try:
         if not name or not name.strip():
             return False, "Group name is required", None
         if not participants:
             return False, "At least one participant is required", None
-        url = f"{WHATSAPP_API_BASE_URL}/create_group"
+        url = f"{base_url}/create_group"
         payload = {
             "name": name,
             "participants": participants,
@@ -613,11 +631,12 @@ def create_group(
         return False, f"Unexpected error: {str(e)}", None
 
 
-def leave_group(jid: str) -> Tuple[bool, str]:
+def leave_group(jid: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required"
-        response = _api_request("POST", "/leave_group", json={"jid": jid})
+        response = _api_request("POST", "/leave_group", base_url, json={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -629,7 +648,8 @@ def leave_group(jid: str) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
-def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", timestamp: int = 0) -> Tuple[bool, str]:
+def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", timestamp: int = 0, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -638,7 +658,7 @@ def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", 
             payload["sender_jid"] = sender_jid
         if timestamp:
             payload["timestamp"] = timestamp
-        response = _api_request("POST", "/mark_chat_read", json=payload)
+        response = _api_request("POST", "/mark_chat_read", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -650,11 +670,12 @@ def mark_chat_read(chat_jid: str, message_ids: List[str], sender_jid: str = "", 
         return False, f"Unexpected error: {str(e)}"
 
 
-def mark_chat_unread(chat_jid: str) -> Tuple[bool, str]:
+def mark_chat_unread(chat_jid: str, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        response = _api_request("POST", "/mark_chat_unread", json={"chat_jid": chat_jid})
+        response = _api_request("POST", "/mark_chat_unread", base_url, json={"chat_jid": chat_jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -666,11 +687,12 @@ def mark_chat_unread(chat_jid: str) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
-def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
+def get_group_info(jid: str, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
+    base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
             return False, "Group JID is required", None
-        response = _api_request("GET", "/group_info", params={"jid": jid})
+        response = _api_request("GET", "/group_info", base_url, params={"jid": jid})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -692,11 +714,12 @@ def get_group_info(jid: str) -> Tuple[bool, str, Optional[dict]]:
         return False, f"Unexpected error: {str(e)}", None
 
 
-def archive_chat(chat_jid: str, archive: bool) -> Tuple[bool, str]:
+def archive_chat(chat_jid: str, archive: bool, account: Optional[str] = None) -> Tuple[bool, str]:
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
-        response = _api_request("POST", "/archive_chat", json={"chat_jid": chat_jid, "archive": archive})
+        response = _api_request("POST", "/archive_chat", base_url, json={"chat_jid": chat_jid, "archive": archive})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -708,11 +731,12 @@ def archive_chat(chat_jid: str, archive: bool) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
-def resolve_contact(phone: str) -> Tuple[bool, str, List[str]]:
+def resolve_contact(phone: str, account: Optional[str] = None) -> Tuple[bool, str, List[str]]:
+    base_url = accounts.resolve_account(account)
     try:
         if not phone or not phone.strip():
             return False, "phone is required", []
-        response = _api_request("GET", "/resolve_contact", params={"phone": phone})
+        response = _api_request("GET", "/resolve_contact", base_url, params={"phone": phone})
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -726,13 +750,14 @@ def resolve_contact(phone: str) -> Tuple[bool, str, List[str]]:
         return False, f"Unexpected error: {str(e)}", []
 
 
-def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool = True) -> Tuple[bool, str]:
+def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool = True, account: Optional[str] = None) -> Tuple[bool, str]:
     """React to a message with an emoji ("" removes the reaction).
 
     from_me defaults True (your own message). from_me=False works only in direct
     chats; in group chats the bridge returns an error because the original
     sender's JID isn't available.
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -744,7 +769,7 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
             "emoji": emoji,
             "from_me": from_me,
         }
-        response = _api_request("POST", "/react", json=payload)
+        response = _api_request("POST", "/react", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -756,12 +781,13 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
         return False, f"Unexpected error: {str(e)}"
 
 
-def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = True) -> Tuple[bool, str]:
+def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = True, account: Optional[str] = None) -> Tuple[bool, str]:
     """Edit the text of a previously sent message.
 
     from_me is accepted for API symmetry but ignored — WhatsApp (whatsmeow's
     BuildEdit) only allows editing your own messages; the bridge never reads it.
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -773,7 +799,7 @@ def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = 
             "new_text": new_text,
             "from_me": from_me,
         }
-        response = _api_request("POST", "/edit", json=payload)
+        response = _api_request("POST", "/edit", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -785,13 +811,14 @@ def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = 
         return False, f"Unexpected error: {str(e)}"
 
 
-def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tuple[bool, str]:
+def delete_message(chat_jid: str, message_id: str, from_me: bool = True, account: Optional[str] = None) -> Tuple[bool, str]:
     """Delete a message for everyone (revoke).
 
     from_me defaults True (your own message). from_me=False works only in direct
     chats; in group chats the bridge returns an error because the original
     sender's JID isn't available.
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -802,7 +829,7 @@ def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tupl
             "message_id": message_id,
             "from_me": from_me,
         }
-        response = _api_request("POST", "/revoke", json=payload)
+        response = _api_request("POST", "/revoke", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -814,13 +841,14 @@ def delete_message(chat_jid: str, message_id: str, from_me: bool = True) -> Tupl
         return False, f"Unexpected error: {str(e)}"
 
 
-def update_group_participants(group_jid: str, participants: List[str], action: str) -> Tuple[bool, str, List[dict]]:
+def update_group_participants(group_jid: str, participants: List[str], action: str, account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Update group participants (add/remove/promote/demote).
 
     Returns (success, message, participants_list). Each participant in the list
     has jid, is_admin, error (0 = applied, non-0 = WhatsApp error code),
     and optionally add_request (true if invitation pending).
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
             return False, "group_jid is required", []
@@ -831,7 +859,7 @@ def update_group_participants(group_jid: str, participants: List[str], action: s
             "participants": participants,
             "action": action,
         }
-        response = _api_request("POST", "/group_participants", json=payload)
+        response = _api_request("POST", "/group_participants", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -847,12 +875,13 @@ def update_group_participants(group_jid: str, participants: List[str], action: s
         return False, f"Unexpected error: {str(e)}", []
 
 
-def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool, str]:
+def send_chat_presence(chat_jid: str, state: str, media: str = "", account: Optional[str] = None) -> Tuple[bool, str]:
     """Send chat presence (typing/paused).
 
     state: 'composing' (typing) or 'paused' (stopped).
     media: '' (text, default) or 'audio' (recording).
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -861,7 +890,7 @@ def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool
             "state": state,
             "media": media,
         }
-        response = _api_request("POST", "/chat_presence", json=payload)
+        response = _api_request("POST", "/chat_presence", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -873,17 +902,18 @@ def send_chat_presence(chat_jid: str, state: str, media: str = "") -> Tuple[bool
         return False, f"Unexpected error: {str(e)}"
 
 
-def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
+def check_whatsapp(phones: List[str], account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Check if phone numbers are on WhatsApp.
 
     phones: list of phone numbers (with or without +). Each number is checked
     and result includes query (normalized), jid, is_in, and optionally verified_name.
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not phones:
             return False, "phones list is required", []
         payload = {"phones": phones}
-        response = _api_request("POST", "/is_on_whatsapp", json=payload)
+        response = _api_request("POST", "/is_on_whatsapp", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -899,8 +929,9 @@ def check_whatsapp(phones: List[str]) -> Tuple[bool, str, List[dict]]:
         return False, f"Unexpected error: {str(e)}", []
 
 
-def get_group_invite_link(group_jid: str, reset: bool = False) -> Tuple[bool, str, str]:
+def get_group_invite_link(group_jid: str, reset: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Get group invite link (or reset if reset=True)."""
+    base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
             return False, "group_jid is required", ""
@@ -908,7 +939,7 @@ def get_group_invite_link(group_jid: str, reset: bool = False) -> Tuple[bool, st
             "group_jid": group_jid,
             "reset": reset,
         }
-        response = _api_request("POST", "/group_invite_link", json=payload)
+        response = _api_request("POST", "/group_invite_link", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -924,13 +955,14 @@ def get_group_invite_link(group_jid: str, reset: bool = False) -> Tuple[bool, st
         return False, f"Unexpected error: {str(e)}", ""
 
 
-def get_group_invite_info(link: str) -> Tuple[bool, str, Optional[dict]]:
+def get_group_invite_info(link: str, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get group info from invite link (doesn't join the group)."""
+    base_url = accounts.resolve_account(account)
     try:
         if not link or not link.strip():
             return False, "link is required", None
         payload = {"link": link}
-        response = _api_request("POST", "/group_invite_info", json=payload)
+        response = _api_request("POST", "/group_invite_info", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -950,13 +982,14 @@ def get_group_invite_info(link: str) -> Tuple[bool, str, Optional[dict]]:
         return False, f"Unexpected error: {str(e)}", None
 
 
-def join_group_with_link(link: str) -> Tuple[bool, str, str]:
+def join_group_with_link(link: str, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Join a group using invite link."""
+    base_url = accounts.resolve_account(account)
     try:
         if not link or not link.strip():
             return False, "link is required", ""
         payload = {"link": link}
-        response = _api_request("POST", "/join_group_with_link", json=payload)
+        response = _api_request("POST", "/join_group_with_link", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -973,14 +1006,15 @@ def join_group_with_link(link: str) -> Tuple[bool, str, str]:
 
 
 def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Optional[str] = None,
-                         announce: Optional[bool] = None, locked: Optional[bool] = None) -> Tuple[bool, str, List[dict]]:
+                         announce: Optional[bool] = None, locked: Optional[bool] = None, account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Update group settings (name, topic, announce, locked)."""
+    base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
             return False, "group_jid is required", []
         if name is None and topic is None and announce is None and locked is None:
             return False, "at least one of name, topic, announce, locked is required", []
-        
+
         payload = {"group_jid": group_jid}
         if name is not None:
             payload["name"] = name
@@ -990,8 +1024,8 @@ def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Opt
             payload["announce"] = announce
         if locked is not None:
             payload["locked"] = locked
-        
-        response = _api_request("POST", "/group_settings", json=payload)
+
+        response = _api_request("POST", "/group_settings", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1007,8 +1041,9 @@ def update_group_settings(group_jid: str, name: Optional[str] = None, topic: Opt
         return False, f"Unexpected error: {str(e)}", []
 
 
-def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) -> Tuple[bool, str, str]:
+def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Set group photo from file or remove it."""
+    base_url = accounts.resolve_account(account)
     try:
         if not group_jid or not group_jid.strip():
             return False, "group_jid is required", ""
@@ -1017,7 +1052,7 @@ def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) 
             "media_path": media_path,
             "remove": remove,
         }
-        response = _api_request("POST", "/group_photo", json=payload)
+        response = _api_request("POST", "/group_photo", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1033,13 +1068,14 @@ def set_group_photo(group_jid: str, media_path: str = "", remove: bool = False) 
         return False, f"Unexpected error: {str(e)}", ""
 
 
-def get_user_info(jids: List[str]) -> Tuple[bool, str, List[dict]]:
+def get_user_info(jids: List[str], account: Optional[str] = None) -> Tuple[bool, str, List[dict]]:
     """Get user info for a list of JIDs."""
+    base_url = accounts.resolve_account(account)
     try:
         if not jids:
             return False, "jids list is required", []
         payload = {"jids": jids}
-        response = _api_request("POST", "/user_info", json=payload)
+        response = _api_request("POST", "/user_info", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1055,8 +1091,9 @@ def get_user_info(jids: List[str]) -> Tuple[bool, str, List[dict]]:
         return False, f"Unexpected error: {str(e)}", []
 
 
-def get_profile_picture(jid: str, preview: bool = False) -> Tuple[bool, str, Optional[dict]]:
+def get_profile_picture(jid: str, preview: bool = False, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get profile picture info for a user or group."""
+    base_url = accounts.resolve_account(account)
     try:
         if not jid or not jid.strip():
             return False, "jid is required", None
@@ -1064,7 +1101,7 @@ def get_profile_picture(jid: str, preview: bool = False) -> Tuple[bool, str, Opt
             "jid": jid,
             "preview": preview,
         }
-        response = _api_request("POST", "/profile_picture", json=payload)
+        response = _api_request("POST", "/profile_picture", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1084,11 +1121,12 @@ def get_profile_picture(jid: str, preview: bool = False) -> Tuple[bool, str, Opt
         return False, f"Unexpected error: {str(e)}", None
 
 
-def create_poll(chat_jid: str, question: str, options: List[str], selectable_count: int = 1) -> Tuple[bool, str, str]:
+def create_poll(chat_jid: str, question: str, options: List[str], selectable_count: int = 1, account: Optional[str] = None) -> Tuple[bool, str, str]:
     """Create a poll in a chat.
 
     Returns (success, message, message_id).
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required", ""
@@ -1110,7 +1148,7 @@ def create_poll(chat_jid: str, question: str, options: List[str], selectable_cou
             "options": options,
             "selectable_count": selectable_count,
         }
-        response = _api_request("POST", "/create_poll", json=payload)
+        response = _api_request("POST", "/create_poll", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1126,11 +1164,12 @@ def create_poll(chat_jid: str, question: str, options: List[str], selectable_cou
         return False, f"Unexpected error: {str(e)}", ""
 
 
-def vote_in_poll(chat_jid: str, poll_id: str, options: List[str]) -> Tuple[bool, str]:
+def vote_in_poll(chat_jid: str, poll_id: str, options: List[str], account: Optional[str] = None) -> Tuple[bool, str]:
     """Vote in a poll. Empty options list means removing the vote.
 
     Returns (success, message).
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required"
@@ -1141,7 +1180,7 @@ def vote_in_poll(chat_jid: str, poll_id: str, options: List[str]) -> Tuple[bool,
             "poll_id": poll_id,
             "options": options,
         }
-        response = _api_request("POST", "/vote_poll", json=payload)
+        response = _api_request("POST", "/vote_poll", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1153,11 +1192,12 @@ def vote_in_poll(chat_jid: str, poll_id: str, options: List[str]) -> Tuple[bool,
         return False, f"Unexpected error: {str(e)}"
 
 
-def get_poll_results(chat_jid: str, poll_id: str) -> Tuple[bool, str, Optional[dict]]:
+def get_poll_results(chat_jid: str, poll_id: str, account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get poll results by poll ID.
 
     Returns (success, message, results_dict).
     """
+    base_url = accounts.resolve_account(account)
     try:
         if not chat_jid or not chat_jid.strip():
             return False, "chat_jid is required", None
@@ -1167,7 +1207,7 @@ def get_poll_results(chat_jid: str, poll_id: str) -> Tuple[bool, str, Optional[d
             "chat_jid": chat_jid,
             "poll_id": poll_id,
         }
-        response = _api_request("POST", "/poll_results", json=payload)
+        response = _api_request("POST", "/poll_results", base_url, json=payload)
         try:
             result = response.json()
         except json.JSONDecodeError:
@@ -1187,7 +1227,7 @@ def get_poll_results(chat_jid: str, poll_id: str) -> Tuple[bool, str, Optional[d
         return False, f"Unexpected error: {str(e)}", None
 
 
-def get_bridge_status() -> Tuple[bool, str, Optional[dict]]:
+def get_bridge_status(account: Optional[str] = None) -> Tuple[bool, str, Optional[dict]]:
     """Get bridge health status (T005, RF-06).
 
     Returns (healthy, reason, status_dict).
@@ -1196,9 +1236,10 @@ def get_bridge_status() -> Tuple[bool, str, Optional[dict]]:
     you need to scan the QR code at /qr — reconnecting won't help. If the bridge
     is unreachable (transport error), that's a different problem: the process is down.
     """
+    base_url = accounts.resolve_account(account)
     try:
         # Use 5-second timeout: a health-check that waits 30s defeats the purpose
-        response = _api_request("GET", "/status", timeout=5)
+        response = _api_request("GET", "/status", base_url, timeout=5)
         try:
             result = response.json()
         except json.JSONDecodeError:
