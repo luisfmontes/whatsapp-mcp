@@ -1,0 +1,36 @@
+{
+  "slug": "2026-08-23-erro-de-api-lido-como-lista-vazia",
+  "titulo": "O 500 do include_last_message, e o erro de API que lê como lista vazia",
+  "criado_em": "2026-08-23",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-08-23-erro-de-api-lido-como-lista-vazia.md",
+    "em": "2026-08-23"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-08-23-erro-de-api-lido-como-lista-vazia.md",
+    "tarefas": 4,
+    "paralelas": [
+      1,
+      2
+    ],
+    "em": "2026-08-23"
+  },
+  "executar": {
+    "status": "pendente",
+    "catraca_mutacao": "2026-08-23"
+  },
+  "revisar": {
+    "status": "pendente"
+  },
+  "verificar": {
+    "status": "pendente"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
