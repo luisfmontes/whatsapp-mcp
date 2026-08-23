@@ -42,9 +42,11 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 
 ## Windows (Task Scheduler)
 
-- Não há launchd nem systemd. O auto-start é uma tarefa `WhatsAppMCPBridge`, trigger `-AtLogOn`,
-  rodando **sem elevação** na sessão do usuário (sem senha guardada, sem admin). Criada por
-  `install.ps1 -Service`. Inspecionar: `Get-ScheduledTask -TaskName WhatsAppMCPBridge`.
+- Não há launchd nem systemd. O auto-start é uma tarefa `WhatsAppMCPBridge` (single account) ou
+  `WhatsAppMCPBridge-<alias>` (multi-account), trigger `-AtLogOn`, rodando **sem elevação** na 
+  sessão do usuário (sem senha guardada, sem admin). Criada por `install.ps1 -Service`. 
+  Inspecionar single: `Get-ScheduledTask -TaskName WhatsAppMCPBridge`. Inspecionar todas:
+  `Get-ScheduledTask -TaskName "WhatsAppMCPBridge*"`.
 - `-ExecutionTimeLimit ([TimeSpan]::Zero)` é obrigatório: o default do agendador mata a tarefa em
   3 dias, o que num bridge de longa duração é morte silenciosa no meio da semana.
 - O Task Scheduler **não guarda saída** — diagnóstico só existe se o launcher redirecionar. O
@@ -52,17 +54,31 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
   `WHATSAPP_BRIDGE_LOG` (o `recover_audios.py` lê esse arquivo).
 - Como no launchd, **o agendador não herda env da shell** → transcrição vem de `transcription.env`,
   carregado pelo launcher. As linhas do arquivo começam com `export` (é escrito para `source` no
-  POSIX); o launcher remove esse prefixo antes de setar a variável.
+  POSIX); o launcher remove esse prefixo antes de setar a variável. **Em modo multi-account,
+  `transcription.env` é único** (em `~/.whatsapp-mcp/transcription.env`), **compartilhado por todas
+  as contas** — cada launcher carrega esse arquivo, então todas usam a mesma chave de transcrição
+  e engine.
+- Arquivo de QR em `%TEMP%`: em modo single-account é `whatsapp-qr.png`; em multi-account com
+  `WHATSAPP_ACCOUNT` setado (pela tarefa do bridge), passa a ser `whatsapp-qr-<alias>.png`
+  (ex.: `whatsapp-qr-trabalho.png`). Mesmo vale para o lockfile de transcrição: `wa_transcribe.lock`
+  em single-account, `wa_transcribe-<alias>.lock` em multi-account. Sem `WHATSAPP_ACCOUNT`, o
+  bridge usa exatamente os nomes legados (a conta default não percebe a mudança).
 - **Porta:** o Windows reserva faixas TCP (Hyper-V/WSL) e a 8080 costuma cair numa delas. O bind
   falha com `An attempt was made to access a socket in a way forbidden by its access permissions`
   e o bridge **só loga e continua** — mesma armadilha de "serviço ativo sem porta aberta" da seção
   de bridge remota, mas aqui é o caso comum, não a exceção. Checar
   `netsh interface ipv4 show excludedportrange protocol=tcp`; o `install.ps1` já troca de porta
-  sozinho e usa 8081 como default.
+  sozinho e usa 8081 como default. Em multi-account, cada new-account ganha sua porta (começando
+  de 3006, pulando as já-usadas).
 - Reiniciar: `Stop-Process -Name whatsapp-bridge -Force` (não há sinal de parada limpa no Windows;
-  a tarefa religa no próximo logon, ou `Start-ScheduledTask -TaskName WhatsAppMCPBridge`).
+  a tarefa religa no próximo logon, ou `Start-ScheduledTask -TaskName WhatsAppMCPBridge*`).
+  Em multi-account, reiniciar uma conta específica: `Stop-Process -Name whatsapp-bridge -Force`
+  mata todas (não há filtro por port), então use `Start-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"`
+  pra religar só a que você quer.
 - Checar porta: `Get-NetTCPConnection -LocalPort <porta> -State Listen`. Checar processo:
-  `Get-Process whatsapp-bridge`.
+  `Get-Process whatsapp-bridge` (em multi-account todos aparecem como `whatsapp-bridge.exe`; 
+  filtrar por porta ou olhar `Get-ScheduledTask -TaskName "WhatsAppMCPBridge*" -v` pra ver qual
+  tarefa roda cada um).
 - Arquivos `.ps1` deste repo são **ASCII puro** de propósito: o PowerShell 5.1 lê arquivo sem BOM
   como ANSI, e um glifo Unicode virando bytes soltos (0x93 = aspa em CP-1252) faz o script inteiro
   falhar no parse com "falta } de fechamento". Já o JSON de config é gravado **sem BOM**, porque BOM
