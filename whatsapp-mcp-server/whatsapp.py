@@ -1392,3 +1392,87 @@ def get_bridge_status(account: Optional[str] = None) -> Tuple[bool, str, Optiona
         return False, f"Request error: {str(e)}", None
     except Exception as e:
         return False, f"Unexpected error: {str(e)}", None
+
+
+def pair_account(account: str) -> bytes:
+    """
+    Get the QR code PNG for pairing a registered account.
+
+    Implements D4 from design: parear conta nova acontece por endpoint REST + tool MCP
+    que devolve o QR. O alias é obrigatório aqui: parear a conta errada é pior que um
+    erro de argumento. Se o alias não existir no mapa, o erro deve dizer para rodar o
+    instalador.
+
+    Args:
+        account: Account alias to pair (required, not optional).
+
+    Returns:
+        The raw PNG bytes from /qr.png, starting with PNG signature \x89PNG.
+
+    Raises:
+        ValueError: If account is not registered, if the bridge is offline,
+                   or if the account is already paired (logged in).
+    """
+    # Validate that account is provided (required for pairing)
+    if not account:
+        raise ValueError("Account alias is required for pairing")
+
+    # Check if accounts are configured at all
+    accounts_map = accounts._load_accounts_map()
+    if accounts_map is None:
+        raise ValueError(
+            "No accounts configured. Run 'install.ps1 -AddAccount <alias>' to create an account."
+        )
+
+    # Check if the specified account exists
+    known_accounts = accounts_map.get("accounts", {})
+    if account not in known_accounts:
+        known_aliases = sorted(known_accounts.keys())
+        raise ValueError(
+            f"Account '{account}' not found. Run 'install.ps1 -AddAccount {account}' to create it. "
+            f"Known accounts: {known_aliases}"
+        )
+
+    # Verify bridge is online
+    try:
+        base_url = _check_account_online(account)
+    except ValueError:
+        # Re-raise the offline error from _check_account_online
+        raise
+
+    # Check if already paired: if bridge is logged_in, no QR available
+    try:
+        response = _api_request("GET", "/api/status", base_url, timeout=5)
+        response.raise_for_status()
+        status = response.json()
+
+        # If already logged in, account is paired
+        if status.get("logged_in", False):
+            raise ValueError(
+                f"Account '{account}' is already paired. No QR code available."
+            )
+    except (json.JSONDecodeError, requests.RequestException):
+        # If we can't check status, continue to try getting QR
+        # (bridge might be in an intermediate state)
+        pass
+
+    # Fetch QR PNG from the bridge
+    try:
+        response = _api_request("GET", "/qr.png", base_url, timeout=REQUEST_TIMEOUT)
+
+        if response.status_code == 404:
+            # QR not available - either bridge just started or account is already paired
+            # We checked logged_in above, so this is likely just bridge startup delay
+            raise ValueError(
+                f"QR code not yet available for account '{account}'. "
+                f"Start the bridge and wait for the QR code to appear."
+            )
+
+        response.raise_for_status()
+
+        # Return the PNG bytes
+        return response.content
+
+    except requests.RequestException as e:
+        # Re-raise with clear message
+        raise ValueError(f"Failed to get QR for account '{account}': {str(e)}")
