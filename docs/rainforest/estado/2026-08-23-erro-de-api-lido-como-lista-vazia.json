@@ -78,7 +78,11 @@
     "head": "a15203166080a1bc7b55bff9aa6d3b302a784978"
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "tarefas": 7,
+    "comando": "7 criterios rodados um por um, na ordem do plano",
+    "saida": "t1: go test -run ListChats|GetChat -v = 4 PASS + ponta a ponta contra copia do store real (2477 chats/121249 msgs) com os 4 cruzamentos em 200, null quando false e preenchido quando true; t2+t6: pytest test_api_errors.py -q = 8 passed, suite = 102 passed; t3: gh pr view 12 = OPEN, head a0554df, checks 14/14 SUCCESS, nenhum FAILURE/PENDING; t4: gh pr diff 15 mostra hunks em func listChats E func getChat, state OPEN; t5: git diff --stat lista os 3 artefatos e conferir-fluxo cobertura sai 0; t7: grep -c da linha antiga do AGENTS.md = 0 e a linha nova traz as duas metades",
+    "em": "2026-08-23"
   },
   "fechar": {
     "status": "pendente"
