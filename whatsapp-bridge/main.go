@@ -4976,7 +4976,12 @@ func main() {
 				}
 
 				// Also save to disk for convenience.
-				qrFile := filepath.Join(os.TempDir(), "whatsapp-qr.png")
+				qrFilename, err := accountScopedTempFilename("whatsapp-qr.png")
+				if err != nil {
+					fmt.Printf("\nCould not derive QR filename: %v\n", err)
+					continue
+				}
+				qrFile := filepath.Join(os.TempDir(), qrFilename)
 				if err := goqr.WriteFile(evt.Code, goqr.Medium, 512, qrFile); err != nil {
 					// Previously this failure was swallowed by `err == nil`, so on
 					// any OS where the path was unwritable the QR just never
@@ -5322,6 +5327,35 @@ func requestHistorySync(client *whatsmeow.Client, lastKnown *types.MessageInfo, 
 // since events.Connected fires on every reconnect.
 var sweepOnce sync.Once
 
+// accountScopedTempFilename derives a temporary filename from a base name and
+// the WHATSAPP_ACCOUNT environment variable. If the variable is unset or empty,
+// it returns the base name unchanged; otherwise, it inserts the sanitized
+// account name before the file extension.
+//
+// Invalid characters (/, \, :, ..) in the account name are rejected with an error.
+func accountScopedTempFilename(basename string) (string, error) {
+	account := os.Getenv("WHATSAPP_ACCOUNT")
+	if account == "" {
+		return basename, nil
+	}
+
+	// Validate account name: reject characters that cannot appear in filenames.
+	// The checks below must align with what the OS forbids.
+	invalidChars := []string{"/", "\\", ":", ".."}
+	for _, c := range invalidChars {
+		if strings.Contains(account, c) {
+			return "", fmt.Errorf("invalid account name %q: contains %q", account, c)
+		}
+	}
+
+	// Split basename into name and extension
+	ext := filepath.Ext(basename)
+	name := basename[:len(basename)-len(ext)]
+
+	// Insert account name before extension
+	return name + "-" + account + ext, nil
+}
+
 // startTranscriptionSweep periodically shells out to the Python transcriber to
 // turn newly-arrived audio messages into searchable text. Whisper runs in a
 // separate process so it never blocks the bridge's message handling. A lockfile
@@ -5335,7 +5369,12 @@ func startTranscriptionSweep(interval time.Duration) {
 	}
 	python := venvPython(pyDir)
 	script := filepath.Join(pyDir, "transcribe.py")
-	lockPath := filepath.Join(os.TempDir(), "wa_transcribe.lock")
+	lockFilename, err := accountScopedTempFilename("wa_transcribe.lock")
+	if err != nil {
+		fmt.Printf("transcription sweep disabled: %v\n", err)
+		return
+	}
+	lockPath := filepath.Join(os.TempDir(), lockFilename)
 
 	if _, err := os.Stat(python); err != nil {
 		fmt.Printf("transcription sweep disabled: python not found at %s\n", python)
