@@ -409,17 +409,18 @@ def list_chats(
     account: Optional[str] = None
 ) -> List[Chat]:
     """Get chats matching the specified criteria.
-    
-    D12: If account's bridge is offline, raises ValueError with account alias
-    and scheduled task name instead of silently returning empty list.
+
+    D12: If account is explicitly provided and its bridge is offline, raises ValueError
+    with account alias and scheduled task name instead of silently returning empty list.
+
+    D1: When account is None, falls back to default account without checking online status.
     """
-    # D12: Check if account's bridge is online before making request
-    try:
-        base_url = _check_account_online(account)
-    except ValueError as e:
-        # Re-raise with clear error message naming account and task
-        raise
-    
+    # D12: If account is explicitly provided, verify its bridge is online
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
+
     result = _api_post("/chats", {
         "query": query,
         "limit": limit,
