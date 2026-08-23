@@ -258,7 +258,13 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     if cache_key in _sender_name_cache:
         return _sender_name_cache[cache_key]
 
-    result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
+    try:
+        result = _api_post("/sender_name", {"sender_jid": sender_jid}, base_url)
+    except ValueError:
+        # Bridge-side error (5xx): the sender name is not the payload, and
+        # losing it is far better than losing the whole message (D6). Don't
+        # cache, so a later retry can still succeed.
+        return sender_jid
     if result is None:
         # Transport failure: don't cache, so a later retry can still succeed.
         return sender_jid
@@ -285,7 +291,11 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
         sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
+        # Surface the failure instead of silently dropping the rest of the
+        # line (the mistake this entry exists to fix elsewhere) - same
+        # pattern get_message_context already uses for a failed fetch.
         logger.warning("Error formatting message %s: %s", message.id, e)
+        output += f"[Error formatting message: {e}]\n"
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True, account: Optional[str] = None) -> str:

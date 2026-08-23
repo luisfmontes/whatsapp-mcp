@@ -11,6 +11,7 @@ import json
 import socket
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import whatsapp
+from whatsapp import Message
 
 # The exact body the bridge returns today for the SQL bug this defect was
 # found through (see the plan/design doc referenced above).
@@ -56,6 +58,8 @@ class _FakeBridgeHandler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
         if self.path == "/500":
+            self._write_json(500, REAL_500_BODY)
+        elif self.path == "/sender_name":
             self._write_json(500, REAL_500_BODY)
         elif self.path == "/404":
             self._write_json(404, {"error": "not found"})
@@ -112,3 +116,74 @@ def test_connection_refused_returns_none():
 def test_200_returns_parsed_json_unchanged(fake_bridge):
     result = whatsapp._api_post("/200", {}, fake_bridge)
     assert result == {"chats": [{"jid": "123@s.whatsapp.net"}]}
+
+
+# --- D6: the ValueError from D2 must not turn a message invisible ---------
+#
+# _api_post now raises ValueError on a bridge 5xx (D2). get_sender_name is
+# the one _api_post caller whose failure sits in the middle of building a
+# message line (format_message), so an uncaught ValueError there used to
+# propagate into format_message's broad `except Exception`, which swallowed
+# it and returned only the "[timestamp] Chat: X " prefix - the sender and
+# the message content vanished from the output with no trace.
+
+
+def _make_message(sender="5562999999999@s.whatsapp.net", content="texto que o usuario precisa ler"):
+    return Message(
+        timestamp=datetime(2026, 8, 23, 10, 0, 0),
+        sender=sender,
+        content=content,
+        is_from_me=False,
+        chat_jid="123@g.us",
+        id="msg-1",
+        chat_name="Alice",
+    )
+
+
+def test_get_sender_name_falls_back_on_value_error(monkeypatch):
+    """A 5xx on /sender_name must degrade to the JID, not raise (D6)."""
+    def fake_api_post(path, payload, base_url, timeout=whatsapp.REQUEST_TIMEOUT):
+        raise ValueError(f"Bridge API error on {path}: HTTP 500 - boom")
+
+    monkeypatch.setattr(whatsapp, "_api_post", fake_api_post)
+    monkeypatch.setattr(whatsapp.accounts, "resolve_account", lambda account: "http://fake-bridge")
+    whatsapp._sender_name_cache.clear()
+
+    jid = "5562999999999@s.whatsapp.net"
+    assert whatsapp.get_sender_name(jid) == jid
+    # Don't cache a transport/bridge failure - a later retry may still work.
+    assert (("http://fake-bridge", jid)) not in whatsapp._sender_name_cache
+
+
+def test_format_message_survives_sender_name_500(fake_bridge, monkeypatch):
+    """End to end: format_message keeps the content and falls back to the
+    JID as the sender name when /sender_name 500s - it must not come back
+    as just the '[timestamp] Chat: X ' prefix (the regression this closes)."""
+    monkeypatch.setattr(whatsapp.accounts, "resolve_account", lambda account=None: fake_bridge)
+    whatsapp._sender_name_cache.clear()
+
+    message = _make_message()
+    result = whatsapp.format_message(message)
+
+    assert "From:" in result
+    assert message.sender in result
+    assert message.content in result
+
+
+def test_format_message_surfaces_other_exception_instead_of_silence(monkeypatch):
+    """A different exception out of get_sender_name must not vanish in
+    silence: format_message signals the failure in the returned text,
+    the same pattern get_message_context already uses for a failed fetch."""
+    def raise_runtime_error(sender_jid, account=None):
+        raise RuntimeError("boom - not a ValueError")
+
+    monkeypatch.setattr(whatsapp, "get_sender_name", raise_runtime_error)
+
+    message = _make_message()
+    result = whatsapp.format_message(message)
+
+    assert "Chat: Alice" in result
+    assert "boom - not a ValueError" in result
+    # The old, silent-drop behavior: only the prefix, nothing to say a
+    # message got lost.
+    assert result.strip() != "[2026-08-23 10:00:00] Chat: Alice"
