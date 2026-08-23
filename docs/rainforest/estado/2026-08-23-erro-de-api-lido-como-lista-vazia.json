@@ -23,8 +23,8 @@
   "executar": {
     "status": "ok",
     "catraca_mutacao": "2026-08-23",
-    "tarefas_ok": 4,
-    "tarefas": 4,
+    "tarefas_ok": 5,
+    "tarefas": 5,
     "em": "2026-08-23",
     "mutacao": [
       {
@@ -44,11 +44,20 @@
         "tarefa": 4,
         "resultado": "n/a",
         "motivo": "e o mesmo diff da tarefa 1, ja validado por mutacao nos dois sitios; aqui nao ha codigo novo, so destino"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "n/a",
+        "motivo": "documento nao tem comportamento a inverter; a falsificacao dele e o conferir-fluxo cobertura sair 0"
       }
     ]
   },
   "revisar": {
-    "status": "pendente"
+    "status": "pendente",
+    "snapshot": {
+      "head": "e54041c1d99807b00f91ff717907ed37fd63435e",
+      "caminhos_sujos": []
+    }
   },
   "verificar": {
     "status": "pendente"
