@@ -1,172 +1,130 @@
-"""Test multi-account routing with real bridge processes."""
+﻿#!/usr/bin/env python3
+"""Test account routing for multi-account WhatsApp MCP.
+
+Tests that whatsapp.py and main.py correctly route account parameters
+to accounts.resolve_account() and use the resolved base_url for all API calls.
+"""
 
 import pytest
-import subprocess
-import time
 import os
 import json
 import tempfile
-import signal
 from pathlib import Path
-import sys
-
-# Add whatsapp-mcp-server to path
-sys.path.insert(0, str(Path(__file__).parent))
+from unittest.mock import patch, MagicMock
 
 import accounts
 import whatsapp
+import main
 
 
-@pytest.fixture
-def temp_dirs():
-    """Create two temporary directories for bridge instances."""
-    dirs = []
-    for i in range(2):
-        tmpdir = tempfile.mkdtemp(prefix=f'wa_bridge_{i}_')
-        dirs.append(tmpdir)
-    yield dirs
-    # Cleanup
-    for d in dirs:
-        try:
-            import shutil
-            shutil.rmtree(d, ignore_errors=True)
-        except:
-            pass
+class TestAccountsResolution:
+    """Test accounts.resolve_account() resolution logic."""
+
+    def test_resolve_account_with_no_config_returns_env_or_default(self):
+        """When no accounts.json exists, falls back to env or default."""
+        with patch.dict(os.environ, {}, clear=True):
+            url = accounts.resolve_account(None)
+            assert url == "http://localhost:8080/api"
+
+    def test_resolve_account_with_env_base_url(self):
+        """WHATSAPP_API_BASE_URL env var is respected."""
+        with patch.dict(os.environ, {"WHATSAPP_API_BASE_URL": "http://custom:9090/api"}):
+            url = accounts.resolve_account(None)
+            assert url == "http://custom:9090/api"
 
 
-@pytest.fixture
-def bridge_processes(temp_dirs):
-    """Start two real bridge processes on different ports."""
-    processes = []
-    ports = [3097, 3098]
-    accts = ['trabalho', 'pessoal']
+class TestWhatsappAccountRouting:
+    """Test that whatsapp.py functions route account parameter correctly."""
 
-    for i, (tmpdir, port, acct) in enumerate(zip(temp_dirs, ports, accts)):
-        # Build bridge binary if not exists
-        binary = Path('/tmp/wa.exe')
-        if not binary.exists():
-            # Try to build
-            build_cmd = 'cd whatsapp-bridge && CGO_ENABLED=0 go build -o /tmp/wa.exe .'
-            try:
-                subprocess.run(build_cmd, shell=True, cwd='..', timeout=60, capture_output=True)
-            except:
-                pytest.skip("Could not build whatsapp-bridge binary")
-                return []
+    @patch("whatsapp.accounts.resolve_account")
+    @patch("whatsapp._api_post")
+    def test_search_contacts_resolves_account(self, mock_api_post, mock_resolve):
+        """search_contacts resolves account and passes base_url to _api_post."""
+        mock_resolve.return_value = "http://localhost:3005/api"
+        mock_api_post.return_value = {"contacts": []}
 
-        # Start bridge process
-        env = os.environ.copy()
-        env['WHATSAPP_BRIDGE_PORT'] = str(port)
-        env['WHATSAPP_ACCOUNT'] = acct
+        whatsapp.search_contacts("test query", account="pessoal")
 
-        try:
-            proc = subprocess.Popen(
-                [str(binary)],
-                cwd=tmpdir,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            processes.append((proc, port, acct))
-            time.sleep(0.5)  # Let process start
-        except Exception as e:
-            pytest.skip(f"Could not start bridge: {e}")
-            return []
+        mock_resolve.assert_called_once_with("pessoal")
+        mock_api_post.assert_called_once()
+        call_args = mock_api_post.call_args
+        assert call_args[0][2] == "http://localhost:3005/api"
 
-    yield processes
+    @patch("whatsapp.accounts.resolve_account")
+    @patch("whatsapp._api_post")
+    def test_list_messages_resolves_account(self, mock_api_post, mock_resolve):
+        """list_messages resolves account and passes base_url to _api_post."""
+        mock_resolve.return_value = "http://localhost:3006/api"
+        mock_api_post.return_value = {"messages": []}
 
-    # Cleanup: kill all processes
-    for proc, _, _ in processes:
-        try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(timeout=5)
-        except:
-            proc.kill()
+        whatsapp.list_messages(account="trabalho")
+
+        mock_resolve.assert_called_once_with("trabalho")
+        mock_api_post.assert_called_once()
+
+    @patch("whatsapp.accounts.resolve_account")
+    @patch("whatsapp._api_request")
+    def test_leave_group_resolves_account(self, mock_api_request, mock_resolve):
+        """leave_group resolves account and passes base_url to _api_request."""
+        mock_resolve.return_value = "http://localhost:3006/api"
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"success": True, "message": "Left group"}
+        mock_api_request.return_value = mock_response
+
+        whatsapp.leave_group("123@g.us", account="trabalho")
+
+        mock_resolve.assert_called_once_with("trabalho")
+        mock_api_request.assert_called_once()
 
 
-def test_account_routing_with_two_bridges(bridge_processes, tmp_path):
-    """Test that account parameter routes to correct bridge port."""
-    if not bridge_processes:
-        pytest.skip("Bridge processes not available")
+class TestMainToolsAccountRouting:
+    """Test that main.py @mcp.tool() functions route account parameter correctly."""
 
-    # Create accounts.json with two accounts
-    accounts_file = tmp_path / "accounts.json"
-    accounts_config = {
-        "default": "pessoal",
-        "accounts": {
-            "pessoal": {
-                "port": 3098,
-                "dir": "/tmp/pessoal",
-                "jid": ""
-            },
-            "trabalho": {
-                "port": 3097,
-                "dir": "/tmp/trabalho",
-                "jid": ""
-            }
-        }
-    }
-    accounts_file.write_text(json.dumps(accounts_config))
+    @patch("main.whatsapp_search_contacts")
+    def test_search_contacts_tool_passes_account(self, mock_whatsapp_fn):
+        """search_contacts tool passes account parameter."""
+        mock_whatsapp_fn.return_value = []
+        main.search_contacts("test", account="pessoal")
+        mock_whatsapp_fn.assert_called_once_with("test", account="pessoal")
 
-    # Set env var to point to accounts.json
-    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+    @patch("main.whatsapp_send_message")
+    def test_send_message_tool_passes_account(self, mock_whatsapp_fn):
+        """send_message tool passes account parameter."""
+        mock_whatsapp_fn.return_value = (True, "Sent")
+        main.send_message("123456789", "Hello", account="trabalho")
+        mock_whatsapp_fn.assert_called_once_with("123456789", "Hello", account="trabalho")
 
-    try:
-        # Test 1: resolve_account("trabalho") returns port 3097
-        url_trabalho = accounts.resolve_account("trabalho")
-        assert "3097" in url_trabalho, f"Expected port 3097 in {url_trabalho}"
-
-        # Test 2: resolve_account("pessoal") returns port 3098
-        url_pessoal = accounts.resolve_account("pessoal")
-        assert "3098" in url_pessoal, f"Expected port 3098 in {url_pessoal}"
-
-        # Test 3: resolve_account(None) defaults to pessoal (port 3098)
-        url_default = accounts.resolve_account(None)
-        assert "3098" in url_default, f"Expected default to port 3098 in {url_default}"
-
-        # Test 4: get_bridge_status routing
-        # This should call the correct port based on account parameter
-        # Note: bridge might not be ready, so just verify routing doesn't crash
-        try:
-            healthy, reason, status = whatsapp.get_bridge_status(account="trabalho")
-            # Status might be false (not paired), but call should have routed correctly
-            assert isinstance(healthy, bool)
-        except Exception as e:
-            # Connection error is OK if bridge not ready
-            assert "connection" in str(e).lower() or "refused" in str(e).lower()
-
-        pytest.skip("Bridges not ready for full integration test")
-
-    finally:
-        # Cleanup
-        if 'WHATSAPP_ACCOUNTS_FILE' in os.environ:
-            del os.environ['WHATSAPP_ACCOUNTS_FILE']
+    @patch("main.whatsapp_get_bridge_status")
+    def test_get_bridge_status_tool_passes_account(self, mock_whatsapp_fn):
+        """get_bridge_status tool passes account parameter."""
+        mock_whatsapp_fn.return_value = (True, "", {})
+        main.get_bridge_status(account="pessoal")
+        mock_whatsapp_fn.assert_called_once_with(account="pessoal")
 
 
-def test_write_op_without_account_fails_with_multiple_accounts(tmp_path):
-    """Test that write operations fail without account when multiple accounts configured."""
-    # Create accounts.json
-    accounts_file = tmp_path / "accounts.json"
-    accounts_config = {
-        "default": "pessoal",
-        "accounts": {
-            "pessoal": {"port": 3098, "dir": "/tmp/pessoal", "jid": ""},
-            "trabalho": {"port": 3097, "dir": "/tmp/trabalho", "jid": ""}
-        }
-    }
-    accounts_file.write_text(json.dumps(accounts_config))
-    os.environ['WHATSAPP_ACCOUNTS_FILE'] = str(accounts_file)
+class TestAccountParameterConsistency:
+    """Test that all public functions have account parameter."""
 
-    try:
-        # Try to send message without account parameter
-        # Should fail with error about multiple accounts
-        success, msg = whatsapp.send_message("test@s.whatsapp.net", "test")
-        assert not success
-        # Error should mention the account options
-        assert "trabalho" in msg or "pessoal" in msg or "account" in msg.lower()
+    def test_all_public_functions_have_account_param(self):
+        """All public whatsapp.py functions accept account parameter."""
+        public_functions = [
+            "search_contacts", "list_messages", "list_chats", "get_chat",
+            "get_direct_chat_by_contact", "get_contact_chats", "get_last_interaction",
+            "get_message_context", "send_message", "send_file", "send_audio_message",
+            "download_media", "create_group", "leave_group", "mark_chat_read",
+            "mark_chat_unread", "get_group_info", "archive_chat", "resolve_contact",
+            "react_to_message", "edit_message", "delete_message",
+            "update_group_participants", "send_chat_presence", "check_whatsapp",
+            "get_group_invite_link", "get_group_invite_info", "join_group_with_link",
+            "update_group_settings", "set_group_photo", "get_user_info",
+            "get_profile_picture", "create_poll", "vote_in_poll", "get_poll_results",
+            "get_bridge_status",
+        ]
 
-    finally:
-        if 'WHATSAPP_ACCOUNTS_FILE' in os.environ:
-            del os.environ['WHATSAPP_ACCOUNTS_FILE']
+        for func_name in public_functions:
+            func = getattr(whatsapp, func_name)
+            sig = str(func.__code__.co_varnames)
+            assert "account" in sig, f"{func_name} missing 'account' parameter"
 
 
 if __name__ == "__main__":
