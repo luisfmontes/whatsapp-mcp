@@ -244,6 +244,104 @@ Three things differ from macOS/Linux and will bite if ignored:
 The QR is written to `%TEMP%\whatsapp-qr.png` and opened with the default image
 viewer, in addition to being served at `/qr`.
 
+### Multi-account (Windows)
+
+Run multiple WhatsApp accounts (personal, work, etc.) on the same Windows machine, each isolated in its own bridge process.
+
+#### Model
+
+- **One bridge process per account**: each account has its own `whatsapp-bridge` binary running on a separate port, storing messages in a separate `store/` directory.
+- **One scheduled task per account**: named `WhatsAppMCPBridge-<alias>` (e.g., `WhatsAppMCPBridge-trabalho`), auto-starting with login, managed by Windows Task Scheduler.
+- **Single Python MCP server**: all 36 tools gain an optional `account` parameter. Calls with no `account` use the default account; calls with `account="trabalho"` route to that account's bridge.
+
+#### Setup
+
+1. **Create a new account** with `install.ps1 -AddAccount`:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File install.ps1 -AddAccount trabalho -Service
+   ```
+
+   This creates:
+   - Directory: `~/.whatsapp-mcp/accounts/trabalho/`
+   - Allocated port: automatically chosen (e.g., 3006), avoiding Windows' reserved ranges
+   - Entry in `~/.whatsapp-mcp/accounts.json`
+   - Launcher and scheduled task (registered if `-Service` is passed)
+
+2. **Pair the account** via the MCP tool `pair_account("trabalho")`:
+
+   ```python
+   # In Claude, call the pair_account tool:
+   pair_account(account="trabalho")
+   # Returns the QR code PNG (base64-encoded)
+   # Scan with your phone to link the account
+   ```
+
+#### Configuration: `accounts.json`
+
+Lives at `~/.whatsapp-mcp/accounts.json`. Created by the installer, maps account aliases to directories and ports:
+
+```json
+{
+  "default": "pessoal",
+  "accounts": {
+    "pessoal": {
+      "dir": "C:\\Users\\<seu-usuario>\\.whatsapp-mcp\\whatsapp-bridge",
+      "port": 8081,
+      "jid": null
+    },
+    "trabalho": {
+      "dir": "C:\\Users\\<seu-usuario>\\.whatsapp-mcp\\accounts\\trabalho",
+      "port": 3006,
+      "jid": null
+    }
+  }
+}
+```
+
+- `default`: which account is used when tools are called without `account` parameter
+- `accounts`: map of account aliases to config (dir, port, jid)
+- `jid`: **reserved, always `null` today.** Nothing writes it and nothing reads it — accounts are addressed by alias, never by JID. The field is kept in the schema so that filling it later does not become a format change.
+- `dir`: working directory for that account's bridge (where `store/` lives)
+
+#### Usage rules
+
+- **Read operations** (e.g., `list_chats`, `list_messages`) default to the account in `"default"`. Pass `account="trabalho"` to read from another account.
+- **Write operations** (e.g., `send_message`, `send_file`) **require the `account` parameter if more than one account is configured**. Calling `send_message` without `account` when two accounts exist returns an error naming both: this prevents accidentally sending a work message from your personal account or vice versa.
+- If only one account exists (no `accounts.json`), all tools work as before — `account` is optional everywhere.
+
+#### Scheduled tasks and auto-start
+
+Each account gets its own Task Scheduler entry. Inspect them with:
+
+```powershell
+Get-ScheduledTask -TaskName "WhatsAppMCPBridge-*"
+```
+
+Stop/start a specific account:
+
+```powershell
+Stop-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"
+Start-ScheduledTask -TaskName "WhatsAppMCPBridge-trabalho"
+```
+
+#### Transcription configuration
+
+The transcription settings file (`transcription.env`) is **shared by all accounts** — stored at `~/.whatsapp-mcp/transcription.env` and loaded by each account's launcher. This means all accounts use the same transcription engine and API key. See [Audio transcription](#audio-transcription-opt-in) above for configuration.
+
+#### Single-account mode (no multiconta)
+
+If you have only one account, **you don't need `accounts.json`**. The bridge works exactly as before:
+
+- No account registration needed
+- All tools work without `account` parameter
+- Reads and writes default to `WHATSAPP_BRIDGE_PORT` (8081)
+- Multiconta is opt-in; a fresh install is single-account by design
+
+#### Platform support
+
+Multi-account mode is **Windows only** in this version (via `install.ps1 -AddAccount`). The `install.sh` for macOS/Linux does not support `-AddAccount` yet — Linux/macOS users can still run multiple bridges by hand (one per directory, one per port, with separate configs), but the UI for it is not ready.
+
 #### Contributing on Windows
 
 `go build` on Windows never compiles the `!windows` half of the SQLite layer, so
