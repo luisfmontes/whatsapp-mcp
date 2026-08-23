@@ -300,8 +300,8 @@ Lives at `~/.whatsapp-mcp/accounts.json`. Created by the installer, maps account
 ```
 
 - `default`: which account is used when tools are called without `account` parameter
-- `accounts`: map of account aliases to config (dir, port, jid filled after pairing)
-- `jid`: set automatically when the account is paired (JID of the linked phone)
+- `accounts`: map of account aliases to config (dir, port, jid)
+- `jid`: **reserved, always `null` today.** Nothing writes it and nothing reads it — accounts are addressed by alias, never by JID. The field is kept in the schema so that filling it later does not become a format change.
 - `dir`: working directory for that account's bridge (where `store/` lives)
 
 #### Usage rules
