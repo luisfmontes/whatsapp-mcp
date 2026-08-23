@@ -1677,6 +1677,104 @@ func TestHandleStatus(t *testing.T) {
 // setupPollStore gives a test a real MessageStore on a throwaway database.
 //
 // It goes through NewMessageStore instead of sql.Open with a literal driver
+// TestAccountScopedTempPaths validates the behavior of accountScopedTempFilename:
+// without WHATSAPP_ACCOUNT, filenames are unchanged; with it set, the account
+// name is inserted before the extension; invalid characters in the account name
+// are rejected.
+func TestAccountScopedTempPaths(t *testing.T) {
+	// Save original env to restore after test
+	orig := os.Getenv("WHATSAPP_ACCOUNT")
+	t.Cleanup(func() { os.Setenv("WHATSAPP_ACCOUNT", orig) })
+
+	t.Run("without WHATSAPP_ACCOUNT returns basename unchanged", func(t *testing.T) {
+		os.Unsetenv("WHATSAPP_ACCOUNT")
+		got, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "whatsapp-qr.png" {
+			t.Errorf("got %q, want %q", got, "whatsapp-qr.png")
+		}
+	})
+
+	t.Run("with WHATSAPP_ACCOUNT=trabalho inserts suffix before extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "whatsapp-qr-trabalho.png" {
+			t.Errorf("got %q, want %q", got, "whatsapp-qr-trabalho.png")
+		}
+	})
+
+	t.Run("with WHATSAPP_ACCOUNT=pessoal inserts suffix before extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "pessoal")
+		got, err := accountScopedTempFilename("wa_transcribe.lock")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "wa_transcribe-pessoal.lock" {
+			t.Errorf("got %q, want %q", got, "wa_transcribe-pessoal.lock")
+		}
+	})
+
+	t.Run("forward slash in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad/name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for forward slash")
+		}
+	})
+
+	t.Run("backslash in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad\\name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for backslash")
+		}
+	})
+
+	t.Run("colon in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad:name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for colon")
+		}
+	})
+
+	t.Run("double dot (..) in account name is rejected", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "bad..name")
+		_, err := accountScopedTempFilename("whatsapp-qr.png")
+		if err == nil {
+			t.Fatal("expected error for double dot")
+		}
+	})
+
+	t.Run("file without extension uses empty string as extension", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("lockfile")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "lockfile-trabalho" {
+			t.Errorf("got %q, want %q", got, "lockfile-trabalho")
+		}
+	})
+
+	t.Run("multiple dots are handled correctly", func(t *testing.T) {
+		os.Setenv("WHATSAPP_ACCOUNT", "trabalho")
+		got, err := accountScopedTempFilename("archive.tar.gz")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// filepath.Ext only returns the last extension
+		if got != "archive.tar-trabalho.gz" {
+			t.Errorf("got %q, want %q", got, "archive.tar-trabalho.gz")
+		}
+	})
+}
+
 // name: the project registers a different driver per platform (mattn/go-sqlite3
 // under CGO, modernc on Windows), so a hardcoded "sqlite" compiles everywhere
 // and fails at run time on macOS and Linux — which is exactly how CI caught the
