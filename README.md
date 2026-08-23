@@ -286,12 +286,12 @@ Lives at `~/.whatsapp-mcp/accounts.json`. Created by the installer, maps account
   "default": "pessoal",
   "accounts": {
     "pessoal": {
-      "dir": "C:\\Users\\Luis\\.whatsapp-mcp\\whatsapp-bridge",
+      "dir": "C:\\Users\\<seu-usuario>\\.whatsapp-mcp\\whatsapp-bridge",
       "port": 8081,
       "jid": null
     },
     "trabalho": {
-      "dir": "C:\\Users\\Luis\\.whatsapp-mcp\\accounts\\trabalho",
+      "dir": "C:\\Users\\<seu-usuario>\\.whatsapp-mcp\\accounts\\trabalho",
       "port": 3006,
       "jid": null
     }
