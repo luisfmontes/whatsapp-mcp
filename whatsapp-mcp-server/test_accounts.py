@@ -82,6 +82,24 @@ class TestResolveAccountWithoutConfigFile:
             assert "trabalho" in str(exc.value)
             assert "known: []" in str(exc.value)
 
+    def test_resolve_default_api_base_url_wins_over_bridge_port(self, monkeypatch):
+        """Without accounts.json, when BOTH WHATSAPP_API_BASE_URL and
+        WHATSAPP_BRIDGE_PORT are set (the real state on a machine that also
+        sets a bridge port for other tooling), WHATSAPP_API_BASE_URL must win.
+
+        The three existing precedence tests each unset the other variable, so
+        none of them exercises the actual precedence decision — only the two
+        fallback branches in isolation. This is the missing combined case,
+        and matches the precedence documented in the plan (D9 /
+        'mesma precedencia de hoje' in the task 7 brief)."""
+        monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("HOME", tmpdir)
+            monkeypatch.setenv("USERPROFILE", tmpdir)
+            monkeypatch.setenv("WHATSAPP_API_BASE_URL", "http://example.com:9000/api")
+            monkeypatch.setenv("WHATSAPP_BRIDGE_PORT", "3005")
+            assert accounts.resolve_account(None) == "http://example.com:9000/api"
+
 
 class TestResolveAccountWithConfigFile:
     """Tests for resolve_account() when accounts.json exists."""
