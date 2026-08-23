@@ -85,3 +85,12 @@ paralela: nao
 pronto quando: com `WHATSAPP_ACCOUNT=trabalho` e a bridge numa porta conhecida, o HTML servido em `/qr` contem o apelido `trabalho` e a porta, de forma visivel para quem vai escanear — e `pair_account("trabalho")` devolve o apelido e a porta junto da imagem, nao so os bytes; sem `WHATSAPP_ACCOUNT` a pagina continua como hoje, sem inventar apelido (D1) — provado por `curl -s http://localhost:<porta>/qr` cuja saida contem `trabalho`, por `python -c "...pair_account('trabalho')..."` imprimindo o apelido, e por `CGO_ENABLED=0 go test ./... -run TestQRPageIdentifiesAccount` devolvendo `PASS`.
 
 **Emenda de 2026-08-23, e a razao dela vale mais que a tarefa.** O usuario perguntou "voce abriu outro QR code, como sei pra qual conta e?" e a resposta era: nao dava. A pagina `/qr` servia "Scan with WhatsApp to connect" sem citar conta nenhuma, e `pair_account` devolvia bytes. Isso atravessou 15 decisoes, 9 criterios e SEIS rodadas de revisao independente — que acharam bug de URL, vazamento de cache entre contas e duas regressoes — sem ninguem ver, porque **todo criterio do plano era verificavel por maquina**: exit code, saida de comando, conteudo de resposta. "A pessoa consegue dizer qual conta esta pareando" nao vira comando, entao nao virou criterio, entao ninguem procurou. O criterio acima e falsificavel por comando, mas a pergunta que ele faz e sobre a pessoa.
+
+### 11. A CI roda os testes que a entrega escreveu [tipo: configurar]
+atende: D1, D9
+arquivos: `whatsapp-mcp-server/pyproject.toml`, `.github/workflows/build.yml`
+depende de: 9, 10
+paralela: nao
+pronto quando: `uv sync` seguido de `uv run python -m pytest -q` — os comandos exatos que a CI executa — devolve `passed` sem `failed` nem `skipped` numa maquina sem pytest instalado globalmente; provado pela CI das tres plataformas verde no PR.
+
+**Emenda de 2026-08-23.** A CI rodava `uv run python -m unittest discover`, e o `pyproject.toml` nao declarava pytest. Os tres arquivos de teste desta entrega usam `parametrize` e fixture, entao a CI quebrou nas tres plataformas com `ModuleNotFoundError: No module named 'pytest'` — enquanto aqui os 94 testes passavam, porque esta maquina tem pytest instalado por fora. Todos os dez criterios do plano diziam `python -m pytest`, e nenhum conferiu com que comando a CI roda: o criterio media a maquina de quem escreveu, nao a de quem integra. O pytest tambem executa os testes em estilo unittest que ja existiam, entao nada se perde na troca.

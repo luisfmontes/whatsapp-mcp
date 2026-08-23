@@ -112,5 +112,5 @@ jobs:
 
       # These cover the path-resolution logic, where a POSIX-only assumption
       # (comparing against a "/"-separated suffix) already slipped through once.
-      - name: unittest
-        run: uv run python -m unittest discover -p "test_*.py"
+      - name: pytest
+        run: uv run python -m pytest -q
