@@ -4003,6 +4003,9 @@ func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// /qr — serves the current QR code as PNG (during pairing) or a status page (when connected).
 	// Open http://localhost:8080/qr in a browser to scan the QR code on first setup.
+	// If WHATSAPP_ACCOUNT is set, includes the account name and port in the page (D8, D3).
+	// Without WHATSAPP_ACCOUNT, the page is unchanged from before (D1 — the default account
+	// doesn't perceive any change).
 	http.HandleFunc("/qr", func(w http.ResponseWriter, r *http.Request) {
 		qrState.RLock()
 		png := qrState.png
@@ -4026,16 +4029,27 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		// Serve an auto-refreshing HTML page that embeds the QR as a data URI.
 		// Refreshes every 20 s so a new QR is shown if the first one expires.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+		// Get account alias from environment (D8, D3)
+		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+
+		// Build the heading with account identification if available
+		heading := "Scan with WhatsApp to connect"
+		if accountAlias != "" {
+			heading = fmt.Sprintf("Account: %s (port %d)", accountAlias, port)
+		}
+
 		fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta http-equiv="refresh" content="20">
 <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
 img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
 </head><body>
 <h2>Scan with WhatsApp to connect</h2>
+<p>%s</p>
 <p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
 <img src="/qr.png" width="300" height="300" alt="QR Code">
 <p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
-</body></html>`)
+</body></html>`, heading)
 	})
 
 	// /qr.png — raw PNG for embedding or direct download
