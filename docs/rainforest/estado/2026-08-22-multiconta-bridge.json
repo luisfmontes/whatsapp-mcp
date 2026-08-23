@@ -1,0 +1,35 @@
+{
+  "slug": "2026-08-22-multiconta-bridge",
+  "titulo": "Multiconta no bridge do WhatsApp",
+  "criado_em": "2026-08-22",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-08-22-multiconta-bridge.md",
+    "em": "2026-08-22"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-08-22-multiconta-bridge.md",
+    "tarefas": 8,
+    "paralelas": [
+      1,
+      4
+    ],
+    "em": "2026-08-22"
+  },
+  "executar": {
+    "status": "pendente"
+  },
+  "revisar": {
+    "status": "pendente"
+  },
+  "verificar": {
+    "status": "pendente"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
