@@ -81,6 +81,27 @@ pronto quando: `git diff --stat f77d6e5...HEAD -- docs/rainforest/` lista os tr�
 
 **Tarefa acrescentada em 2026-08-23, durante o `revisar`.** Não é escopo novo: os três arquivos já estavam no commit desde o começo, porque é por eles que outra sessão retoma o trabalho. O que faltava era o plano DIZER isso — e sem a tarefa eles apareciam no diff sem casar com o `arquivos:` de ninguém, que é a definição de creep. A emenda existe para deixar rastro de que o escopo cresceu conscientemente, em vez de justificar em prosa que "era necessário".
 
+### 6. A regressao da D2 se fecha nas duas pontas [tipo: implementar]
+atende: D6
+arquivos: `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/test_api_errors.py`
+depende de: 2
+paralela: nao
+mutacao:
+  arquivo: `whatsapp-mcp-server/whatsapp.py`
+  de: o `except ValueError` novo de `get_sender_name` (literal, uma ocorrência só — declare no relatório o trecho exato usado)
+  para: remover o `except`, deixando a exceção propagar
+  bateria: `bash <wrapper>` que roda `python -m pytest test_api_errors.py -q`, com `--raiz whatsapp-mcp-server/`
+pronto quando: com `_api_post` levantando `ValueError` (o 500 real do bridge) na chamada de `/sender_name`, `format_message` de uma mensagem com `content` devolve string que **contém o conteúdo da mensagem** e o JID do remetente como nome — hoje devolve só `'[2026-08-23 10:00:00] Chat: Alice '`, sem `From:` e sem conteúdo. E com uma exceção **de outro tipo** vinda de `get_sender_name`, `format_message` devolve texto que sinaliza a falha em vez de omitir a linha em silêncio, no padrão que `get_message_context` (`whatsapp.py:358-366`) já usa. Provado por `cd whatsapp-mcp-server && python -m pytest test_api_errors.py -q` sem `failed`, e por `python -m pytest -q` devolvendo no mínimo os 99 de agora.
+
+### 7. O AGENTS.md deixa de autorizar PR no upstream [tipo: docs]
+atende: D7
+arquivos: `AGENTS.md`
+depende de: nenhuma
+paralela: sim
+mutacao: n/a
+  motivo: regra escrita não tem comportamento a inverter. A falsificação dela é textual e verificável: a linha que autorizava o PR upstream não existe mais, e a que a substitui diz as duas metades da regra.
+pronto quando: `grep -n "upstream" AGENTS.md` não devolve mais nenhuma linha autorizando PR para o `rodrigopg`, e devolve uma linha dizendo que o destino é o fork **e** que os PRs já abertos lá ficam como estão — conferido por `grep -c "so quando a mudanca for agnostica\|só quando a mudança for agnóstica" AGENTS.md` devolvendo `0`.
+
 ## Paralelismo
 
 Tarefas 1 e 2 são independentes — arquivos disjuntos (`whatsapp-bridge/*.go` contra
