@@ -66,13 +66,16 @@
     ]
   },
   "revisar": {
-    "status": "reprovado",
+    "status": "ok",
     "snapshot": {
-      "head": "b6dbd6e59a858c782ebfd2a0e5835213e4b853a0",
+      "head": "a15203166080a1bc7b55bff9aa6d3b302a784978",
       "caminhos_sujos": []
     },
-    "achados": 1,
-    "em": "2026-08-23"
+    "achados": 2,
+    "em": "2026-08-23",
+    "bloqueiam": 0,
+    "base": "f77d6e5b7699170f77e3790931ec1837913dac73",
+    "head": "a15203166080a1bc7b55bff9aa6d3b302a784978"
   },
   "verificar": {
     "status": "pendente"
