@@ -30,9 +30,13 @@ depende de: nenhuma
 paralela: sim
 mutacao:
   arquivo: `whatsapp-bridge/main.go`
-  de: o `NULL as last_message` da projeção do ramo sem JOIN de `listChats`
-  para: `messages.content as last_message`
-  bateria: `cd whatsapp-bridge && CGO_ENABLED=0 go test ./... -run 'ListChats|GetChat'`
+  de: `chats.last_message_time,\n\t\t\tNULL as last_message` (o sítio do `listChats` — a coluna anterior com o prefixo `chats.` é o que o torna único)
+  para: `chats.last_message_time,\n\t\t\tmessages.content as last_message`
+  bateria: `bash <wrapper>` que exporta `CGO_ENABLED=0` e roda `go test ./... -count=1 -run 'ListChats|GetChat'`, com `--raiz whatsapp-bridge/`
+  segundo sítio (rodar separado, o mesmo bloco não cobre os dois):
+    de: `c.last_message_time,\n\t\t\tNULL as last_message` (o sítio do `getChat`, alias `c.`)
+    para: `c.last_message_time,\n\t\t\tm.content as last_message`
+  corrigido em 2026-08-23, na integração: a declaração original (`de: NULL as last_message`) casava **2 vezes** e a catraca recusava com exit 4 — "não dá para medir", não "reprovado". Duas formas do mesmo defeito de plano: `--de` ambíguo quando o conserto tem dois sítios, e bateria com `cd x && VAR=1 cmd`, que o `spawnSync(shell:true)` do script entrega ao `cmd.exe` no Windows e ele não entende. Rodar um sítio por vez é mais forte que o bloco único: prova que a bateria sabe falhar por **cada** endpoint, não por um deles.
 pronto quando: com uma **cópia somente-leitura do store real** (`whatsapp-bridge/store/messages.db`, 2.476 chats e 121.050 mensagens), `listChats` e `getChat` chamados com `includeLastMessage=false` devolvem linha com `last_message`, `last_sender` e `last_is_from_me` nulos e **sem erro de SQL**, e com `includeLastMessage=true` devolvem os três preenchidos — provado por `cd whatsapp-bridge && CGO_ENABLED=0 go test ./... -run 'ListChats|GetChat' -v` mostrando `PASS` em ambos os pares de caso. Hoje o caminho `false` devolve `no such column: messages.content` em `listChats` e `no such column: m.content` em `getChat`.
 
 ### 2. O 5xx do bridge deixa de virar lista vazia [tipo: implementar]
@@ -42,9 +46,10 @@ depende de: nenhuma
 paralela: sim
 mutacao:
   arquivo: `whatsapp-mcp-server/whatsapp.py`
-  de: o `raise ValueError(...)` do ramo de status 5xx em `_api_post`
-  para: `return None`
-  bateria: `cd whatsapp-mcp-server && python -m pytest test_api_errors.py -q`
+  de: o bloco literal de 4 linhas que começa em `if response.status_code >= 500:` e termina na `)` do `raise ValueError(...)`, inclusive a indentação final — 183 bytes, uma ocorrência só
+  para: `return None` com a mesma indentação final
+  bateria: `bash <wrapper>` que roda `python -m pytest test_api_errors.py -q`, com `--raiz whatsapp-mcp-server/`
+  corrigido em 2026-08-23, na integração: a declaração original dizia "o `raise ValueError(...)` do ramo de status 5xx", que é **intenção, não padrão** — a catraca exige literal e recusaria com exit 3. Duas armadilhas medidas ao derivar o literal: o arquivo é LF puro (0 CRLF em 1.622 linhas), e `sys.stdout.write` no Windows converte `\n` em `\r\n`, então capturar o trecho por `$(python -c ...)` produz um `--de` que não casa — derive com `sys.stdout.buffer.write`. Nota sobre o `--para`: substituir o bloco inteiro por `return None` também derruba o teste do 200, porque o `return` passa a vir antes da checagem de status 200. O veredito continua válido (o teste do 5xx falha, que é o que se mede), mas uma inversão mais cirúrgica trocaria só o `raise` pela linha equivalente.
 pronto quando: com um servidor HTTP local devolvendo **o corpo real que o bridge devolve hoje** (`{"error":"SQL logic error: no such column: messages.content (1)"}` com status 500), `_api_post` levanta `ValueError` cujo texto cita o path, o status e o corpo; e com 404, com timeout e com conexão recusada continua devolvendo `None` — provado por `cd whatsapp-mcp-server && python -m pytest test_api_errors.py -q` devolvendo `passed` sem `failed`, e por `python -m pytest -q` (suíte inteira) devolvendo no mínimo os 94 que passam hoje.
 
 ### 3. A entrega vira PR no fork, com CI verde [tipo: configurar]
