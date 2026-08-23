@@ -161,15 +161,17 @@ def account_task_name(alias: Optional[str] = None) -> str:
         alias: Account alias, or None for the default account.
 
     Returns:
-        The task name (e.g., "WhatsAppMCPBridge-pessoal").
+        The task name (e.g., "WhatsAppMCPBridge-pessoal", or "WhatsAppMCPBridge"
+        for the legacy single-account case when no accounts.json exists).
 
     Raises:
-        ValueError: If no accounts are configured or the alias is unknown.
+        ValueError: If accounts are configured but the alias is unknown.
     """
     if alias is None:
         accounts_map = _load_accounts_map()
         if accounts_map is None:
-            raise ValueError("No accounts configured")
+            # No accounts.json: fall back to default task name (legacy single-account case)
+            return "WhatsAppMCPBridge"
         alias = accounts_map.get("default")
         if not alias:
             raise ValueError("No default account set")
