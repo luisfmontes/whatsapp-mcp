@@ -47,23 +47,18 @@ def bridge_dirs():
             pass
 
 
-@pytest.fixture
-def bridge_processes(bridge_dirs):
-    """Start two real bridge processes and insert test data.
+def _find_or_build_bridge_binary():
+    """Locate the whatsapp-bridge binary, building it once (CGO_ENABLED=0)
+    if it isn't cached in the temp dir yet.
 
-    Builds the whatsapp-bridge binary if needed and starts two instances
-    on different ports (3097, 3098), each with a temporary directory and
-    distinct test data.
+    Shared by every test in this file that needs a real bridge process, so
+    the build — potentially slow on a cold CI runner doing its first build
+    on a network disk — only happens once per test session.
     """
-    procs = {}
-    ports = {'trabalho': 3097, 'pessoal': 3098}
-
-    # Find or build the bridge binary
     binary = Path(tempfile.gettempdir()) / 'wa.exe'
     bridge_src = Path(__file__).parent.parent / 'whatsapp-bridge'
 
     if not binary.exists():
-        # Build the binary with CGO_ENABLED=0
         build_env = os.environ.copy()
         build_env['CGO_ENABLED'] = '0'
 
@@ -72,7 +67,8 @@ def bridge_processes(bridge_dirs):
             cwd=str(bridge_src),
             env=build_env,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=300,
         )
 
         if result.returncode != 0:
@@ -85,56 +81,147 @@ def bridge_processes(bridge_dirs):
     if not binary.exists():
         raise RuntimeError(f"Bridge binary not found at {binary} after build")
 
-    # Start bridge processes
-    for acct, port in ports.items():
-        tmpdir = bridge_dirs[acct]
-        env = os.environ.copy()
-        env['WHATSAPP_BRIDGE_PORT'] = str(port)
-        env['WHATSAPP_ACCOUNT'] = acct
+    return binary
 
-        # Remove WHATSAPP_ACCOUNTS_FILE to ensure clean state
-        env.pop('WHATSAPP_ACCOUNTS_FILE', None)
 
-        proc = subprocess.Popen(
-            [str(binary)],
-            cwd=tmpdir,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        procs[acct] = proc
-        time.sleep(1.5)  # Give process time to create database and listen
+def _wait_for_bridge_status(port, proc, timeout=90.0, interval=0.5):
+    """Poll GET http://localhost:{port}/api/status until the bridge answers.
 
-    # Insert test data into each bridge's database
-    for acct, port in ports.items():
-        tmpdir = bridge_dirs[acct]
-        db_path = Path(tmpdir) / 'store' / 'messages.db'
+    Waits for the endpoint the tests actually depend on, not for an on-disk
+    side effect like store/messages.db: on a slow/cold CI runner (first
+    build, network disk, no cache) the process can take much longer than on
+    the author's machine to reach a listening state, and a file appearing on
+    disk is not proof the HTTP server is already accepting connections. The
+    deadline is generous on purpose to absorb that slow start without
+    silently hiding a real failure to boot.
 
-        # Wait a bit more for the database to be created
-        max_wait = 10
-        while not db_path.exists() and max_wait > 0:
-            time.sleep(0.5)
-            max_wait -= 1
+    On timeout, or if the process exits before ever answering, raises a
+    RuntimeError that names the port, the last error observed, and whatever
+    the process printed to stdout/stderr — so a CI failure is diagnosable
+    from the log alone. Either failure path kills the process before
+    raising, since the caller's own cleanup code (written for the success
+    path) never runs when this function raises.
+    """
+    deadline = time.monotonic() + timeout
+    last_error = "no attempt made yet"
 
-        if not db_path.exists():
-            raise RuntimeError(f"Database not created for {acct} at {db_path}")
+    while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            out, err = proc.communicate(timeout=5)
+            raise RuntimeError(
+                f"bridge process on port {port} exited early (code {exit_code}) "
+                f"before ever answering GET /api/status.\n"
+                f"stdout: {out.decode('utf-8', 'replace')}\n"
+                f"stderr: {err.decode('utf-8', 'replace')}"
+            )
+        try:
+            resp = requests.get(f"http://localhost:{port}/api/status", timeout=2)
+            if resp.status_code == 200:
+                return
+            last_error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        except requests.RequestException as e:
+            last_error = str(e)
+        time.sleep(interval)
 
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        # Insert a test chat that only exists in this bridge
-        # Use account-specific JID to make it unique
-        # Schema: CREATE TABLE IF NOT EXISTS chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP)
-        # Note: Go's database/sql converts time.Time to RFC3339 string in SQLite
-        test_jid = f'551100{port}@s.whatsapp.net'
-        test_name = f'CHAT-{acct.upper()}'
-        # Use RFC3339 format which is what Go's database/sql writes for TIMESTAMP
-        last_message_time = datetime.now().isoformat() + "Z"
-        cursor.execute(
-            'INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)',
-            (test_jid, test_name, last_message_time)
-        )
-        conn.commit()
-        conn.close()
+    # Timed out with the process apparently still running: kill it so a
+    # failing wait never leaks a bridge process, then report what it printed.
+    proc.kill()
+    try:
+        out, err = proc.communicate(timeout=5)
+        stdout_tail = out.decode('utf-8', 'replace')
+        stderr_tail = err.decode('utf-8', 'replace')
+    except Exception as e:
+        stdout_tail = stderr_tail = f"<could not capture output: {e}>"
+    raise RuntimeError(
+        f"bridge on port {port} did not answer GET /api/status within {timeout}s "
+        f"(last attempt: {last_error}).\n"
+        f"stdout: {stdout_tail}\n"
+        f"stderr: {stderr_tail}"
+    )
+
+
+@pytest.fixture
+def bridge_processes(bridge_dirs):
+    """Start two real bridge processes and insert test data.
+
+    Builds the whatsapp-bridge binary if needed and starts two instances
+    on different ports (3097, 3098), each with a temporary directory and
+    distinct test data.
+    """
+    procs = {}
+    ports = {'trabalho': 3097, 'pessoal': 3098}
+
+    binary = _find_or_build_bridge_binary()
+
+    try:
+        # Start bridge processes and wait for each to actually answer
+        # /api/status before moving on — see _wait_for_bridge_status for why
+        # that beats waiting on store/messages.db.
+        for acct, port in ports.items():
+            tmpdir = bridge_dirs[acct]
+            env = os.environ.copy()
+            env['WHATSAPP_BRIDGE_PORT'] = str(port)
+            env['WHATSAPP_ACCOUNT'] = acct
+
+            # Remove WHATSAPP_ACCOUNTS_FILE to ensure clean state
+            env.pop('WHATSAPP_ACCOUNTS_FILE', None)
+
+            proc = subprocess.Popen(
+                [str(binary)],
+                cwd=tmpdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            procs[acct] = proc
+            _wait_for_bridge_status(port, proc)
+
+        # Insert test data into each bridge's database
+        for acct, port in ports.items():
+            tmpdir = bridge_dirs[acct]
+            db_path = Path(tmpdir) / 'store' / 'messages.db'
+
+            # /api/status already answered for this bridge, so the store
+            # should exist by now; this only absorbs a last write-to-disk
+            # lag, not the process's whole startup.
+            max_wait = 20
+            while not db_path.exists() and max_wait > 0:
+                time.sleep(0.5)
+                max_wait -= 1
+
+            if not db_path.exists():
+                raise RuntimeError(
+                    f"bridge for {acct} answered GET /api/status on port "
+                    f"{port} but {db_path} still doesn't exist 10s later"
+                )
+
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            # Insert a test chat that only exists in this bridge
+            # Use account-specific JID to make it unique
+            # Schema: CREATE TABLE IF NOT EXISTS chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP)
+            # Note: Go's database/sql converts time.Time to RFC3339 string in SQLite
+            test_jid = f'551100{port}@s.whatsapp.net'
+            test_name = f'CHAT-{acct.upper()}'
+            # Use RFC3339 format which is what Go's database/sql writes for TIMESTAMP
+            last_message_time = datetime.now().isoformat() + "Z"
+            cursor.execute(
+                'INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)',
+                (test_jid, test_name, last_message_time)
+            )
+            conn.commit()
+            conn.close()
+    except Exception:
+        # Setup failed partway through: none of the already-started
+        # processes will be cleaned up by the yield-based teardown below
+        # (it never runs), so kill them here instead of leaking them.
+        for proc in procs.values():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
 
     yield procs
 
@@ -1162,47 +1249,93 @@ def test_get_bridge_status_classic_tuple_with_exactly_one_account_configured(
     assert result[1] != "aggregated"
 
 
-def test_get_bridge_status_real_bridge_regression(monkeypatch):
-    """THE test for tarefa 7 / D1: com o ambiente real desta maquina (sem
-    accounts.json, WHATSAPP_API_BASE_URL apontando para o bridge de producao
-    ja rodando) uma chamada REAL a get_bridge_status() bate em
-    http://localhost:3005/api/status por GET (unica chamada de rede
-    autorizada nesta suite) e devolve o formato classico, provando que a
-    instalacao pareada de hoje nao percebe a multiconta chegou.
+def test_get_bridge_status_real_bridge_regression(monkeypatch, tmp_path):
+    """THE test for tarefa 7 / D1: sem accounts.json, uma chamada REAL a
+    get_bridge_status() bate em GET /api/status e devolve o formato
+    classico, provando que a instalacao de hoje nao promove silenciosamente
+    para o formato agregado da multiconta.
 
-    Deliberadamente NAO usa monkeypatch para isolar HOME/accounts — a prova
-    exige o ambiente real da instalacao. `monkeypatch` aqui so protege
-    WHATSAPP_ACCOUNTS_FILE, para o caso de outro teste tê-lo deixado setado
-    (nenhum deixa hoje: todos usam monkeypatch/finally, mas isso e
-    verificado por leitura do arquivo, nao por confianca).
+    Ate 2026-08-22 este teste fazia essa chamada real contra o bridge de
+    PRODUCAO ja pareado do autor em localhost:3005. Isso mede a maquina de
+    quem escreveu o teste, nao o codigo: numa CI sem esse bridge pareado
+    (ou em qualquer outra maquina), get_bridge_status() nunca chega a
+    responder e o teste falha por ausencia de infraestrutura —
+    "AssertionError: expected a real status dict, got None" — nao por
+    regressao de comportamento. A correcao do teste, nao do codigo: pareado
+    ou nao, hoje ou daqui a um ano, o campo que importa e sempre o mesmo.
 
-    Se o bridge estiver fora do ar, este teste FALHA (nao pula) — skip
-    esconderia a ausencia da infraestrutura que a tarefa pede para provar.
+    Prova a mesma coisa que antes, mas contra um bridge efemero proprio:
+    sobe seu proprio processo `whatsapp-bridge` numa porta alta (nao
+    3097/3098, usadas por `bridge_processes`, para nao colidir se os dois
+    conjuntos de testes rodarem em paralelo), com CWD num diretorio
+    temporario — mesmo padrao dos outros testes de roteamento deste
+    arquivo — e so entao aponta WHATSAPP_API_BASE_URL para ele. Continua
+    sendo uma chamada de rede real, sem mock de requests.
+
+    Se o bridge nao subir, este teste FALHA (nao pula) — skip esconderia a
+    ausencia da infraestrutura que a tarefa pede para provar.
     """
-    monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+    binary = _find_or_build_bridge_binary()
+    port = 41999
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
 
-    healthy, reason, status = whatsapp.get_bridge_status()
+    env = os.environ.copy()
+    env['WHATSAPP_BRIDGE_PORT'] = str(port)
+    env['WHATSAPP_ACCOUNT'] = 'regression'
+    env.pop('WHATSAPP_ACCOUNTS_FILE', None)
 
-    assert isinstance(healthy, bool), f"healthy should be bool, got {type(healthy)}: {healthy!r}"
-    assert isinstance(reason, str), f"reason should be str, got {type(reason)}: {reason!r}"
-    assert reason != "aggregated", (
-        "get_bridge_status() returned the multi-account aggregated format "
-        "even though no accounts.json exists on this machine — the paired "
-        "installation DID notice multiconta landed"
+    proc = subprocess.Popen(
+        [str(binary)],
+        cwd=str(bridge_dir),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
     )
-    assert not reason.startswith("Request error:"), (
-        f"could not reach the real bridge at localhost:3005 — this test "
-        f"requires it to be up (read-only GET /api/status only): {reason}"
-    )
-    assert isinstance(status, dict), f"expected a real status dict, got {status!r}"
-    # StatusResponse.Success is always present on a 200 from handleStatus
-    # (whatsapp-bridge/main.go); asserting on it (rather than on the
-    # pairing-dependent `healthy`/`logged_in` fields) keeps this test valid
-    # regardless of whether this machine's account happens to be paired
-    # right now.
-    assert status.get("success") is True, (
-        f"expected success=true from a live bridge's /api/status, got: {status}"
-    )
+    try:
+        _wait_for_bridge_status(port, proc)
+
+        # Isolate from any real accounts.json this machine might have (none
+        # does today, confirmed by reading Path.home(), but the test
+        # shouldn't depend on that staying true) and point at the bridge we
+        # just started instead of whatever WHATSAPP_API_BASE_URL/3005 means
+        # on this machine.
+        monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("WHATSAPP_API_BASE_URL", f"http://localhost:{port}/api")
+
+        healthy, reason, status = whatsapp.get_bridge_status()
+
+        assert isinstance(healthy, bool), f"healthy should be bool, got {type(healthy)}: {healthy!r}"
+        assert isinstance(reason, str), f"reason should be str, got {type(reason)}: {reason!r}"
+        assert reason != "aggregated", (
+            "get_bridge_status() returned the multi-account aggregated format "
+            "even though no accounts.json exists on this machine — the paired "
+            "installation DID notice multiconta landed"
+        )
+        assert not reason.startswith("Request error:"), (
+            f"could not reach the self-started bridge at localhost:{port} — "
+            f"this test requires it to be up (read-only GET /api/status "
+            f"only): {reason}"
+        )
+        assert isinstance(status, dict), f"expected a real status dict, got {status!r}"
+        # StatusResponse.Success is always present on a 200 from handleStatus
+        # (whatsapp-bridge/main.go); asserting on it (rather than on the
+        # pairing-dependent `healthy`/`logged_in` fields) keeps this test valid
+        # regardless of whether this ephemeral bridge happens to be paired.
+        assert status.get("success") is True, (
+            f"expected success=true from a live bridge's /api/status, got: {status}"
+        )
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
     assert "connected" in status and "logged_in" in status, status
 
 
