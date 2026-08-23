@@ -70,6 +70,17 @@ mutacao: n/a
   motivo: é o mesmo diff da tarefa 1, já validado por mutação lá; aqui não há código novo, só destino. A falsificação é o diff do PR tocar as duas funções, não uma.
 pronto quando: existe PR aberto em `rodrigopg/whatsapp-mcp` e `gh pr diff <n> --repo rodrigopg/whatsapp-mcp` mostra alteração **nas duas** funções (`listChats` e `getChat`), com o repro de `curl` no corpo do PR — confirmado por `gh pr view <n> --repo rodrigopg/whatsapp-mcp --json state` devolvendo `"state":"OPEN"`. **O texto do PR passa pelo Luís antes de submeter**: é repositório de outra pessoa.
 
+### 5. Os artefatos do fluxo entram no commit [tipo: docs]
+atende: D1, D2, D3, D4, D5
+arquivos: `docs/rainforest/design/2026-08-23-erro-de-api-lido-como-lista-vazia.md`, `docs/rainforest/planos/2026-08-23-erro-de-api-lido-como-lista-vazia.md`, `docs/rainforest/estado/2026-08-23-erro-de-api-lido-como-lista-vazia.json`
+depende de: nenhuma
+paralela: nao
+mutacao: n/a
+  motivo: documento não tem comportamento a inverter. A falsificação dele é outra: as decisões `D<n>` que ele declara têm de casar com as tarefas que as realizam, e é o `conferir-fluxo.cjs cobertura` que mede isso — não uma bateria.
+pronto quando: `git diff --stat f77d6e5...HEAD -- docs/rainforest/` lista os três arquivos, e `node scripts/conferir-fluxo.cjs cobertura --slug 2026-08-23-erro-de-api-lido-como-lista-vazia` sai `0`
+
+**Tarefa acrescentada em 2026-08-23, durante o `revisar`.** Não é escopo novo: os três arquivos já estavam no commit desde o começo, porque é por eles que outra sessão retoma o trabalho. O que faltava era o plano DIZER isso — e sem a tarefa eles apareciam no diff sem casar com o `arquivos:` de ninguém, que é a definição de creep. A emenda existe para deixar rastro de que o escopo cresceu conscientemente, em vez de justificar em prosa que "era necessário".
+
 ## Paralelismo
 
 Tarefas 1 e 2 são independentes — arquivos disjuntos (`whatsapp-bridge/*.go` contra
