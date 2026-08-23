@@ -107,6 +107,16 @@ jobs:
           enable-cache: true
           cache-dependency-glob: whatsapp-mcp-server/uv.lock
 
+      # Os testes de roteamento por conta sobem processos REAIS do bridge, em
+      # portas distintas, e para isso compilam o binario. Sem Go aqui eles
+      # quebram com FileNotFoundError: 'go'. Pular seria pior: o que esses
+      # testes provam -- que a chamada foi para a conta certa -- so se prova
+      # com processo de verdade.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: whatsapp-bridge/go.mod
+          cache-dependency-path: whatsapp-bridge/go.sum
+
       - name: sync
         run: uv sync
 
