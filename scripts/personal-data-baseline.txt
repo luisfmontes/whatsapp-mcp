@@ -1,0 +1,33 @@
+# Identificadores com forma de telefone/JID que JA existem neste repositorio, todos
+# sinteticos, conferidos um a um em 2026-08-24. A trava (scripts/check-personal-data.py)
+# falha quando aparece um que nao esta nesta lista.
+#
+# Para acrescentar: olhe o numero e decida se e de uma pessoa de verdade. Se for,
+# nao adicione aqui -- tire do arquivo. A lista existe para que a decisao seja
+# consciente e apareca no diff, nao para silenciar a trava.
+#
+# Nenhuma entrada aqui pode ser um numero real de alguem.
+jid:55111234567@s.whatsapp.net
+jid:5511999999999:26@s.whatsapp.net
+jid:5511999999999@s.whatsapp.net
+jid:55119999999@s.whatsapp.net
+jid:5562000000001:26@s.whatsapp.net
+jid:5562000000001@s.whatsapp.net
+jid:5562000000002@s.whatsapp.net
+jid:5562000000003@s.whatsapp.net
+jid:5562123456789@s.whatsapp.net
+jid:556291788888@s.whatsapp.net
+jid:5562988887777@s.whatsapp.net
+jid:5562988888888:1@s.whatsapp.net
+jid:5562999999999@s.whatsapp.net
+telefone:5511999999999
+telefone:5562000000000
+telefone:5562000000001
+telefone:5562000000002
+telefone:5562000000003
+telefone:5562123456789
+telefone:556291788888
+telefone:5562988887777
+telefone:5562988888888
+telefone:5562999997777
+telefone:5562999999999

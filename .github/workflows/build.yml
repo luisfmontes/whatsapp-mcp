@@ -124,3 +124,18 @@ jobs:
       # (comparing against a "/"-separated suffix) already slipped through once.
       - name: pytest
         run: uv run python -m pytest -q
+
+  personal-data:
+    # Um numero de telefone real chegou a este repositorio publico em 2026-08-08,
+    # colado num progress.jsonl como evidencia de smoke, e ficou 16 dias no ar.
+    # Reescrever o historico depois nao removeu de vez: em rede de fork o objeto
+    # continua sendo servido por SHA. O momento barato de pegar e antes do merge.
+    name: personal data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: check for new phone numbers and JIDs
+        run: python scripts/check-personal-data.py

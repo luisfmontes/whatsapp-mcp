@@ -29,6 +29,9 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - [ ] `python3 -m unittest test_transcribe -v` passa.
 - [ ] Mudou main.go? Binário recompilado e bridge reiniciada — local: `launchctl kickstart -k`; VPS: `go build` na própria VPS (CGO não cross-compila) + `systemctl restart whatsapp-bridge-*`.
 - [ ] Sem path pessoal/secret vazando (transcription.env, API keys).
+- [ ] `python scripts/check-personal-data.py` sai 0. O repo e **publico**: telefone
+      e JID novos so passam depois de alguem olhar o numero e registrar em
+      `scripts/personal-data-baseline.txt` que ele e sintetico.
 - [ ] Mudou comportamento de sync/escrita? Conferir impacto em transcrições existentes.
 - [ ] README/install.sh coerentes se mudou onboarding (versão Go, env vars, troubleshooting).
 - [ ] PR contra `origin/main`. Nada de PR novo para `upstream` (rodrigopg) — o destino é este fork. Os PRs já abertos lá (#14, #15) ficam como estão; fechá-los sem motivo técnico é ruído no repositório de outra pessoa.
