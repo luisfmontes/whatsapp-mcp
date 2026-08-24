@@ -26,11 +26,61 @@ def _get_accounts_file() -> Optional[Path]:
     return None
 
 
+def _validate_accounts_map(accounts_map: dict, accounts_file: Path) -> None:
+    """Reject a map whose accounts collide on a port or a directory.
+
+    A repeated port means two bridges racing for the same socket: the second one
+    to start fails to bind, and every tool aimed at either alias silently talks to
+    whichever won. A repeated directory is worse — two accounts sharing one
+    whatsapp.db overwrite each other's session, so a re-pair of one logs the other
+    out. Both are misconfigurations that produce wrong answers instead of errors,
+    so they fail loudly here, naming the two aliases that collide.
+    """
+    if not isinstance(accounts_map, dict):
+        raise ValueError(
+            f"Invalid accounts file '{accounts_file}': expected a JSON object"
+        )
+
+    accounts = accounts_map.get("accounts") or {}
+    if not isinstance(accounts, dict):
+        raise ValueError(
+            f"Invalid accounts file '{accounts_file}': 'accounts' must be an object"
+        )
+
+    seen_ports: dict = {}
+    seen_dirs: dict = {}
+    for alias in sorted(accounts):
+        account = accounts[alias]
+        if not isinstance(account, dict):
+            continue
+
+        port = account.get("port")
+        if port is not None:
+            if port in seen_ports:
+                raise ValueError(
+                    f"Invalid accounts file '{accounts_file}': accounts "
+                    f"'{seen_ports[port]}' and '{alias}' both use port {port}"
+                )
+            seen_ports[port] = alias
+
+        directory = account.get("dir")
+        if directory:
+            # Windows paths are case-insensitive and mix separators; compare normalized.
+            key = os.path.normcase(os.path.normpath(str(directory)))
+            if key in seen_dirs:
+                raise ValueError(
+                    f"Invalid accounts file '{accounts_file}': accounts "
+                    f"'{seen_dirs[key]}' and '{alias}' both use directory '{directory}'"
+                )
+            seen_dirs[key] = alias
+
+
 def _load_accounts_map() -> Optional[dict]:
     """Load and parse the accounts.json file, or None if it doesn't exist.
 
     Raises:
-        ValueError: If the file exists but cannot be parsed as valid JSON.
+        ValueError: If the file exists but cannot be parsed as valid JSON, or if
+            two accounts collide on the same port or the same directory.
     """
     accounts_file = _get_accounts_file()
     if not accounts_file:
@@ -38,7 +88,9 @@ def _load_accounts_map() -> Optional[dict]:
 
     try:
         with open(accounts_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            accounts_map = json.load(f)
+        _validate_accounts_map(accounts_map, accounts_file)
+        return accounts_map
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ValueError(
             f"Invalid JSON in accounts file '{accounts_file}': {e}"
