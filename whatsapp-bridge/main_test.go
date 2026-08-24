@@ -1989,3 +1989,80 @@ func TestGetChatIncludeLastMessage(t *testing.T) {
 		}
 	})
 }
+
+// TestQRPagesNeverIdentifyTheSameAccount is the criterion the earlier rounds missed:
+// not "does the page contain a string", but "can the PERSON tell the two pages apart".
+// With two accounts configured, every state the bridge serves must differ between them
+// -- otherwise someone holding a phone scans the wrong QR and pairs the wrong account.
+func TestQRPagesNeverIdentifyTheSameAccount(t *testing.T) {
+	states := map[string]func(string, int) string{
+		"qr":        renderQRPage,
+		"connected": renderConnectedPage,
+		"waiting":   renderWaitingPage,
+	}
+
+	for name, render := range states {
+		t.Run(name+" distinguishes two named accounts", func(t *testing.T) {
+			a := render("pessoal", 3005)
+			b := render("trabalho", 3006)
+			if a == b {
+				t.Fatalf("%s page is identical for two accounts", name)
+			}
+			if !strings.Contains(bodyOf(a), "pessoal") || !strings.Contains(bodyOf(b), "trabalho") {
+				t.Errorf("%s body must name its account; got a=%q b=%q", name, a, b)
+			}
+		})
+
+		t.Run(name+" distinguishes two unnamed bridges by port", func(t *testing.T) {
+			// The body, not the whole page: the <title> alone would make the
+			// pages differ while the visible page stayed anonymous.
+			a := bodyOf(render("", 3005))
+			b := bodyOf(render("", 3006))
+			if a == b {
+				t.Fatalf("%s body is identical for two ports with no alias set", name)
+			}
+			if !strings.Contains(a, "3005") || !strings.Contains(b, "3006") {
+				t.Errorf("%s body must fall back to the port; got a=%q b=%q", name, a, b)
+			}
+		})
+
+		t.Run(name+" puts the identity in the title too", func(t *testing.T) {
+			page := render("trabalho", 3006)
+			if !strings.Contains(page, "<title>WhatsApp - trabalho</title>") {
+				t.Errorf("%s page should title the tab with the account, got: %q", name, page)
+			}
+		})
+	}
+}
+
+// TestAccountHeadingEscapesTheAlias -- the alias comes from the environment, so it is
+// input, not a constant.
+func TestAccountHeadingEscapesTheAlias(t *testing.T) {
+	out := accountHeading("<script>alert(1)</script>", 3005)
+	if strings.Contains(out, "<script>") {
+		t.Errorf("alias must be escaped, got: %q", out)
+	}
+	if !strings.Contains(out, "&lt;script&gt;") {
+		t.Errorf("expected the escaped alias in the output, got: %q", out)
+	}
+}
+
+// bodyOf returns what the person actually sees, dropping <head>: a page whose only
+// distinguishing mark is the tab title still leaves the open page ambiguous.
+func bodyOf(page string) string {
+	if i := strings.Index(page, "</head>"); i >= 0 {
+		return page[i:]
+	}
+	return page
+}
+
+// TestAccountHeadingAlwaysIdentifies pins the heading itself, so deleting it cannot
+// hide behind the title.
+func TestAccountHeadingAlwaysIdentifies(t *testing.T) {
+	if h := accountHeading("trabalho", 3006); !strings.Contains(h, "trabalho") || !strings.Contains(h, "3006") {
+		t.Errorf("named account heading should carry alias and port, got %q", h)
+	}
+	if h := accountHeading("", 3005); !strings.Contains(h, "3005") {
+		t.Errorf("unnamed bridge heading should carry the port, got %q", h)
+	}
+}

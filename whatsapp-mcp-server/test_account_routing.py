@@ -1347,7 +1347,7 @@ def test_get_bridge_status_real_bridge_regression(monkeypatch, tmp_path):
     assert "connected" in status and "logged_in" in status, status
 
 
-def test_list_chats_without_accounts_file_bridge_offline():
+def test_list_chats_without_accounts_file_bridge_offline(monkeypatch, tmp_path):
     """Achado 1 / D1: Single-account installation without accounts.json, bridge offline.
 
     This is the most critical test for Achado 1. It proves that list_chats()
@@ -1365,8 +1365,14 @@ def test_list_chats_without_accounts_file_bridge_offline():
     """
     # Point to a port that doesn't respond
     os.environ['WHATSAPP_API_BASE_URL'] = 'http://localhost:1/api'
-    # Ensure accounts.json doesn't exist
+    # Ensure accounts.json doesn't exist -- both the explicit env var AND the
+    # default ~/.whatsapp-mcp/accounts.json. Unsetting only the env var made this
+    # test depend on the developer's home directory: on a machine that really has
+    # two accounts configured, the loader found the real map, resolved the default
+    # account to a LIVE bridge, and the test read the developer's own chats.
     os.environ.pop('WHATSAPP_ACCOUNTS_FILE', None)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('USERPROFILE', str(tmp_path))
 
     try:
         # This should return [] without raising, proving D1 is honored
