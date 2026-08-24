@@ -399,7 +399,7 @@ class TestCollidingAccounts:
             accounts_file = self._write(tmpdir, {
                 "default": "pessoal",
                 "accounts": {
-                    "pessoal": {"dir": "C:/Bridge", "port": 3005},
+                    "pessoal": {"dir": "C:/bridge", "port": 3005},
                     "trabalho": {"dir": "C:/bridge/", "port": 3006},
                 },
             })
@@ -409,6 +409,25 @@ class TestCollidingAccounts:
                 accounts.accounts_configured()
             msg = str(exc.value)
             assert "pessoal" in msg and "trabalho" in msg, msg
+
+    @pytest.mark.skipif(os.name != "nt", reason="only Windows paths are case-insensitive")
+    def test_duplicate_dir_is_case_insensitive_on_windows(self, monkeypatch):
+        """C:/Bridge and c:/bridge are the same directory on Windows, and the two
+        accounts would still share one whatsapp.db. On POSIX they are two different
+        directories, so this is deliberately a Windows-only expectation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            accounts_file = self._write(tmpdir, {
+                "default": "pessoal",
+                "accounts": {
+                    "pessoal": {"dir": "C:/Bridge", "port": 3005},
+                    "trabalho": {"dir": "c:/bridge/", "port": 3006},
+                },
+            })
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+
+            with pytest.raises(ValueError) as exc:
+                accounts.accounts_configured()
+            assert "pessoal" in str(exc.value) and "trabalho" in str(exc.value)
 
     def test_resolve_account_also_refuses_a_colliding_map(self, monkeypatch):
         """The check sits in the loader, so every entry point inherits it."""
