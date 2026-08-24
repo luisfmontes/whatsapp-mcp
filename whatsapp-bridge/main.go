@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"math"
 	"math/rand"
 	"mime"
@@ -4023,19 +4024,39 @@ func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-// renderQRPage returns the HTML for the QR code pairing page.
-// When accountAlias is set, includes account identification (D8, D3).
-// When accountAlias is empty, page is unchanged from before (D1).
-// This function is extracted for testability (similar to handleStatus).
-func renderQRPage(accountAlias string, port int) string {
-	// Build account identification line if available (D1: unchanged without WHATSAPP_ACCOUNT)
-	accountLine := ""
+// renderQRPage returns the HTML for the QR code pairing page. Every page the
+// bridge serves on /qr identifies its account through accountHeading, so two
+// bridges never render the same page.
+// Extracted for testability (similar to handleStatus).
+// accountHeading returns the line that tells the person WHICH bridge this page
+// belongs to. It is deliberately never empty: a multi-account setup serves one of
+// these pages per account and they are otherwise byte-identical, so the person
+// holding a phone cannot tell which account the QR pairs. With no alias set, the
+// port still separates one bridge from another.
+//
+// This revises D8/D1 ("without WHATSAPP_ACCOUNT the page is unchanged"). Leaving the
+// default account page untouched is precisely what made the pages indistinguishable.
+// The alias is escaped because it arrives from the environment.
+func accountHeading(accountAlias string, port int) string {
 	if accountAlias != "" {
-		accountLine = fmt.Sprintf("<p>Account: %s (port %d)</p>\n", accountAlias, port)
+		return fmt.Sprintf("<p>Account: %s (port %d)</p>\n", html.EscapeString(accountAlias), port)
 	}
+	return fmt.Sprintf("<p>Port %d</p>\n", port)
+}
 
+// accountTitle is the same identity for the <title>: with one tab open per account,
+// the tab strip is where the person picks, before the page is even visible.
+func accountTitle(accountAlias string, port int) string {
+	if accountAlias != "" {
+		return fmt.Sprintf("WhatsApp - %s", html.EscapeString(accountAlias))
+	}
+	return fmt.Sprintf("WhatsApp - port %d", port)
+}
+
+func renderQRPage(accountAlias string, port int) string {
 	return fmt.Sprintf(`<!DOCTYPE html><html><head>
 <meta http-equiv="refresh" content="20">
+<title>%s</title>
 <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#f0f0f0}
 img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2)}</style>
 </head><body>
@@ -4043,45 +4064,59 @@ img{border:8px solid white;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.2
 %s<p>Open WhatsApp → Settings → Linked Devices → Link a Device</p>
 <img src="/qr.png" width="300" height="300" alt="QR Code">
 <p style="color:#888;font-size:.85rem">Page refreshes every 20 s</p>
-</body></html>`, accountLine)
+</body></html>`, accountTitle(accountAlias, port), accountHeading(accountAlias, port))
+}
+
+// renderConnectedPage and renderWaitingPage carry the same identity as the QR page.
+// They used to be anonymous literals, which meant the two states a person actually
+// waits on -- "which one still needs pairing?" and "did THIS one connect?" -- were
+// exactly the states that never said which account they were about.
+func renderConnectedPage(accountAlias string, port int) string {
+	return fmt.Sprintf(`<!DOCTYPE html><html><head><title>%s</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:4rem">
+<h2 style="color:#25d366">&#10003; WhatsApp connected</h2>
+%s<p>You can close this tab.</p></body></html>`,
+		accountTitle(accountAlias, port), accountHeading(accountAlias, port))
+}
+
+func renderWaitingPage(accountAlias string, port int) string {
+	return fmt.Sprintf(`<!DOCTYPE html><html><head><title>%s</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:4rem">
+<h2>Waiting for QR code...</h2>
+%s<p>This page refreshes automatically.</p></body></html>`,
+		accountTitle(accountAlias, port), accountHeading(accountAlias, port))
 }
 
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// /qr — serves the current QR code as PNG (during pairing) or a status page (when connected).
 	// Open http://localhost:8080/qr in a browser to scan the QR code on first setup.
 	// If WHATSAPP_ACCOUNT is set, includes the account name and port in the page (D8, D3).
-	// Without WHATSAPP_ACCOUNT, the page is unchanged from before (D1 — the default account
-	// doesn't perceive any change).
+	// Without WHATSAPP_ACCOUNT the page falls back to identifying the bridge by port,
+	// so two accounts never serve identical pages (revises D1).
 	http.HandleFunc("/qr", func(w http.ResponseWriter, r *http.Request) {
 		qrState.RLock()
 		png := qrState.png
 		connected := qrState.connected
 		qrState.RUnlock()
 
+		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
+
 		if connected {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprint(w, `<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:4rem">
-<h2 style="color:#25d366">✓ WhatsApp connected</h2>
-<p>You can close this tab.</p></body></html>`)
+			fmt.Fprint(w, renderConnectedPage(accountAlias, port))
 			return
 		}
 		if png == nil {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Refresh", "2")
-			fmt.Fprint(w, `<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:4rem">
-<h2>Waiting for QR code…</h2><p>This page refreshes automatically.</p></body></html>`)
+			fmt.Fprint(w, renderWaitingPage(accountAlias, port))
 			return
 		}
 		// Serve an auto-refreshing HTML page that embeds the QR as a data URI.
 		// Refreshes every 20 s so a new QR is shown if the first one expires.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		// Get account alias from environment (D8, D3)
-		accountAlias := os.Getenv("WHATSAPP_ACCOUNT")
-
-		// Render the QR page using the extracted function
-		html := renderQRPage(accountAlias, port)
-		fmt.Fprint(w, html)
+		fmt.Fprint(w, renderQRPage(accountAlias, port))
 	})
 
 	// /qr.png — raw PNG for embedding or direct download
