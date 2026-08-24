@@ -133,6 +133,36 @@ function Save-AccountsMap {
     Write-TextNoBom -Path $AccountsPath -Content $json
 }
 
+# Stamp the account alias into the DEFAULT account's launcher.
+# The default account only gets a name at the moment the map is created; until then
+# its launcher has no WHATSAPP_ACCOUNT, so its /qr page identifies itself by port
+# while every other account's page shows an alias. The person pairing then sees two
+# pages that do not look like a matched pair -- one named, one not.
+function Set-DefaultLauncherAccount {
+    param([string]$InstallDir, [string]$Alias)
+    $launchScript = Join-Path $InstallDir 'start-bridge.ps1'
+    if (-not (Test-Path $launchScript)) {
+        return
+    }
+    $lines = @(Get-Content -Path $launchScript)
+    if ($lines -match 'WHATSAPP_ACCOUNT') {
+        return
+    }
+    $anchor = $lines | Where-Object { $_.TrimStart().StartsWith('$env:WHATSAPP_BRIDGE_PORT') } | Select-Object -First 1
+    if (-not $anchor) {
+        return
+    }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        if ($line -eq $anchor) {
+            $out.Add("`$env:WHATSAPP_ACCOUNT = '$Alias'")
+        }
+        $out.Add($line)
+    }
+    Write-TextNoBom -Path $launchScript -Content (($out -join "`r`n") + "`r`n")
+    Write-Ok "Default launcher now names its account: $Alias"
+}
+
 # Extract the port from an existing start-bridge.ps1 launcher.
 function Get-DefaultBridgePort {
     param([string]$InstallDir)
@@ -219,6 +249,7 @@ if ($AddAccount) {
                 }
             }
         }
+        Set-DefaultLauncherAccount -InstallDir $InstallDir -Alias "pessoal"
     }
 
     # Check if account already exists in map
