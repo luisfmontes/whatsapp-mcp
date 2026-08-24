@@ -182,7 +182,16 @@ if ($AddAccount) {
     Write-Ok "Account directory: $accountDir"
 
     # Load or initialize accounts map first (to check already-used ports)
-    $accountsJsonPath = Join-Path $InstallDir "accounts.json"
+    # The map lives where the MCP loader looks for it: ~/.whatsapp-mcp/accounts.json
+    # (whatsapp-mcp-server/accounts.py, and the path the README documents). Writing it
+    # under $InstallDir only agreed with the loader when InstallDir happened to be the
+    # default -- an install into a clone left the map where nothing reads it, and the
+    # account routing silently fell back to the single-account environment instead.
+    $accountsJsonDir = Join-Path $env:USERPROFILE '.whatsapp-mcp'
+    if (-not (Test-Path $accountsJsonDir)) {
+        $null = New-Item -ItemType Directory -Path $accountsJsonDir -Force
+    }
+    $accountsJsonPath = Join-Path $accountsJsonDir "accounts.json"
     $accountsMap = Load-AccountsMap -AccountsPath $accountsJsonPath
 
     # Find a free port for this account (start from 3006 for second account)
@@ -233,7 +242,7 @@ if ($AddAccount) {
 
     # Save accounts map
     Save-AccountsMap -AccountsPath $accountsJsonPath -Map $accountsMap
-    Write-Ok "accounts.json updated"
+    Write-Ok "accounts.json updated: $accountsJsonPath"
 
     # Generate launcher script for this account
     $launchScript = Join-Path $accountDir "start-bridge.ps1"
