@@ -279,7 +279,9 @@ Run multiple WhatsApp accounts (personal, work, etc.) on the same Windows machin
 
 #### Configuration: `accounts.json`
 
-Lives at `~/.whatsapp-mcp/accounts.json`. Created by the installer, maps account aliases to directories and ports:
+Lives at `~/.whatsapp-mcp/accounts.json` -- always that path, whatever `-InstallDir`
+you installed to, because that is where the MCP server looks for it. Created by the
+installer, maps account aliases to directories and ports:
 
 ```json
 {
@@ -298,6 +300,15 @@ Lives at `~/.whatsapp-mcp/accounts.json`. Created by the installer, maps account
   }
 }
 ```
+
+Two accounts may not share a `port` or a `dir`. A repeated port means the second bridge
+never binds and both aliases end up talking to whichever one won the socket; a repeated
+directory means the two share one `whatsapp.db`, so re-pairing one logs the other out.
+Either one is refused at load time, naming the two aliases that collide.
+
+Each bridge identifies itself on its own `/qr` page -- account alias and port, in the page
+and in the tab title -- so with more than one account you can tell which QR pairs which
+phone before you scan it.
 
 - `default`: which account is used when tools are called without `account` parameter
 - `accounts`: map of account aliases to config (dir, port, jid)
