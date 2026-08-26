@@ -2011,16 +2011,29 @@ func listChats(db *sql.DB, req ChatsRequest) (ChatsResponse, error) {
 		includeLastMessage = *req.IncludeLastMessage
 	}
 
-	queryParts := []string{`
+	selectClause := `
 		SELECT
 			chats.jid,
 			chats.name,
 			chats.last_message_time,
-			messages.content as last_message,
-			messages.sender as last_sender,
-			messages.is_from_me as last_is_from_me
+			NULL as last_message,
+			NULL as last_sender,
+			NULL as last_is_from_me
 		FROM chats
-	`}
+	`
+	if includeLastMessage {
+		selectClause = `
+			SELECT
+				chats.jid,
+				chats.name,
+				chats.last_message_time,
+				messages.content as last_message,
+				messages.sender as last_sender,
+				messages.is_from_me as last_is_from_me
+			FROM chats
+		`
+	}
+	queryParts := []string{selectClause}
 	if includeLastMessage {
 		queryParts = append(queryParts, `
 			LEFT JOIN messages ON chats.jid = messages.chat_jid
@@ -2507,12 +2520,22 @@ func getChat(db *sql.DB, req ChatRequest) (ChatResponse, error) {
 			c.jid,
 			c.name,
 			c.last_message_time,
-			m.content as last_message,
-			m.sender as last_sender,
-			m.is_from_me as last_is_from_me
+			NULL as last_message,
+			NULL as last_sender,
+			NULL as last_is_from_me
 		FROM chats c
 	`
 	if includeLastMessage {
+		query = `
+			SELECT
+				c.jid,
+				c.name,
+				c.last_message_time,
+				m.content as last_message,
+				m.sender as last_sender,
+				m.is_from_me as last_is_from_me
+			FROM chats c
+		`
 		query += `
 			LEFT JOIN messages m ON c.jid = m.chat_jid
 			AND c.last_message_time = m.timestamp
