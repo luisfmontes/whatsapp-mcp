@@ -3865,16 +3865,33 @@ func startTranscriptionSweep(interval time.Duration) {
 			// instead of discarding it to /dev/null.
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
-			// Point transcribe.py at THIS bridge's REST port. Without this it
-			// defaults to :8080 and every download fails when the bridge runs
-			// on a non-default port. A pre-set WHATSAPP_API_BASE_URL wins.
+			// Point transcribe.py at THIS bridge's REST port and bind address.
+			// Without this it defaults to localhost:8080, which fails every
+			// download whenever the bridge listens on a non-loopback
+			// BIND_ADDR (e.g. a Tailscale IP) — ListenAndServe only accepts
+			// connections on the address it was given. A pre-set
+			// WHATSAPP_API_BASE_URL wins.
 			cmd.Env = os.Environ()
 			if os.Getenv("WHATSAPP_API_BASE_URL") == "" {
 				port := "8080"
 				if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
 					port = p
 				}
-				cmd.Env = append(cmd.Env, fmt.Sprintf("WHATSAPP_API_BASE_URL=http://localhost:%s/api", port))
+				host := "127.0.0.1"
+				if a := os.Getenv("BIND_ADDR"); a != "" {
+					host = a
+				}
+				cmd.Env = append(cmd.Env, fmt.Sprintf("WHATSAPP_API_BASE_URL=http://%s:%s/api", host, port))
+			}
+			// transcribe.py reads WHATSAPP_API_AUTH_TOKEN, but the bridge's
+			// own auth flag is API_AUTH_TOKEN (see the BIND_ADDR check above)
+			// — different names, so os.Environ() alone never carries it
+			// through. Without this every download 401s once the bridge
+			// requires auth (any non-loopback BIND_ADDR).
+			if os.Getenv("WHATSAPP_API_AUTH_TOKEN") == "" {
+				if t := os.Getenv("API_AUTH_TOKEN"); t != "" {
+					cmd.Env = append(cmd.Env, fmt.Sprintf("WHATSAPP_API_AUTH_TOKEN=%s", t))
+				}
 			}
 			if err := cmd.Start(); err != nil {
 				fmt.Printf("transcription sweep: failed to start: %v\n", err)
