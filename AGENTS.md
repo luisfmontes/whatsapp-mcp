@@ -34,7 +34,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
       `scripts/personal-data-baseline.txt` que ele e sintetico.
 - [ ] Mudou comportamento de sync/escrita? Conferir impacto em transcrições existentes.
 - [ ] README/install.sh coerentes se mudou onboarding (versão Go, env vars, troubleshooting).
-- [ ] PR contra `origin/main`. Nada de PR novo para `upstream` (rodrigopg) — o destino é este fork. Os PRs já abertos lá (#14, #15) ficam como estão; fechá-los sem motivo técnico é ruído no repositório de outra pessoa.
+- [ ] PR contra `origin/main`. Nada de PR **novo** para `upstream` (rodrigopg) — o destino é este fork. Os dois que já existem lá seguem seu curso: o #15 foi mesclado em 26/08/2026, e o #14 foi aprovado, rebaseado a pedido do dono do repo (31/08/2026) e espera o merge dele. Se o Rodrigo pedir ajuste em algum, atender é trabalho legítimo; fechá-los sem motivo técnico é ruído no repositório de outra pessoa.
 
 ## Comandos essenciais
 
