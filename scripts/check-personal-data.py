@@ -10,6 +10,12 @@ scripts/personal-data-baseline.txt, and anything not in that list fails the buil
 Adding a line to the baseline is the escape hatch, and it is deliberately a
 visible diff: someone has to look at the number and decide it is synthetic.
 
+What the guard covers, and why it grew: it started scanning tracked files only, and
+that let a real number through in the one place nobody looks -- the commit MESSAGE of
+d5fcf48, the very commit that redacted the number from the file. `git ls-files` does
+not see commit messages, so the guard could not have caught it. It now also scans the
+messages of the commits a branch adds on top of its base.
+
 Background: a real WhatsApp number reached this public repository on 2026-08-08,
 pasted into a versioned progress log as smoke-test evidence, and stayed there for
 16 days. Rewriting history did not fully remove it -- in a fork network the object
@@ -73,8 +79,54 @@ def scan():
     return found
 
 
+def base_ref():
+    """The ref this branch is measured against, or None when it cannot be resolved.
+
+    CI passes it explicitly (the PR base); locally we fall back to origin/main. When
+    neither resolves -- a fresh clone, a detached checkout -- the commit-message scan
+    is skipped rather than failing: a guard that errors out on setup noise is a guard
+    people route around.
+    """
+    import os
+    for ref in (os.environ.get("PERSONAL_DATA_BASE"), "origin/main", "main"):
+        if not ref:
+            continue
+        ok = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True, text=True,
+        )
+        if ok.returncode == 0:
+            return ref
+    return None
+
+
+def scan_commit_messages():
+    """Identifiers in the messages of commits this branch adds on top of its base.
+
+    Only the new commits: history already published is not something this check can
+    fix, and failing on it forever would just teach people to ignore the guard.
+    """
+    ref = base_ref()
+    if ref is None:
+        return {}, None
+    out = subprocess.run(
+        ["git", "-C", str(REPO), "log", "--format=%B", f"{ref}..HEAD"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return {}, None
+    found = {}
+    for kind, pattern in PATTERNS:
+        for match in pattern.findall(out.stdout):
+            found.setdefault(f"{kind}:{match}", set()).add(f"mensagem de commit ({ref}..HEAD)")
+    return found, ref
+
+
 def main():
     found = scan()
+    msg_found, msg_ref = scan_commit_messages()
+    for key, where in msg_found.items():
+        found.setdefault(key, set()).update(where)
     allowed = load_baseline()
     new = {k: v for k, v in found.items() if k not in allowed}
 
@@ -91,6 +143,9 @@ def main():
             "number and say it is not a real person's."
         )
         return 1
+
+    if msg_ref is None:
+        print("Personal-data guard: base ref not resolvable, commit messages not scanned.")
 
     stale = sorted(allowed - set(found))
     if stale:
