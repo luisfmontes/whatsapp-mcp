@@ -9,7 +9,7 @@ POST /api/chat_presence
 Content-Type: application/json
 
 {
-  "chat_jid": "556291788888@s.whatsapp.net",
+  "chat_jid": "5562000000004@s.whatsapp.net",
   "state": "composing",
   "media": ""
 }

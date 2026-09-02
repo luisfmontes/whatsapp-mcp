@@ -10,7 +10,7 @@ Content-Type: application/json
 
 {
   "group_jid": "120363021234567890@g.us",
-  "participants": ["556291788888", "5562988887777@s.whatsapp.net"],
+  "participants": ["5562000000004", "5562988887777@s.whatsapp.net"],
   "action": "add"
 }
 ```
@@ -26,7 +26,7 @@ Content-Type: application/json
   "success": true,
   "message": "add applied to 2 participant(s)",
   "participants": [
-    {"jid": "556291788888@s.whatsapp.net", "is_admin": false, "error": 0},
+    {"jid": "5562000000004@s.whatsapp.net", "is_admin": false, "error": 0},
     {"jid": "5562988887777@s.whatsapp.net", "is_admin": false, "error": 403, "add_request": true}
   ]
 }
