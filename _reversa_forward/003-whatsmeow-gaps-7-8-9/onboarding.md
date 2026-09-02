@@ -13,7 +13,7 @@
 ```bash
 curl -s -X POST http://127.0.0.1:8081/api/is_on_whatsapp \
   -H 'Content-Type: application/json' \
-  -d '{"phones": ["556291788888", "5562000000000"]}' | jq
+  -d '{"phones": ["5562000000004", "5562000000000"]}' | jq
 ```
 
 Esperado: array com `is_in: true` para o primeiro (número do dono) e `is_in: false` para o inexistente.
