@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -150,7 +151,7 @@ func TestActionSenderJID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error parsing own JID: %v", err)
 		}
-		got := actionSenderJID(&ownJID, chatJID, true)
+		got := actionSenderJID(&ownJID, chatJID, types.JID{}, true)
 		want := ownJID.ToNonAD()
 		if got != want {
 			t.Fatalf("actionSenderJID() = %v, want %v", got, want)
@@ -158,17 +159,44 @@ func TestActionSenderJID(t *testing.T) {
 	})
 
 	t.Run("fromMe true with nil own JID falls back to chatJID", func(t *testing.T) {
-		got := actionSenderJID(nil, chatJID, true)
+		got := actionSenderJID(nil, chatJID, types.JID{}, true)
 		if got != chatJID {
 			t.Fatalf("actionSenderJID() = %v, want %v", got, chatJID)
 		}
 	})
 
-	t.Run("fromMe false falls back to chatJID", func(t *testing.T) {
+	t.Run("fromMe false with no participant falls back to chatJID", func(t *testing.T) {
 		ownJID, _ := types.ParseJID("5562988888888:1@s.whatsapp.net")
-		got := actionSenderJID(&ownJID, chatJID, false)
+		got := actionSenderJID(&ownJID, chatJID, types.JID{}, false)
 		if got != chatJID {
 			t.Fatalf("actionSenderJID() = %v, want %v", got, chatJID)
+		}
+	})
+}
+
+// TestActionSenderJIDGrupo covers task 6/D2: reacting or revoking a third
+// party's message in a group must use the AUTHOR's JID as sender, never the
+// group's own JID — actionSenderJID(fromMe=false, participantJID=<author>) is
+// exactly what handleReact/handleRevoke feed into BuildReaction/BuildRevoke
+// as the sender argument. Identifiers below are deliberately not
+// phone-shaped, same convention as TestSendQuotedRecusa.
+func TestActionSenderJIDGrupo(t *testing.T) {
+	groupJID, err := types.ParseJID("grupo-teste@g.us")
+	if err != nil {
+		t.Fatalf("unexpected error parsing group JID: %v", err)
+	}
+
+	t.Run("terceiro_em_grupo_usa_participante", func(t *testing.T) {
+		participantJID, err := types.ParseJID("participante-autor@s.whatsapp.net")
+		if err != nil {
+			t.Fatalf("unexpected error parsing participant JID: %v", err)
+		}
+		got := actionSenderJID(nil, groupJID, participantJID, false)
+		if got != participantJID {
+			t.Fatalf("actionSenderJID() = %v, want the participant JID %v (not the group JID)", got, participantJID)
+		}
+		if got == groupJID {
+			t.Fatalf("actionSenderJID() returned the group JID — third-party react/revoke would use the wrong sender")
 		}
 	})
 }
@@ -192,10 +220,11 @@ func doHandlerRequest(t *testing.T, handler http.HandlerFunc, method string, bod
 }
 
 // TestHandleReact covers /api/react request validation: method guard, decode
-// guard, required-field guard, and the group + from_me=false rejection that
-// prevents actionSenderJID from silently using the group JID as sender.
+// guard, required-field guard, and the group + from_me=false path (task 6):
+// an unknown-author message (never stored, D9) still refuses; a real store
+// with no matching row hits the exact same sql.ErrNoRows path.
 func TestHandleReact(t *testing.T) {
-	handler := handleReact(nil)
+	handler := handleReact(nil, nil)
 
 	t.Run("non-POST returns 405", func(t *testing.T) {
 		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
@@ -212,16 +241,18 @@ func TestHandleReact(t *testing.T) {
 	})
 
 	t.Run("missing message_id returns 400", func(t *testing.T) {
-		body, _ := json.Marshal(ReactRequest{ChatJID: "5562999999999@s.whatsapp.net", Emoji: "👍"})
+		body, _ := json.Marshal(ReactRequest{ChatJID: "grupo-teste@g.us", Emoji: "👍"})
 		rec := doHandlerRequest(t, handler, http.MethodPost, body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 		}
 	})
 
-	t.Run("group chat with from_me=false returns 400", func(t *testing.T) {
-		body, _ := json.Marshal(ReactRequest{ChatJID: "123456@g.us", MessageID: "MSG1", Emoji: "👍", FromMe: false})
-		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+	t.Run("group chat, from_me=false, unknown author still returns 400", func(t *testing.T) {
+		store := setupPollStore(t)
+		handlerWithStore := handleReact(nil, store)
+		body, _ := json.Marshal(ReactRequest{ChatJID: "grupo-teste@g.us", MessageID: "MSG1", Emoji: "👍", FromMe: false})
+		rec := doHandlerRequest(t, handlerWithStore, http.MethodPost, body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 		}
@@ -231,6 +262,9 @@ func TestHandleReact(t *testing.T) {
 		}
 		if resp.Success {
 			t.Fatalf("expected Success=false, got response: %+v", resp)
+		}
+		if !strings.Contains(resp.Message, "unknown") {
+			t.Errorf("message = %q, want it to say the author is unknown", resp.Message)
 		}
 	})
 }
@@ -264,9 +298,9 @@ func TestHandleEdit(t *testing.T) {
 }
 
 // TestHandleRevoke covers /api/revoke request validation: same shape as
-// TestHandleReact, including the group + from_me=false rejection.
+// TestHandleReact, including the group + from_me=false path (task 6).
 func TestHandleRevoke(t *testing.T) {
-	handler := handleRevoke(nil)
+	handler := handleRevoke(nil, nil)
 
 	t.Run("non-POST returns 405", func(t *testing.T) {
 		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
@@ -290,9 +324,11 @@ func TestHandleRevoke(t *testing.T) {
 		}
 	})
 
-	t.Run("group chat with from_me=false returns 400", func(t *testing.T) {
-		body, _ := json.Marshal(RevokeRequest{ChatJID: "123456@g.us", MessageID: "MSG1", FromMe: false})
-		rec := doHandlerRequest(t, handler, http.MethodPost, body)
+	t.Run("group chat, from_me=false, unknown author still returns 400", func(t *testing.T) {
+		store := setupPollStore(t)
+		handlerWithStore := handleRevoke(nil, store)
+		body, _ := json.Marshal(RevokeRequest{ChatJID: "grupo-teste@g.us", MessageID: "MSG1", FromMe: false})
+		rec := doHandlerRequest(t, handlerWithStore, http.MethodPost, body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 		}
@@ -302,6 +338,9 @@ func TestHandleRevoke(t *testing.T) {
 		}
 		if resp.Success {
 			t.Fatalf("expected Success=false, got response: %+v", resp)
+		}
+		if !strings.Contains(resp.Message, "unknown") {
+			t.Errorf("message = %q, want it to say the author is unknown", resp.Message)
 		}
 	})
 }
@@ -2459,7 +2498,7 @@ func TestSendQuotedRecusa(t *testing.T) {
 	t.Run("id_inexistente_nao_envia", func(t *testing.T) {
 		store := setupPollStore(t)
 
-		ok, msg, status := sendWhatsAppMessage(nil, store, "contato-teste@s.whatsapp.net", "oi", "", "MSG-NAO-EXISTE")
+		ok, msg, status, _ := sendWhatsAppMessage(nil, store, "contato-teste@s.whatsapp.net", "oi", "", "MSG-NAO-EXISTE", nil)
 		if ok {
 			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
 		}
@@ -2480,7 +2519,7 @@ func TestSendQuotedRecusa(t *testing.T) {
 			t.Fatalf("StoreMessage: %v", err)
 		}
 
-		ok, msg, status := sendWhatsAppMessage(nil, store, chatJID, "respondendo", "", "MSG-AUTOR-DESCONHECIDO")
+		ok, msg, status, _ := sendWhatsAppMessage(nil, store, chatJID, "respondendo", "", "MSG-AUTOR-DESCONHECIDO", nil)
 		if ok {
 			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
 		}
@@ -2511,12 +2550,137 @@ func TestSendQuotedRecusa(t *testing.T) {
 
 		// MSG-EM-CHAT-A lives in chatA; citing it while sending to chatB must
 		// be refused — GetMessageForQuote scopes the lookup by (id, chat_jid).
-		ok, msg, status := sendWhatsAppMessage(nil, store, chatB, "respondendo", "", "MSG-EM-CHAT-A")
+		ok, msg, status, _ := sendWhatsAppMessage(nil, store, chatB, "respondendo", "", "MSG-EM-CHAT-A", nil)
 		if ok {
 			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
 		}
 		if status < 400 || status >= 500 {
 			t.Fatalf("status = %d, want 4xx; msg=%q", status, msg)
+		}
+	})
+}
+
+// eightPlusDigits matches any run of 8 or more digits — D6's ban on a phone
+// number or JID surfacing in an ambiguous-mention response.
+var eightPlusDigits = regexp.MustCompile(`[0-9]{8,}`)
+
+// TestResolveMentionAmbigua covers task 5's mention resolution (D3-D7)
+// directly against a hand-built participants list — no live whatsmeow client
+// needed, per resolveMentionsAgainstParticipants' doc comment. Identifiers
+// are deliberately not phone-shaped, same convention as TestSendQuotedRecusa.
+func TestResolveMentionAmbigua(t *testing.T) {
+	t.Run("dois_candidatos_recusa_e_devolve_refs", func(t *testing.T) {
+		// Two participants sharing the same first name (D6's "dois 'Rodrigo'
+		// no grupo") — matched via first_name, so their differing full_name
+		// doesn't dodge the ambiguity.
+		participants := []mentionParticipant{
+			{jid: "participante-a@s.whatsapp.net", phoneUser: "participante-a", firstName: "Rodrigo", fullName: "Rodrigo Alfa"},
+			{jid: "participante-b@s.whatsapp.net", phoneUser: "participante-b", firstName: "Rodrigo", fullName: "Rodrigo Beta"},
+		}
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"})
+		if resolved != nil {
+			t.Fatalf("resolved = %v, want nil (nothing should be ready to send)", resolved)
+		}
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)
+		}
+		if len(candidates) != 2 {
+			t.Fatalf("len(candidates) = %d, want 2", len(candidates))
+		}
+		if candidates[0].Ref == candidates[1].Ref {
+			t.Fatalf("candidates share the same ref %q, want two distinct refs", candidates[0].Ref)
+		}
+		body, err := json.Marshal(struct {
+			Message    string                     `json:"message"`
+			Candidates []MentionCandidateResponse `json:"candidates"`
+		}{Message: errMsg, Candidates: candidates})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if eightPlusDigits.Match(body) {
+			t.Fatalf("response body has a run of 8+ digits (looks like a phone number): %s", body)
+		}
+	})
+
+	t.Run("casamento_unico_substitui_texto_e_seta_mentionedjid", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
+		}
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Ana"})
+		if errMsg != "" || statusCode != 0 {
+			t.Fatalf("errMsg=%q statusCode=%d, want no refusal", errMsg, statusCode)
+		}
+		if candidates != nil {
+			t.Fatalf("candidates = %v, want nil for a single match", candidates)
+		}
+		if len(resolved) != 1 {
+			t.Fatalf("len(resolved) = %d, want 1", len(resolved))
+		}
+		text, mentionedJIDs := applyMentions("oi @Ana tudo bem?", resolved)
+		if !strings.Contains(text, "@participante-c") {
+			t.Fatalf("text = %q, want it to contain the substituted @participante-c", text)
+		}
+		if strings.Contains(text, "@Ana") {
+			t.Fatalf("text = %q, want @Ana replaced, not left in place", text)
+		}
+		if len(mentionedJIDs) != 1 || mentionedJIDs[0] != "participante-c@s.whatsapp.net" {
+			t.Fatalf("mentionedJIDs = %v, want [participante-c@s.whatsapp.net]", mentionedJIDs)
+		}
+	})
+
+	t.Run("zero_casamentos_recusa_sem_enviar", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
+		}
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"NomeQueNaoEstaNoChat"})
+		if resolved != nil || candidates != nil {
+			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
+		}
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)
+		}
+	})
+
+	t.Run("arroba_nao_listado_sobrevive_intacto", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
+		}
+		resolved, _, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"})
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		// "@contato-fake.exemplo" is never listed in mentions — D5 says the
+		// ponte never scans the text for it, only for the names it was asked
+		// to substitute.
+		text, _ := applyMentions("fala com @contato-fake.exemplo e com @Ana", resolved)
+		if !strings.Contains(text, "@contato-fake.exemplo") {
+			t.Fatalf("text = %q, want the unlisted @contato-fake.exemplo left intact", text)
+		}
+	})
+
+	t.Run("ref_expirado_recusa", func(t *testing.T) {
+		mentionRefs.Lock()
+		mentionRefs.byRef["expirado1"] = mentionRefEntry{
+			jid: "participante-a@s.whatsapp.net", name: "Rodrigo", expiresAt: time.Now().Add(-time.Minute),
+		}
+		mentionRefs.Unlock()
+
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:expirado1"})
+		if resolved != nil || candidates != nil {
+			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
+		}
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)
+		}
+	})
+
+	t.Run("ref_desconhecido_recusa", func(t *testing.T) {
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:nunca-existiu"})
+		if resolved != nil || candidates != nil {
+			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
+		}
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)
 		}
 	})
 }

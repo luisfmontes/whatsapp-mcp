@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -764,6 +765,10 @@ type StatusResponse struct {
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// Candidates carries the ambiguous-mention refusal body (D6): populated
+	// only when Success is false because a name in the request's mentions
+	// matched more than one chat participant. Never a number or JID.
+	Candidates []MentionCandidateResponse `json:"candidates,omitempty"`
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -772,6 +777,32 @@ type SendMessageRequest struct {
 	Message         string `json:"message"`
 	MediaPath       string `json:"media_path,omitempty"`
 	QuotedMessageID string `json:"quoted_message_id,omitempty"`
+	// Mentions are NAMES, never a number or JID (D3) — matched against the
+	// destination chat's participants (D5) and substituted into the text as
+	// "@<number>" (D4). "ref:<opaque>" resolves a prior ambiguous-mention
+	// refusal's candidate (D6).
+	Mentions []string `json:"mentions,omitempty"`
+}
+
+// unknownAuthorMessage is the D9 refusal text: a message's author isn't
+// resolvable — sender_jid was never recorded, or sender is the chat's own
+// user part (the D8 group-JID-as-author gap: 9,433 messages where the group
+// JID got written as the author instead of a real participant). Shared,
+// verbatim, by buildQuoteContextInfo's citation refusal and
+// resolveActionParticipant's react/revoke third-party-in-group refusal
+// (task 6) — same judgment, same words.
+const unknownAuthorMessage = "message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it"
+
+// isUnknownAuthor is the D9 judgment, shared by buildQuoteContextInfo (task 4)
+// and resolveActionParticipant (task 6): true when a message's stored author
+// can't be trusted as a real participant — sender_jid empty, or sender equal
+// to the chat's own user part (D8).
+func isUnknownAuthor(senderJID, sender, chatJID string) bool {
+	chatUser := chatJID
+	if idx := strings.Index(chatJID, "@"); idx >= 0 {
+		chatUser = chatJID[:idx]
+	}
+	return senderJID == "" || sender == chatUser
 }
 
 // Function to send a WhatsApp message
@@ -793,15 +824,8 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 	if err != nil {
 		return nil, fmt.Sprintf("Error looking up quoted_message_id: %v", err), http.StatusInternalServerError
 	}
-	// D9: sender_jid never recorded, or the sender stored as the chat's own
-	// user part — the 9,433 messages (D8) where the group JID got written as
-	// the author. Neither identifies a real participant to quote as.
-	chatUser := chatJID
-	if idx := strings.Index(chatJID, "@"); idx >= 0 {
-		chatUser = chatJID[:idx]
-	}
-	if senderJID == "" || sender == chatUser {
-		return nil, "quoted message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it", http.StatusBadRequest
+	if isUnknownAuthor(senderJID, sender, chatJID) {
+		return nil, "quoted " + unknownAuthorMessage, http.StatusBadRequest
 	}
 	return &waProto.ContextInfo{
 		StanzaID:    proto.String(quotedMessageID),
@@ -813,7 +837,274 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 	}, "", 0
 }
 
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMessageID string) (bool, string, int) {
+// ---------------------------------------------------------------------------
+// Mention resolution (task 5, D3-D7): the ponte resolves a requested @Name to
+// a chat participant, substitutes "@Name" for "@<number>" in the text so
+// WhatsApp actually highlights it, and never lets a phone number or JID leak
+// into a request, a response, or an error message.
+// ---------------------------------------------------------------------------
+
+// mentionParticipant is one candidate for a mention target inside a chat
+// (D5): the list resolveMentions matches requested names against. jid is
+// always a phone-number JID (@s.whatsapp.net) — never @lid — so it can key
+// the senders table and go straight into ContextInfo.MentionedJID.
+type mentionParticipant struct {
+	jid          string
+	phoneUser    string // JID user part — what "@" is followed by in the substituted text
+	pushName     string
+	fullName     string
+	firstName    string
+	businessName string
+}
+
+// mentionMatch is one name match found by matchMentionName: enough to build
+// either a resolvedMention (single match) or a MentionCandidateResponse
+// (ambiguous match, D6) — never a phone number or JID in the latter.
+type mentionMatch struct {
+	jid    string
+	name   string
+	origem string // "agenda" (full_name/first_name) | "whatsapp" (push_name) | "negocio" (business_name)
+}
+
+// resolvedMention is one mention ready to apply to the outbound text (D4):
+// every "@name" occurrence in the message is replaced with "@phoneUser", and
+// jid goes into ContextInfo.MentionedJID.
+type resolvedMention struct {
+	name      string
+	phoneUser string
+	jid       string
+}
+
+// MentionCandidateResponse is one entry of the ambiguous-mention refusal body
+// (D6): an opaque ref plus the matched name and where it came from — no
+// number, no JID, ever.
+type MentionCandidateResponse struct {
+	Ref    string `json:"ref"`
+	Nome   string `json:"nome"`
+	Origem string `json:"origem"`
+}
+
+// fillSenderNames looks up p.jid in the senders table and fills the name
+// fields mention matching (D5, D6) checks against. No row for that JID
+// leaves every field empty — the participant is simply unmatchable by name,
+// not an error.
+func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
+	var pushName, fullName, firstName, businessName sql.NullString
+	err := store.db.QueryRow(
+		"SELECT push_name, full_name, first_name, business_name FROM senders WHERE jid = ?", p.jid,
+	).Scan(&pushName, &fullName, &firstName, &businessName)
+	if err != nil {
+		return
+	}
+	p.pushName = pushName.String
+	p.fullName = fullName.String
+	p.firstName = firstName.String
+	p.businessName = businessName.String
+}
+
+// chatParticipants lists who can be mentioned in chatJID (D5): a group's
+// members, or the other side of a 1:1 conversation. Names come from the
+// senders table (push_name/full_name/first_name/business_name) — never from
+// GetGroupInfo's DisplayName, measured empty for every participant in this
+// environment (its JID comes back @lid, not a phone number, so the name has
+// to be looked up separately). A participant with no resolvable phone number
+// is skipped: there's no number to mention them with.
+func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID) ([]mentionParticipant, error) {
+	if chatJID.Server != types.GroupServer {
+		p := mentionParticipant{jid: chatJID.String(), phoneUser: chatJID.User}
+		messageStore.fillSenderNames(&p)
+		return []mentionParticipant{p}, nil
+	}
+	groupInfo, err := client.GetGroupInfo(context.Background(), chatJID)
+	if err != nil {
+		return nil, err
+	}
+	participants := make([]mentionParticipant, 0, len(groupInfo.Participants))
+	for _, gp := range groupInfo.Participants {
+		if gp.PhoneNumber.IsEmpty() {
+			continue
+		}
+		p := mentionParticipant{jid: gp.PhoneNumber.String(), phoneUser: gp.PhoneNumber.User}
+		messageStore.fillSenderNames(&p)
+		participants = append(participants, p)
+	}
+	return participants, nil
+}
+
+// matchMentionName finds every participant whose full_name, first_name,
+// push_name or business_name matches name exactly (case/accent-insensitive,
+// via stripAccents) — never a substring or prefix match, so requesting
+// "Rodrigo" doesn't also catch a "Rodrigo Silva" whose first_name isn't
+// exactly "Rodrigo". D6's ambiguity is exactly two participants resolving the
+// same requested name through different fields (e.g. two whose first_name is
+// "Rodrigo").
+func matchMentionName(participants []mentionParticipant, name string) []mentionMatch {
+	target := stripAccents(strings.TrimSpace(name))
+	if target == "" {
+		return nil
+	}
+	var matches []mentionMatch
+	for _, p := range participants {
+		switch {
+		case p.fullName != "" && stripAccents(p.fullName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, name: p.fullName, origem: "agenda"})
+		case p.firstName != "" && stripAccents(p.firstName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, name: p.firstName, origem: "agenda"})
+		case p.pushName != "" && stripAccents(p.pushName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, name: p.pushName, origem: "whatsapp"})
+		case p.businessName != "" && stripAccents(p.businessName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, name: p.businessName, origem: "negocio"})
+		}
+	}
+	return matches
+}
+
+// mentionRefEntry is what an opaque ref (D6) resolves to: the candidate's
+// JID, the name that was being disambiguated (needed to redo the same
+// "@name" text substitution on resend), and when it expires.
+type mentionRefEntry struct {
+	jid       string
+	name      string
+	expiresAt time.Time
+}
+
+// mentionRefTTL is how long an ambiguous-mention ref (D6) stays valid.
+const mentionRefTTL = 10 * time.Minute
+
+// mentionRefs holds every outstanding ambiguous-mention ref, in-process only
+// (D6: "o mapa é do processo: reinício da ponte perde os tokens, e isso é
+// aceitável").
+var mentionRefs = struct {
+	sync.Mutex
+	byRef map[string]mentionRefEntry
+}{byRef: make(map[string]mentionRefEntry)}
+
+// storeMentionRef mints an opaque 8-hex-char identifier for one ambiguous
+// candidate (D6) and remembers it for mentionRefTTL. One that happens to
+// come out all-digits is rerolled — [0-9]{8,} is exactly what D6 forbids from
+// appearing in the response body, and an 8-digit id would trip that check by
+// accident roughly 1 in 40 times.
+func storeMentionRef(jid, name string) string {
+	mentionRefs.Lock()
+	defer mentionRefs.Unlock()
+	var refID string
+	for {
+		refID = randomHexID(8)
+		if isAllDigits(refID) {
+			continue
+		}
+		if _, exists := mentionRefs.byRef[refID]; exists {
+			continue
+		}
+		break
+	}
+	mentionRefs.byRef[refID] = mentionRefEntry{jid: jid, name: name, expiresAt: time.Now().Add(mentionRefTTL)}
+	return refID
+}
+
+// resolveMentionRef looks up a "ref:<id>" mention. An expired or unknown id
+// is dropped (if present) and reported as not found.
+func resolveMentionRef(refID string) (jid, name string, ok bool) {
+	mentionRefs.Lock()
+	defer mentionRefs.Unlock()
+	entry, exists := mentionRefs.byRef[refID]
+	if !exists || time.Now().After(entry.expiresAt) {
+		delete(mentionRefs.byRef, refID)
+		return "", "", false
+	}
+	return entry.jid, entry.name, true
+}
+
+// randomHexID returns n random lowercase hex characters.
+func randomHexID(n int) string {
+	b := make([]byte, (n+1)/2)
+	if _, err := cryptorand.Read(b); err != nil {
+		// cryptorand.Read doesn't fail on any supported platform; if it ever
+		// does, a timestamp-derived id beats panicking mid-request.
+		return strconv.FormatInt(time.Now().UnixNano(), 16)[:n]
+	}
+	return hex.EncodeToString(b)[:n]
+}
+
+// isAllDigits is defined once, further down (used by both the check-phones
+// path and storeMentionRef's reroll-on-all-digits guard).
+
+// resolveMentions resolves mentions (D3-D7) against chatJID's participants:
+// each entry is either a bare name (matched against the chat's participants)
+// or "ref:<id>" from a previous ambiguous refusal. Returns either the
+// resolved mentions ready to apply to the text, or a refusal — 4xx, nothing
+// sent — carrying candidates only for the ambiguous case (D6).
+func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
+	if len(mentions) == 0 {
+		return nil, nil, "", 0
+	}
+	participants, err := chatParticipants(client, messageStore, chatJID)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("could not resolve chat participants: %v", err), http.StatusInternalServerError
+	}
+	return resolveMentionsAgainstParticipants(participants, mentions)
+}
+
+// resolveMentionsAgainstParticipants is resolveMentions' matching core, split
+// out so it's testable (TestResolveMentionAmbigua) without a live whatsmeow
+// client — it only touches the participants list and the in-process ref map,
+// never the network.
+func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
+	resolved := make([]resolvedMention, 0, len(mentions))
+	for _, raw := range mentions {
+		if refID, isRef := strings.CutPrefix(raw, "ref:"); isRef {
+			jid, name, ok := resolveMentionRef(refID)
+			if !ok {
+				return nil, nil, fmt.Sprintf("mention ref %q expired or unknown — redo the mention by name", refID), http.StatusBadRequest
+			}
+			phoneUser := jid
+			if idx := strings.Index(jid, "@"); idx >= 0 {
+				phoneUser = jid[:idx]
+			}
+			resolved = append(resolved, resolvedMention{name: name, phoneUser: phoneUser, jid: jid})
+			continue
+		}
+		matches := matchMentionName(participants, raw)
+		if len(matches) == 0 {
+			return nil, nil, fmt.Sprintf("no participant named %q found in this chat", raw), http.StatusBadRequest
+		}
+		if len(matches) > 1 {
+			candidates := make([]MentionCandidateResponse, 0, len(matches))
+			for _, m := range matches {
+				candidates = append(candidates, MentionCandidateResponse{
+					Ref: storeMentionRef(m.jid, raw), Nome: m.name, Origem: m.origem,
+				})
+			}
+			return nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest
+		}
+		phoneUser := matches[0].jid
+		if idx := strings.Index(phoneUser, "@"); idx >= 0 {
+			phoneUser = matches[0].jid[:idx]
+		}
+		resolved = append(resolved, resolvedMention{name: raw, phoneUser: phoneUser, jid: matches[0].jid})
+	}
+	return resolved, nil, "", 0
+}
+
+// applyMentions substitutes every "@name" occurrence for each resolved
+// mention with "@phoneUser" (D4 — the WhatsApp app only highlights a mention
+// when the text contains "@<number>" matching a MentionedJID entry) and
+// collects the JIDs for ContextInfo.MentionedJID. Only names present in
+// resolved are touched (D5) — a bare "@" elsewhere in the text, or a name
+// never requested, is never scanned for.
+func applyMentions(text string, resolved []resolvedMention) (string, []string) {
+	if len(resolved) == 0 {
+		return text, nil
+	}
+	mentionedJIDs := make([]string, 0, len(resolved))
+	for _, r := range resolved {
+		text = strings.ReplaceAll(text, "@"+r.name, "@"+r.phoneUser)
+		mentionedJIDs = append(mentionedJIDs, r.jid)
+	}
+	return text, mentionedJIDs
+}
+
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMessageID string, mentions []string) (bool, string, int, []MentionCandidateResponse) {
 	// Create JID for recipient
 	var recipientJID types.JID
 	var err error
@@ -825,7 +1116,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err), http.StatusInternalServerError
+			return false, fmt.Sprintf("Error parsing JID: %v", err), http.StatusInternalServerError, nil
 		}
 	} else {
 		// Create JID from phone number
@@ -837,17 +1128,38 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 	// D9/D12: resolve the citation before touching the client at all, so the
 	// three refusals reject with nothing sent regardless of connection state.
-	var quoteContextInfo *waProto.ContextInfo
+	var contextInfo *waProto.ContextInfo
 	if quotedMessageID != "" {
 		ctxInfo, errMsg, statusCode := buildQuoteContextInfo(messageStore, quotedMessageID, recipientJID.String())
 		if errMsg != "" {
-			return false, errMsg, statusCode
+			return false, errMsg, statusCode, nil
 		}
-		quoteContextInfo = ctxInfo
+		contextInfo = ctxInfo
 	}
 
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp", http.StatusInternalServerError
+		return false, "Not connected to WhatsApp", http.StatusInternalServerError, nil
+	}
+
+	// D3-D7: resolve @Name mentions against the destination chat's
+	// participants and substitute them into the text before building the
+	// outbound message. This necessarily runs after the IsConnected check
+	// above (unlike the citation, resolving a group's participants needs a
+	// live client for GetGroupInfo) — but still before any media upload or
+	// SendMessage call, so an ambiguous/unmatched mention leaves nothing sent.
+	var mentionedJIDs []string
+	if len(mentions) > 0 {
+		resolvedMentions, candidates, errMsg, statusCode := resolveMentions(client, messageStore, recipientJID, mentions)
+		if errMsg != "" {
+			return false, errMsg, statusCode, candidates
+		}
+		message, mentionedJIDs = applyMentions(message, resolvedMentions)
+	}
+	if len(mentionedJIDs) > 0 {
+		if contextInfo == nil {
+			contextInfo = &waProto.ContextInfo{}
+		}
+		contextInfo.MentionedJID = mentionedJIDs
 	}
 
 	msg := &waProto.Message{}
@@ -857,7 +1169,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err), http.StatusInternalServerError
+			return false, fmt.Sprintf("Error reading media file: %v", err), http.StatusInternalServerError, nil
 		}
 
 		// Determine media type and mime type based on file extension
@@ -910,7 +1222,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err), http.StatusInternalServerError
+			return false, fmt.Sprintf("Error uploading media: %v", err), http.StatusInternalServerError, nil
 		}
 
 		fmt.Println("Media uploaded", resp)
@@ -930,7 +1242,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
-				ContextInfo:   quoteContextInfo,
+				ContextInfo:   contextInfo,
 			}
 		case whatsmeow.MediaAudio:
 			// Handle ogg audio files
@@ -944,7 +1256,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 					seconds = analyzedSeconds
 					waveform = analyzedWaveform
 				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), http.StatusInternalServerError
+					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), http.StatusInternalServerError, nil
 				}
 			} else {
 				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
@@ -961,7 +1273,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				Seconds:       proto.Uint32(seconds),
 				PTT:           proto.Bool(true),
 				Waveform:      waveform,
-				ContextInfo:   quoteContextInfo,
+				ContextInfo:   contextInfo,
 			}
 		case whatsmeow.MediaVideo:
 			msg.VideoMessage = &waProto.VideoMessage{
@@ -973,7 +1285,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
-				ContextInfo:   quoteContextInfo,
+				ContextInfo:   contextInfo,
 			}
 		case whatsmeow.MediaDocument:
 			docFilename := filepath.Base(mediaPath)
@@ -988,16 +1300,16 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
-				ContextInfo:   quoteContextInfo,
+				ContextInfo:   contextInfo,
 			}
 		}
-	} else if quoteContextInfo != nil {
+	} else if contextInfo != nil {
 		// D14: a ContextInfo cannot ride on Conversation (a bare string) — it
 		// only exists on ExtendedTextMessage and the media types. Without a
 		// citation, the line below (msg.Conversation) is untouched.
 		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
 			Text:        proto.String(message),
-			ContextInfo: quoteContextInfo,
+			ContextInfo: contextInfo,
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -1007,7 +1319,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err), http.StatusInternalServerError
+		return false, fmt.Sprintf("Error sending message: %v", err), http.StatusInternalServerError, nil
 	}
 
 	// Persist outbounds (text and media) so own-sends appear in the local store.
@@ -1029,7 +1341,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient), http.StatusOK
+	return true, fmt.Sprintf("Message sent to %s", recipient), http.StatusOK, nil
 }
 
 // Extract media info from a message
@@ -1489,22 +1801,59 @@ type RevokeRequest struct {
 
 // actionSenderJID derives the sender JID to use for react/revoke actions.
 // When fromMe is true the sender is the local account (own messages are the
-// common case for react/edit/revoke). When fromMe is false we don't have the
-// original message author available here, so we fall back to chatJID, which
-// is only correct for 1:1 chats; group-chat revoke/react on someone else's
-// message needs the participant JID plumbed in from the caller (not yet supported).
-func actionSenderJID(ownID *types.JID, chatJID types.JID, fromMe bool) types.JID {
+// common case for react/edit/revoke). When fromMe is false and
+// participantJID is known — resolved by the caller from the message's stored
+// sender_jid (task 6, D2) — that's the author to pass as sender:
+// BuildReaction/BuildRevoke's sender parameter is exactly the message
+// author's JID (design D2, citing send.go's BuildRevoke doc: an admin
+// revokes someone else's message by passing that author's JID here). An
+// empty participantJID falls back to chatJID, which is only correct for 1:1
+// chats.
+func actionSenderJID(ownID *types.JID, chatJID, participantJID types.JID, fromMe bool) types.JID {
 	if fromMe && ownID != nil {
 		return ownID.ToNonAD()
+	}
+	if !participantJID.IsEmpty() {
+		return participantJID
 	}
 	return chatJID
 }
 
+// resolveActionParticipant looks up the author of messageID in chatJID (D2,
+// task 6) for the react/revoke third-party-in-group path: from_me=false in a
+// group needs the participant's JID as actionSenderJID's participantJID, not
+// the group's own JID. Reuses GetMessageForQuote (task 4) and the same D9
+// unknown-author judgment as citing (isUnknownAuthor) — a message whose
+// author isn't tracked stays refused, with the same unknownAuthorMessage
+// either way.
+func resolveActionParticipant(messageStore *MessageStore, messageID, chatJID string) (types.JID, string, int) {
+	if messageStore == nil {
+		return types.JID{}, "no message store available", http.StatusInternalServerError
+	}
+	senderJID, sender, _, err := messageStore.GetMessageForQuote(messageID, chatJID)
+	if err == sql.ErrNoRows {
+		return types.JID{}, unknownAuthorMessage, http.StatusBadRequest
+	}
+	if err != nil {
+		return types.JID{}, fmt.Sprintf("Error looking up message author: %v", err), http.StatusInternalServerError
+	}
+	if isUnknownAuthor(senderJID, sender, chatJID) {
+		return types.JID{}, unknownAuthorMessage, http.StatusBadRequest
+	}
+	parsed, parseErr := types.ParseJID(senderJID)
+	if parseErr != nil {
+		return types.JID{}, unknownAuthorMessage, http.StatusBadRequest
+	}
+	return parsed, "", 0
+}
+
 // handleReact returns the handler for POST /api/react. Empty emoji removes an
 // existing reaction. Reacting to another participant's message in a group
-// (from_me=false) is rejected: actionSenderJID would fall back to the group's
-// own JID as sender, producing a malformed (but silently-accepted) message key.
-func handleReact(client *whatsmeow.Client) http.HandlerFunc {
+// (from_me=false) resolves the author from the message's stored sender_jid
+// via resolveActionParticipant (task 6, D2) and passes it to actionSenderJID
+// as participantJID; only a message whose author is unknown (D9) is still
+// refused.
+func handleReact(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1520,11 +1869,16 @@ func handleReact(client *whatsmeow.Client) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Invalid chat_jid: %v", err), http.StatusBadRequest)
 			return
 		}
+		var participantJID types.JID
 		if !req.FromMe && chatJID.Server == types.GroupServer {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: "reacting to another participant's message in a group is not supported (participant JID unavailable)"})
-			return
+			resolved, errMsg, statusCode := resolveActionParticipant(messageStore, req.MessageID, req.ChatJID)
+			if errMsg != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: errMsg})
+				return
+			}
+			participantJID = resolved
 		}
 		if client == nil || !client.IsConnected() {
 			w.Header().Set("Content-Type", "application/json")
@@ -1532,7 +1886,7 @@ func handleReact(client *whatsmeow.Client) http.HandlerFunc {
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: "WhatsApp client not connected"})
 			return
 		}
-		senderJID := actionSenderJID(client.Store.ID, chatJID, req.FromMe)
+		senderJID := actionSenderJID(client.Store.ID, chatJID, participantJID, req.FromMe)
 		builtMsg := client.BuildReaction(chatJID, senderJID, types.MessageID(req.MessageID), req.Emoji)
 		if _, err := client.SendMessage(context.Background(), chatJID, builtMsg); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -1584,10 +1938,11 @@ func handleEdit(client *whatsmeow.Client) http.HandlerFunc {
 }
 
 // handleRevoke returns the handler for POST /api/revoke. Revoking another
-// participant's message in a group (from_me=false) is rejected for the same
-// reason as handleReact: no participant JID available, so actionSenderJID
-// would fall back to the group's own JID and produce a malformed revoke.
-func handleRevoke(client *whatsmeow.Client) http.HandlerFunc {
+// participant's message in a group (from_me=false) resolves the author from
+// the message's stored sender_jid via resolveActionParticipant (task 6, D2)
+// and passes it to actionSenderJID as participantJID; only a message whose
+// author is unknown (D9) is still refused — same reasoning as handleReact.
+func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1603,11 +1958,16 @@ func handleRevoke(client *whatsmeow.Client) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Invalid chat_jid: %v", err), http.StatusBadRequest)
 			return
 		}
+		var participantJID types.JID
 		if !req.FromMe && chatJID.Server == types.GroupServer {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: "revoking another participant's message in a group is not supported (participant JID unavailable)"})
-			return
+			resolved, errMsg, statusCode := resolveActionParticipant(messageStore, req.MessageID, req.ChatJID)
+			if errMsg != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: errMsg})
+				return
+			}
+			participantJID = resolved
 		}
 		if client == nil || !client.IsConnected() {
 			w.Header().Set("Content-Type", "application/json")
@@ -1615,7 +1975,7 @@ func handleRevoke(client *whatsmeow.Client) http.HandlerFunc {
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: "WhatsApp client not connected"})
 			return
 		}
-		senderJID := actionSenderJID(client.Store.ID, chatJID, req.FromMe)
+		senderJID := actionSenderJID(client.Store.ID, chatJID, participantJID, req.FromMe)
 		builtMsg := client.BuildRevoke(chatJID, senderJID, types.MessageID(req.MessageID))
 		if _, err := client.SendMessage(context.Background(), chatJID, builtMsg); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -4422,7 +4782,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message, statusCode := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.QuotedMessageID)
+		success, message, statusCode, candidates := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.QuotedMessageID, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -4437,8 +4797,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+			Success:    success,
+			Message:    message,
+			Candidates: candidates,
 		})
 	})
 
@@ -4949,13 +5310,13 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Handler for reacting to a message. Empty emoji removes an existing reaction.
-	http.HandleFunc("/api/react", handleReact(client))
+	http.HandleFunc("/api/react", handleReact(client, messageStore))
 
 	// Handler for editing the text of a previously sent message.
 	http.HandleFunc("/api/edit", handleEdit(client))
 
 	// Handler for revoking (deleting for everyone) a previously sent message.
-	http.HandleFunc("/api/revoke", handleRevoke(client))
+	http.HandleFunc("/api/revoke", handleRevoke(client, messageStore))
 
 	// Handler for adding, removing, promoting or demoting group participants.
 	http.HandleFunc("/api/group_participants", handleGroupParticipants(client))
