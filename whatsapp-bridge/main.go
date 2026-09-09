@@ -798,11 +798,23 @@ const unknownAuthorMessage = "message's author is unknown for that part of the h
 // can't be trusted as a real participant — sender_jid empty, or sender equal
 // to the chat's own user part (D8).
 func isUnknownAuthor(senderJID, sender, chatJID string) bool {
+	// No full JID recorded: there is no Participant to quote as, in any chat.
+	if senderJID == "" {
+		return true
+	}
+	// Only in a GROUP does `sender == chat` mean the author was lost: those are
+	// the 9,433 rows (D8) where the group's own JID got written as the author.
+	// In a 1:1 the two are equal for EVERY message — the chat IS the person —
+	// so applying the heuristic there refused every legitimate quote in a
+	// direct conversation. Found in production on 2026-09-09.
+	if !strings.HasSuffix(chatJID, "@g.us") {
+		return false
+	}
 	chatUser := chatJID
 	if idx := strings.Index(chatJID, "@"); idx >= 0 {
 		chatUser = chatJID[:idx]
 	}
-	return senderJID == "" || sender == chatUser
+	return sender == chatUser
 }
 
 // Function to send a WhatsApp message
@@ -1338,6 +1350,23 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			fmt.Printf("Failed to persist outbound: %v\n", storeErr)
 		} else {
 			_ = messageStore.TouchChatLastMessageTime(chatJID, resp.Timestamp)
+			// Our own JID, so a later reply can quote this message:
+			// buildQuoteContextInfo refuses when sender_jid is empty (D9), and
+			// without this every own-send would be unquotable.
+			if ownJID := client.Store.ID.ToNonAD().String(); ownJID != "" {
+				if jidErr := messageStore.StoreMessageSenderJID(resp.ID, chatJID, ownJID); jidErr != nil {
+					fmt.Printf("Failed to persist outbound sender_jid: %v\n", jidErr)
+				}
+			}
+			// The citation/mentions this message carries, so the account that
+			// sent it also sees it as a reply — handleMessage only fires for
+			// incoming messages, so without this the sender's own view is the
+			// one place the thread is invisible (D13).
+			if contextInfo != nil {
+				if ctxErr := messageStore.StoreMessageContext(resp.ID, chatJID, contextInfo); ctxErr != nil {
+					fmt.Printf("Failed to persist outbound context: %v\n", ctxErr)
+				}
+			}
 		}
 	}
 

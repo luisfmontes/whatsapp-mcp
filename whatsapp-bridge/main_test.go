@@ -2873,3 +2873,32 @@ func TestQueriesFeedingScanAPIMessageRowIncludeQuotedAndMentions(t *testing.T) {
 		checkQuoted(t, "getLastInteraction", *resp.Message)
 	})
 }
+
+// TestIsUnknownAuthorPrivado guards the regression found in production on
+// 2026-09-09: in a 1:1 chat the sender's user part IS the chat's user part for
+// every message, so the group heuristic (D8's 9,433 rows where the group JID
+// got written as the author) refused every legitimate quote in a direct
+// conversation. The heuristic is group-only; outside a group, only a missing
+// sender_jid makes an author unknown.
+func TestIsUnknownAuthorPrivado(t *testing.T) {
+	cases := []struct {
+		nome      string
+		senderJID string
+		sender    string
+		chatJID   string
+		want      bool
+	}{
+		{"privado com sender_jid: autor conhecido", "contato-a@s.whatsapp.net", "contato-a", "contato-a@s.whatsapp.net", false},
+		{"privado sem sender_jid: autor desconhecido", "", "contato-a", "contato-a@s.whatsapp.net", true},
+		{"grupo com autor real: conhecido", "contato-a@s.whatsapp.net", "contato-a", "grupo-x@g.us", false},
+		{"grupo com o proprio grupo como autor: desconhecido", "grupo-x@s.whatsapp.net", "grupo-x", "grupo-x@g.us", true},
+		{"grupo sem sender_jid: desconhecido", "", "contato-a", "grupo-x@g.us", true},
+	}
+	for _, c := range cases {
+		t.Run(c.nome, func(t *testing.T) {
+			if got := isUnknownAuthor(c.senderJID, c.sender, c.chatJID); got != c.want {
+				t.Fatalf("isUnknownAuthor(%q, %q, %q) = %v, want %v", c.senderJID, c.sender, c.chatJID, got, c.want)
+			}
+		})
+	}
+}

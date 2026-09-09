@@ -118,9 +118,12 @@ class FormatMessageCitacaoTest(unittest.TestCase):
         # before task 7 (get_sender_name raising for message.sender).
         self.assertIn("[Error formatting message: boom]", output)
         # The quoted-sender resolution has its own independent fallback: the
-        # rest of the line (id, preview) survives, falling back to the raw
-        # JID for the name that couldn't be resolved.
-        self.assertIn('↳ reply to autor-citado@s.whatsapp.net [MSG-X]: "texto"', output)
+        # rest of the line (id, preview) survives. The fallback is a neutral
+        # marker, never the JID — D3 forbids a number reaching this output, and
+        # an unresolved name is a gap in the contact list, not a licence to
+        # print the identifier behind it.
+        self.assertIn('↳ reply to (contato sem nome) [MSG-X]: "texto"', output)
+        self.assertNotIn("autor-citado@s.whatsapp.net", output.split("\n", 1)[1])
 
 
 class MessageFromDictTest(unittest.TestCase):

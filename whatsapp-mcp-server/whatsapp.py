@@ -281,6 +281,74 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     _sender_name_cache[cache_key] = name
     return name
 
+UNNAMED_CONTACT = "(contato sem nome)"
+
+
+def _strip_device_suffix(jid: Optional[str]) -> Optional[str]:
+    """Drop the device part of an addressed JID: `<user>:<device>@server` ->
+    `<user>@server`.
+
+    A ContextInfo arrives from the wire addressed to a specific device, so the
+    quoted sender reads as `...:8@s.whatsapp.net`. The senders table is keyed
+    without that suffix, so the lookup misses and the raw JID would be printed
+    — which is how a phone number reached the output that D3 says must never
+    carry one.
+    """
+    if not jid or "@" not in jid:
+        return jid
+    user, _, server = jid.partition("@")
+    user = user.split(":", 1)[0]
+    return f"{user}@{server}"
+
+
+def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
+    """Name of a JID for human-facing output, never a number (D3).
+
+    Falls back to a neutral marker instead of the JID: an unresolved name is a
+    gap in the contact list, and printing the number to fill it is exactly what
+    the decision forbids.
+    """
+    if not jid:
+        return UNNAMED_CONTACT
+    normalized = _strip_device_suffix(jid)
+    try:
+        name = get_sender_name(normalized, account)
+    except Exception:
+        return UNNAMED_CONTACT
+    # get_sender_name echoes the JID back when it cannot resolve a name — and
+    # the bridge answers with the bare user part in the same situation, which
+    # for a phone JID is the phone number itself. Both mean "no name", and
+    # neither may be printed.
+    user_part = (normalized or "").split("@", 1)[0]
+    if not name or name in (normalized, jid, user_part) or name.isdigit():
+        return UNNAMED_CONTACT
+    return name
+
+
+def _mentions_by_name(text: str, mentions: List[str], account: Optional[str] = None) -> str:
+    """Rewrite `@<number>` back to `@<Name>` in a message body.
+
+    WhatsApp requires the literal `@<number>` inside the text for a mention to
+    render, so the number is in the body by protocol — nothing can take it out
+    of what was sent. What the READING surface shows is our choice, and D3 says
+    it shows names.
+    """
+    if not text or not mentions:
+        return text
+    for jid in mentions:
+        user = (_strip_device_suffix(jid) or "").split("@", 1)[0]
+        if not user:
+            continue
+        nome = _display_name(jid, account)
+        if nome == UNNAMED_CONTACT:
+            # Still better than the number: the reader learns someone was
+            # mentioned without learning who, which is the same trade the
+            # quoted-author line already makes.
+            nome = "alguém"
+        text = text.replace("@" + user, "@" + nome)
+    return text
+
+
 def _truncate_preview(text: str, limit: int = 80) -> str:
     """Truncate a quoted-message preview to `limit` chars, appending an
     ellipsis when it was actually cut. Empty/None input yields "".
@@ -308,7 +376,8 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
 
     try:
         sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        corpo = _mentions_by_name(message.content, message.mentions, account)
+        output += f"From: {sender_name}: {content_prefix}{corpo}\n"
     except Exception as e:
         # Surface the failure instead of silently dropping the rest of the
         # line (the mistake this entry exists to fix elsewhere) - same
@@ -322,24 +391,12 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
     # get_sender_name already does this for its own transport/5xx failures;
     # this catches anything else, e.g. a mock raising in tests).
     if message.quoted_message_id:
-        quoted_name = ""
-        if message.quoted_sender:
-            try:
-                quoted_name = get_sender_name(message.quoted_sender, account)
-            except Exception as e:
-                logger.warning("Error resolving quoted sender name for message %s: %s", message.id, e)
-                quoted_name = message.quoted_sender
+        quoted_name = _display_name(message.quoted_sender, account)
         preview = _truncate_preview(message.quoted_content)
         output += f'    ↳ reply to {quoted_name} [{message.quoted_message_id}]: "{preview}"\n'
 
     if message.mentions:
-        names = []
-        for jid in message.mentions:
-            try:
-                names.append(get_sender_name(jid, account))
-            except Exception as e:
-                logger.warning("Error resolving mention name for message %s: %s", message.id, e)
-                names.append(jid)
+        names = [_display_name(jid, account) for jid in message.mentions]
         output += f"    @ mentions: {', '.join(names)}\n"
 
     return output
