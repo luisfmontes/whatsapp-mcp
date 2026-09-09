@@ -443,13 +443,15 @@ Nothing is sent when a quote is refused. The API returns:
 - **HTTP 404** if the message ID doesn't exist in the store for that chat — a quote whose message lives in a different chat lands here too, since the lookup is scoped by chat
 - **HTTP 400** if the message's author is unknown (`quoted message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it`)
 
-`list_messages`, `get_message_context`, and `get_last_interaction` show a quoted message as an indented line under the message itself:
+`list_messages` and `get_last_interaction` show a quoted message as an indented line under the message itself:
 
 ```
     ↳ reply to <Author Name> [<quoted message id>]: "<first 80 chars of the quoted text>"
 ```
 
 Names, never phone numbers or JIDs. The preview is truncated at 80 characters with an ellipsis.
+
+`get_message_context` returns structured data rather than that line: each message carries `quoted_message_id`, `quoted_sender_name`, `quoted_content` and `mentions` (names). Same rule — no JIDs, no numbers. A `@<number>` left inside a message body that could not be resolved to a name is blanked out on the way to you.
 
 ### Mentioning people by name
 
@@ -458,7 +460,11 @@ Pass `mentions` — a list of **people's names** (never phone numbers or JIDs) �
 - **No match**: request refused with HTTP 400, message not sent
 - **Multiple matches** (e.g., two "Alice" contacts in a group): request returns HTTP 400 with a `candidates` list carrying opaque `ref` tokens and the matched names — **no phone numbers or JIDs in the list**. Resend with `mentions: ["ref:<that-token>"]` to pick a specific match.
 
-A `ref` is valid for 10 minutes, in the process that issued it. After that — or if the bridge restarts, since the refs live in memory — the resend is refused and you mention by name again.
+A `ref` is valid for 10 minutes, in the process that issued it, **and only in the chat where the ambiguity happened**. Sending a ref minted in one conversation to a different one is refused — a token is not a way to reach someone who is not in the chat you are writing to. After the 10 minutes — or if the bridge restarts, since the refs live in memory — the resend is refused and you mention by name again.
+
+Two more refusals, both before anything is sent:
+- A name you asked to mention whose `@Name` is nowhere in the message text. WhatsApp only highlights what the body writes, so a mention with no anchor would notify someone with nothing on screen to explain it.
+- When two requested names overlap (`Ana` and `Ana Paula` in the same message), the longer one wins at each position, so `@Ana Paula` never gets rewritten as `@<Ana> Paula`.
 
 Mentions on messages you receive show up the same way quotes do, as an indented line under the message, by name:
 

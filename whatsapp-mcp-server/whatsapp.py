@@ -1,4 +1,5 @@
 import logging
+import re
 import unicodedata
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -320,9 +321,35 @@ def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
     # for a phone JID is the phone number itself. Both mean "no name", and
     # neither may be printed.
     user_part = (normalized or "").split("@", 1)[0]
-    if not name or name in (normalized, jid, user_part) or name.isdigit():
+    if not name or name in (normalized, jid, user_part):
+        return UNNAMED_CONTACT
+    # `name.isdigit()` alone misses the common case: a push_name or contact
+    # label that IS a phone number, just typed with punctuation — country
+    # code, spaces, a dash. Printing it satisfies the letter of "we printed a
+    # name" and breaks D3 anyway, so judge the digits, not the formatting.
+    if len(re.sub(r"\D", "", name)) >= 8:
         return UNNAMED_CONTACT
     return name
+
+
+# "@" followed by a long digit run is a mention by construction: WhatsApp
+# requires the literal "@<number>" in the body for the highlight to render, so
+# nothing else produces that shape in a message body.
+_MENTION_NUMERO = re.compile(r"@\d{8,}")
+
+
+def _scrub_mention_numbers(text: str) -> str:
+    """Blank out any `@<number>` a name lookup could not turn into a name.
+
+    `_mentions_by_name` only rewrites the numbers whose JID is in THIS
+    message's `mentions` list. Two cases fall outside it and were leaking
+    numbers into the reading surface: a quoted message's body (the `mentions`
+    column of the quoted message is never read on the quote path) and any row
+    written before the `mentions` column existed.
+    """
+    if not text:
+        return text
+    return _MENTION_NUMERO.sub("@" + UNNAMED_CONTACT, text)
 
 
 def _mentions_by_name(text: str, mentions: List[str], account: Optional[str] = None) -> str:
@@ -374,6 +401,12 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
     `sender` and `chat_jid` stay as they are: they are addressing handles that
     already existed and that callers use to reply. What this function fixes is
     what THIS work introduced.
+
+    The second review round found the same leak one field over: `quoted_content`
+    is the BODY of the quoted message, and a body that mentions someone carries
+    `@<number>` by protocol — so quoting a message that mentioned a third party
+    put that third party's number in the answer. Bodies go out through
+    `_scrub_mention_numbers`, here and in `format_message`.
     """
     return {
         "id": message.id,
@@ -382,12 +415,14 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
         "sender_name": "Me" if message.is_from_me else _display_name(message.sender, account),
         "chat_jid": message.chat_jid,
         "chat_name": message.chat_name,
-        "content": _mentions_by_name(message.content, message.mentions, account),
+        "content": _scrub_mention_numbers(
+            _mentions_by_name(message.content, message.mentions, account)
+        ),
         "is_from_me": message.is_from_me,
         "media_type": message.media_type,
         "quoted_message_id": message.quoted_message_id,
         "quoted_sender_name": _display_name(message.quoted_sender, account) if message.quoted_message_id else None,
-        "quoted_content": message.quoted_content,
+        "quoted_content": _scrub_mention_numbers(message.quoted_content),
         "mentions": [_display_name(j, account) for j in (message.mentions or [])],
     }
 
@@ -408,7 +443,9 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
 
     try:
         sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
-        corpo = _mentions_by_name(message.content, message.mentions, account)
+        corpo = _scrub_mention_numbers(
+            _mentions_by_name(message.content, message.mentions, account)
+        )
         output += f"From: {sender_name}: {content_prefix}{corpo}\n"
     except Exception as e:
         # Surface the failure instead of silently dropping the rest of the
@@ -423,7 +460,7 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
     # _display_name absorbs the failure and answers with a neutral marker.
     if message.quoted_message_id:
         quoted_name = _display_name(message.quoted_sender, account)
-        preview = _truncate_preview(message.quoted_content)
+        preview = _truncate_preview(_scrub_mention_numbers(message.quoted_content))
         output += f'    ↳ reply to {quoted_name} [{message.quoted_message_id}]: "{preview}"\n'
 
     if message.mentions:

@@ -862,6 +862,7 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 // the senders table and go straight into ContextInfo.MentionedJID.
 type mentionParticipant struct {
 	jid          string
+	altJID       string // the same person's @lid form, when the group gave us one
 	phoneUser    string // JID user part — what "@" is followed by in the substituted text
 	pushName     string
 	fullName     string
@@ -896,22 +897,41 @@ type MentionCandidateResponse struct {
 	Origem string `json:"origem"`
 }
 
-// fillSenderNames looks up p.jid in the senders table and fills the name
-// fields mention matching (D5, D6) checks against. No row for that JID
+// fillSenderNames looks up the participant in the senders table and fills the
+// name fields mention matching (D5, D6) checks against. No row for either key
 // leaves every field empty — the participant is simply unmatchable by name,
 // not an error.
+//
+// Two keys, not one, and that is the point: senders rows are written with
+// resolveToPN(msg.Info.Sender), which returns the @lid UNCHANGED when no
+// PN mapping exists yet. Measured on the live personal store on 2026-09-09,
+// 637 of 2518 sender rows are keyed by @lid, 587 of them carrying a name.
+// Looking up only the phone form makes those people invisible to matching —
+// which is worse than "cannot mention them": D6's ambiguity check counts
+// candidates, so a group with two people of the same first name, one of them
+// only known under @lid, would see a SINGLE match, skip the question, and
+// mention the other one. Silently mentioning the wrong person is exactly
+// what D6 exists to prevent.
 func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
-	var pushName, fullName, firstName, businessName sql.NullString
-	err := store.db.QueryRow(
-		"SELECT push_name, full_name, first_name, business_name FROM senders WHERE jid = ?", p.jid,
-	).Scan(&pushName, &fullName, &firstName, &businessName)
-	if err != nil {
-		return
+	for _, key := range []string{p.jid, p.altJID} {
+		if key == "" {
+			continue
+		}
+		var pushName, fullName, firstName, businessName sql.NullString
+		err := store.db.QueryRow(
+			"SELECT push_name, full_name, first_name, business_name FROM senders WHERE jid = ?", key,
+		).Scan(&pushName, &fullName, &firstName, &businessName)
+		if err != nil {
+			continue
+		}
+		p.pushName = pushName.String
+		p.fullName = fullName.String
+		p.firstName = firstName.String
+		p.businessName = businessName.String
+		if p.pushName != "" || p.fullName != "" || p.firstName != "" || p.businessName != "" {
+			return
+		}
 	}
-	p.pushName = pushName.String
-	p.fullName = fullName.String
-	p.firstName = firstName.String
-	p.businessName = businessName.String
 }
 
 // chatParticipants lists who can be mentioned in chatJID (D5): a group's
@@ -936,7 +956,7 @@ func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chat
 		if gp.PhoneNumber.IsEmpty() {
 			continue
 		}
-		p := mentionParticipant{jid: gp.PhoneNumber.String(), phoneUser: gp.PhoneNumber.User}
+		p := mentionParticipant{jid: gp.PhoneNumber.String(), altJID: gp.JID.String(), phoneUser: gp.PhoneNumber.User}
 		messageStore.fillSenderNames(&p)
 		participants = append(participants, p)
 	}
@@ -1159,16 +1179,71 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 // collects the JIDs for ContextInfo.MentionedJID. Only names present in
 // resolved are touched (D5) — a bare "@" elsewhere in the text, or a name
 // never requested, is never scanned for.
-func applyMentions(text string, resolved []resolvedMention) (string, []string) {
+//
+// The scan is a single left-to-right pass with the LONGEST name tried first,
+// and it never re-reads what it already wrote. Both properties are the fix
+// for a defect found in review: a per-name strings.ReplaceAll rewrote
+// "@Ana e @Ana Paula" into "@<número da Ana> e @<número da Ana> Paula" —
+// Ana highlighted where the author wrote Ana Paula, and Ana Paula carrying a
+// MentionedJID with no anchor in the body. Mentioning the wrong person in a
+// group has no undo, which is the whole reason D6 stops to ask.
+//
+// A mention whose "@name" never appears in the body is refused rather than
+// sent: WhatsApp only highlights what the text actually writes, so a
+// MentionedJID without its anchor notifies someone with nothing on screen
+// explaining why.
+func applyMentions(text string, resolved []resolvedMention) (string, []string, string, int) {
 	if len(resolved) == 0 {
-		return text, nil
+		return text, nil, "", 0
 	}
+
+	ordem := make([]int, len(resolved))
+	for i := range ordem {
+		ordem[i] = i
+	}
+	sort.SliceStable(ordem, func(a, b int) bool {
+		return len(resolved[ordem[a]].name) > len(resolved[ordem[b]].name)
+	})
+
+	usados := make([]bool, len(resolved))
+	var b strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] != '@' {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		casou := -1
+		for _, idx := range ordem {
+			if resolved[idx].name == "" {
+				continue
+			}
+			if strings.HasPrefix(text[i+1:], resolved[idx].name) {
+				casou = idx
+				break
+			}
+		}
+		if casou < 0 {
+			b.WriteByte(text[i])
+			i++
+			continue
+		}
+		b.WriteString("@" + resolved[casou].phoneUser)
+		i += 1 + len(resolved[casou].name)
+		usados[casou] = true
+	}
+
 	mentionedJIDs := make([]string, 0, len(resolved))
-	for _, r := range resolved {
-		text = strings.ReplaceAll(text, "@"+r.name, "@"+r.phoneUser)
+	for i, r := range resolved {
+		if !usados[i] {
+			return text, nil, fmt.Sprintf(
+				"mention %q has no %q anchor in the message text — WhatsApp only highlights a mention the body writes, so nothing was sent",
+				r.name, "@"+r.name,
+			), http.StatusBadRequest
+		}
 		mentionedJIDs = append(mentionedJIDs, r.jid)
 	}
-	return text, mentionedJIDs
+	return b.String(), mentionedJIDs, "", 0
 }
 
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMessageID string, mentions []string) (bool, string, int, []MentionCandidateResponse) {
@@ -1220,7 +1295,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		if errMsg != "" {
 			return false, errMsg, statusCode, candidates
 		}
-		message, mentionedJIDs = applyMentions(message, resolvedMentions)
+		var anchorErr string
+		var anchorStatus int
+		message, mentionedJIDs, anchorErr, anchorStatus = applyMentions(message, resolvedMentions)
+		if anchorErr != "" {
+			return false, anchorErr, anchorStatus, nil
+		}
 	}
 	if len(mentionedJIDs) > 0 {
 		if contextInfo == nil {

@@ -30,6 +30,14 @@ BASELINE = REPO / "scripts" / "personal-data-baseline.txt"
 PATTERNS = [
     ("telefone", re.compile(r"\b55\d{10,11}\b")),
     ("jid", re.compile(r"\b\d{10,15}(?::\d+)?@s\.whatsapp\.net\b")),
+    # Group and LID JIDs were invisible here until the review of 2026-09-09
+    # found a real @g.us written into a tracked file under docs/ with this
+    # guard passing green over it. A group id is longer than the \d{10,15}
+    # above, so neither existing pattern could ever have matched it; a @lid is
+    # the addressing form WhatsApp hands out for group participants, and it
+    # identifies a person as well as the phone form does.
+    ("jid-grupo", re.compile(r"\b\d{12,25}@g\.us\b")),
+    ("jid-lid", re.compile(r"\b\d{8,25}(?::\d+)?@lid\b")),
 ]
 
 # Binary-ish and vendored paths carry no hand-written evidence.

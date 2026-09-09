@@ -231,11 +231,14 @@ def send_message(
                  that matches nobody in the chat is refused (nothing is sent). A name that
                  matches more than one participant is also refused, but the response carries
                  a `candidates` list of {ref, name, ...} — no number or JID — describing each
-                 match; resend with `mentions: ["ref:<that token>"]` to pick one.
+                 match; resend with `mentions: ["ref:<that token>"]` to pick one. A name whose
+                 "@Name" is absent from `message` is refused too: WhatsApp only highlights a
+                 mention the body actually writes.
 
     Returns:
-        A dictionary containing success status and a status message (and, on an ambiguous
-        mention refusal, a "candidates" list per the mentions doc above)
+        A dictionary with "success" and "message". On an ambiguous mention the refusal text
+        in "message" is the bridge's HTTP body, and the `candidates` list described above is
+        inside it — read the refs from there. There is no separate top-level key.
     """
     # Validate input
     if not recipient:
@@ -436,7 +439,7 @@ def get_group_info(jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Get a WhatsApp group's name, topic, participant list and admin-only flags.
 
     Args:
-        jid: The group JID (e.g. 120363012345678901@g.us)
+        jid: The group JID (e.g. 120363xxxxxxxxxxxx@g.us)
         account: Optional account alias to use (defaults to primary account)
 
     Returns:

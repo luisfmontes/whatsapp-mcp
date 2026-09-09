@@ -321,3 +321,41 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   Trazia o literal `128377`, medido antes da execução. A ponte está no ar e
   recebe mensagem o tempo todo: na hora da execução eram 128.400. Número fixo
   de tabela viva transforma medição correta em falso reprovado.
+
+- **2026-09-09 (rodada 2) — os artefatos do próprio fluxo passam a ser
+  reivindicados.** `docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md`
+  (este arquivo) e `docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md`
+  estavam no diff sem `arquivos:` de tarefa nenhuma — creep pela letra da regra,
+  ainda que sejam papelada do fluxo e não escopo de produto. Ficam sob a
+  tarefa 11, que já é a tarefa de registro. A régua tem que ser a mesma que
+  cobrou os dois arquivos de teste acima.
+
+- **2026-09-09 (rodada 2) — tarefa 7 ganha `whatsapp-mcp-server/test_scrub_mentions.py`.**
+  A revisão achou o vazamento um campo ao lado do que a rodada 1 fechou:
+  `quoted_content` é o corpo da mensagem citada, e um corpo que menciona alguém
+  carrega `@<número>` por protocolo — citar quem mencionou um terceiro punha o
+  número do terceiro na leitura. O arquivo cobre isso e a limpeza equivalente
+  no corpo de linhas antigas, sem a coluna `mentions`.
+
+- **2026-09-09 (rodada 2) — nasce a tarefa 12, que o plano não tinha.**
+  `arquivos:` `scripts/check-personal-data.py`,
+  `docs/rainforest/estado/2026-09-08-responder-citando-e-mencionar.json`,
+  `whatsapp-bridge/main_test.go`, `whatsapp-mcp-server/main.py`,
+  `_reversa_forward/003-whatsmeow-gaps-7-8-9/interfaces/group-participants.md` —
+  `atende:` D3.
+  A tarefa 2 mandava o JID do grupo de teste ficar "no estado do fluxo, nunca em
+  arquivo versionado", e neste repositório o estado do fluxo **é** versionado: o
+  JID real do grupo entrou em `docs/` e ficou lá. Pior que o descuido é o
+  motivo de ninguém ter visto: `scripts/check-personal-data.py` só conhecia
+  `55<telefone>` e `@s.whatsapp.net`, então saiu verde por cima do arquivo que
+  continha um JID real. A tarefa remove o JID e ensina a trava a enxergar
+  `@g.us` e `@lid`. Os tres `@g.us` que ja existiam no repositorio (dois em
+  docstring, um em doc de interface) sao sinteticos — conferido em leitura que
+  nenhum deles casa com linha de `chats` em nenhum dos dois stores locais — e
+  saem trocados por forma sem digitos, em vez de entrarem no baseline: JID de
+  grupo literal no baseline dispara o proprio gate de publicacao, e ele tem
+  razao. Baseline e para o que precisa ficar; isto nao precisava.
+  `pronto quando:` com um JID de grupo em arquivo versionado fora do baseline,
+  `python scripts/check-personal-data.py` sai 1 e nomeia o arquivo — provado por
+  `conferir-mutacao.cjs` sobre `scripts/check-personal-data.py`, inserindo um
+  literal `@g.us` fora do baseline e exigindo a bateria vermelha.

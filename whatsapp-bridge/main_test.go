@@ -1055,7 +1055,7 @@ func TestHandleCreatePoll(t *testing.T) {
 	handler := handleCreatePoll(nil, nil)
 	valid := func() CreatePollRequest {
 		return CreatePollRequest{
-			ChatJID:         "120363000000000000@g.us",
+			ChatJID:         "grupo-teste@g.us",
 			Question:        "smoke?",
 			Options:         []string{"alpha", "beta"},
 			SelectableCount: 1,
@@ -1151,7 +1151,7 @@ func TestHandleVotePoll(t *testing.T) {
 		req  VotePollRequest
 	}{
 		{"missing chat_jid", VotePollRequest{PollID: "MSG1", Options: []string{"alpha"}}},
-		{"missing poll_id", VotePollRequest{ChatJID: "120363000000000000@g.us", Options: []string{"alpha"}}},
+		{"missing poll_id", VotePollRequest{ChatJID: "grupo-teste@g.us", Options: []string{"alpha"}}},
 	} {
 		t.Run(tc.name+" returns 400", func(t *testing.T) {
 			body, _ := json.Marshal(tc.req)
@@ -1169,7 +1169,7 @@ func TestHandleVotePoll(t *testing.T) {
 func TestPollResultsTally(t *testing.T) {
 	store := setupPollStore(t)
 
-	const pollID, chatJID = "POLL1", "120363000000000000@g.us"
+	const pollID, chatJID = "POLL1", "grupo-teste@g.us"
 	// polls has a foreign key to chats(jid), enforced on this connection —
 	// same reason handleCreatePoll calls EnsureChat before StorePoll.
 	if err := store.EnsureChat(chatJID, time.Now()); err != nil {
@@ -1249,7 +1249,7 @@ func TestHandlePollResults(t *testing.T) {
 	})
 
 	t.Run("missing poll_id returns 400", func(t *testing.T) {
-		body, _ := json.Marshal(PollResultsRequest{ChatJID: "120363000000000000@g.us"})
+		body, _ := json.Marshal(PollResultsRequest{ChatJID: "grupo-teste@g.us"})
 		rec := doHandlerRequest(t, handler, http.MethodPost, body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -2621,7 +2621,10 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		if len(resolved) != 1 {
 			t.Fatalf("len(resolved) = %d, want 1", len(resolved))
 		}
-		text, mentionedJIDs := applyMentions("oi @Ana tudo bem?", resolved)
+		text, mentionedJIDs, ancoraErr, _ := applyMentions("oi @Ana tudo bem?", resolved)
+		if ancoraErr != "" {
+			t.Fatalf("unexpected anchor refusal: %v", ancoraErr)
+		}
 		if !strings.Contains(text, "@participante-c") {
 			t.Fatalf("text = %q, want it to contain the substituted @participante-c", text)
 		}
@@ -2657,7 +2660,10 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		// "@contato-fake.exemplo" is never listed in mentions — D5 says the
 		// ponte never scans the text for it, only for the names it was asked
 		// to substitute.
-		text, _ := applyMentions("fala com @contato-fake.exemplo e com @Ana", resolved)
+		text, _, ancoraErr, _ := applyMentions("fala com @contato-fake.exemplo e com @Ana", resolved)
+		if ancoraErr != "" {
+			t.Fatalf("unexpected anchor refusal: %v", ancoraErr)
+		}
 		if !strings.Contains(text, "@contato-fake.exemplo") {
 			t.Fatalf("text = %q, want the unlisted @contato-fake.exemplo left intact", text)
 		}
@@ -2666,7 +2672,10 @@ func TestResolveMentionAmbigua(t *testing.T) {
 	t.Run("ref_expirado_recusa", func(t *testing.T) {
 		mentionRefs.Lock()
 		mentionRefs.byRef["expirado1"] = mentionRefEntry{
-			jid: "participante-a@s.whatsapp.net", name: "Rodrigo", expiresAt: time.Now().Add(-time.Minute),
+			// chatJID igual ao consultado de proposito: sem ele, a trava de chat
+			// recusaria sozinha e o teste ficaria verde mesmo com a checagem de
+			// TTL removida (achado da revisao de 2026-09-09).
+			jid: "participante-a@s.whatsapp.net", name: "Rodrigo", chatJID: chatDeTeste, expiresAt: time.Now().Add(-time.Minute),
 		}
 		mentionRefs.Unlock()
 
@@ -2949,8 +2958,20 @@ func TestRefDeOutroChatNaoResolve(t *testing.T) {
 // alguém consultava um ref já expirado, então ref gerado e nunca reenviado
 // ficava no mapa para sempre.
 func TestSweepDeRefsExpirados(t *testing.T) {
+	// Preserva e restaura em vez de zerar: o mapa e global, e zera-lo aqui
+	// apagava os refs cunhados por TestRefDeOutroChatNaoResolve — verde so pela
+	// ordem do arquivo, flake com -shuffle=on (achado da revisao de 2026-09-09).
 	mentionRefs.Lock()
+	anterior := mentionRefs.byRef
 	mentionRefs.byRef = make(map[string]mentionRefEntry)
+	for k, v := range anterior {
+		mentionRefs.byRef[k] = v
+	}
+	t.Cleanup(func() {
+		mentionRefs.Lock()
+		defer mentionRefs.Unlock()
+		mentionRefs.byRef = anterior
+	})
 	mentionRefs.byRef["velho1"] = mentionRefEntry{jid: "contato-x@s.whatsapp.net", name: "X", chatJID: chatDeTeste, expiresAt: time.Now().Add(-time.Hour)}
 	mentionRefs.byRef["velho2"] = mentionRefEntry{jid: "contato-y@s.whatsapp.net", name: "Y", chatJID: chatDeTeste, expiresAt: time.Now().Add(-time.Minute)}
 	mentionRefs.Unlock()
@@ -2968,4 +2989,121 @@ func TestSweepDeRefsExpirados(t *testing.T) {
 	if _, existe := mentionRefs.byRef[novo]; !existe {
 		t.Error("o ref recem-criado sumiu no sweep")
 	}
+}
+
+// TestApplyMentionsPrefixo cobre o bloqueante 2 da revisao de 2026-09-09: o
+// laco de strings.ReplaceAll por nome, na ordem em que o chamador listou,
+// deixava o nome curto comer o prefixo do longo. Com "Ana" e "Ana Paula" no
+// mesmo texto, "@Ana Paula" virava "@<numero da Ana> Paula": a Ana grifada
+// onde o autor escreveu Ana Paula, e a Ana Paula com MentionedJID sem ancora
+// nenhuma no corpo. Mencionar a pessoa errada em grupo nao tem desfazer.
+func TestApplyMentionsPrefixo(t *testing.T) {
+	curta := resolvedMention{name: "Ana", phoneUser: "ana-user", jid: "ana@s.whatsapp.net"}
+	longa := resolvedMention{name: "Ana Paula", phoneUser: "anapaula-user", jid: "anapaula@s.whatsapp.net"}
+
+	t.Run("nome_curto_nao_come_o_prefixo_do_longo", func(t *testing.T) {
+		// Ordem do chamador de proposito: a curta PRIMEIRO, que e exatamente a
+		// ordem em que o defeito aparecia.
+		texto, jids, errMsg, _ := applyMentions(
+			"@Ana e @Ana Paula, vejam isso",
+			[]resolvedMention{curta, longa},
+		)
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		esperado := "@ana-user e @anapaula-user, vejam isso"
+		if texto != esperado {
+			t.Fatalf("texto = %q, want %q", texto, esperado)
+		}
+		if len(jids) != 2 {
+			t.Fatalf("jids = %v, want the two mentions", jids)
+		}
+	})
+
+	t.Run("numero_substituido_nao_e_relido_como_nome", func(t *testing.T) {
+		// Um nome que e prefixo do numero substituido de outro nao pode ser
+		// reencontrado na segunda passada: a varredura e uma so, da esquerda
+		// para a direita, e nunca rele o que ja escreveu.
+		texto, _, errMsg, _ := applyMentions(
+			"@Ana Paula bom dia",
+			[]resolvedMention{longa},
+		)
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		if strings.Contains(texto, "@ana-user") {
+			t.Fatalf("texto = %q, want no trace of the shorter substitution", texto)
+		}
+	})
+
+	t.Run("mencao_sem_ancora_no_texto_recusa", func(t *testing.T) {
+		texto, jids, errMsg, statusCode := applyMentions(
+			"bom dia, pessoal",
+			[]resolvedMention{curta},
+		)
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)
+		}
+		if jids != nil {
+			t.Fatalf("jids = %v, want nil — nothing may be sent", jids)
+		}
+		if texto == "" {
+			t.Fatalf("texto vazio; a recusa devolve o texto de entrada")
+		}
+	})
+}
+
+// TestFillSenderNamesPorLID cobre a observacao 4 da revisao de 2026-09-09:
+// linhas de `senders` sao gravadas com resolveToPN, que devolve o @lid
+// INALTERADO quando nao ha mapeamento PN. Medido no store real da conta
+// pessoal em 2026-09-09: 637 de 2518 linhas com chave @lid, 587 delas com
+// nome. Procurar so pela forma de telefone deixa essas pessoas invisiveis
+// para o casamento por nome — e, pior, faz a D6 contar menos candidatos do
+// que existem, mencionando a pessoa errada sem perguntar.
+func TestFillSenderNamesPorLID(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite3", filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE senders (
+		jid TEXT PRIMARY KEY, push_name TEXT, full_name TEXT, first_name TEXT, business_name TEXT
+	)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const lid = "participante-so-por-lid@lid"
+	if _, err := db.Exec(
+		"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+		lid, "", "Ana Paula Souza", "Ana Paula", "",
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	store := &MessageStore{db: db}
+
+	t.Run("sem_linha_PN_cai_no_lid", func(t *testing.T) {
+		p := mentionParticipant{jid: "participante-b@s.whatsapp.net", altJID: lid, phoneUser: "participante-b"}
+		store.fillSenderNames(&p)
+		if p.firstName != "Ana Paula" || p.fullName != "Ana Paula Souza" {
+			t.Fatalf("firstName=%q fullName=%q, want the names found under the @lid row", p.firstName, p.fullName)
+		}
+		if len(matchMentionName([]mentionParticipant{p}, "Ana Paula")) != 1 {
+			t.Fatalf("want the participant matchable by name once the @lid row is read")
+		}
+	})
+
+	t.Run("linha_PN_ganha_do_lid", func(t *testing.T) {
+		const pn = "participante-c@s.whatsapp.net"
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			pn, "", "Nome Pela Forma PN", "Nome", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		p := mentionParticipant{jid: pn, altJID: lid, phoneUser: "participante-c"}
+		store.fillSenderNames(&p)
+		if p.fullName != "Nome Pela Forma PN" {
+			t.Fatalf("fullName = %q, want the PN row to win", p.fullName)
+		}
+	})
 }

@@ -26,7 +26,6 @@
     "tarefas_ok": 11,
     "tarefas": 11,
     "em": "2026-09-09",
-    "grupo_de_teste": "REMOVIDO em 2026-09-09: o JID real do grupo de teste estava aqui, e este arquivo e versionado num repo publico. Reescrito do historico da branch.",
     "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN.",
     "mutacao_conferida": [
       {
@@ -73,8 +72,8 @@
       "corpo da mensagem passa a exibir @Nome no lugar de @numero na leitura"
     ],
     "pr": 19,
-    "comando": "go test -C whatsapp-bridge -count=1 ./... ; (cd whatsapp-mcp-server && python -m unittest test_display_name test_reply_mentions test_transcribe) ; python scripts/check-personal-data.py ; gh pr checks 19 --repo luisfmontes/whatsapp-mcp",
-    "saida": "ok whatsapp-client 1.961s (exit 0); Ran 41 tests OK; Personal-data guard: ok (24 known identifiers, all in the baseline); 8 de 8 checks pass (bridge ubuntu/macos/windows, mcp server ubuntu/macos/windows, gofmt, personal data), PR #19 state=OPEN mergeable=MERGEABLE, 0 falhas",
+    "comando": "go test -C whatsapp-bridge -count=1 ./... ; (cd whatsapp-mcp-server && python -m unittest test_public_dict test_display_name test_reply_mentions test_transcribe) ; gofmt -l whatsapp-bridge/ ; python scripts/check-personal-data.py",
+    "saida": "ok whatsapp-client 1.515s (exit 0); Ran 47 tests OK; gofmt sem saida; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -132,15 +131,22 @@
         "motivo": "registro externo (Issue 18); nao ha comportamento a inverter"
       }
     ],
+    "rodada": 2,
+    "achados_da_revisao_fechados": [
+      1,
+      2,
+      3
+    ],
     "reaberto_por": {
       "estagio": "revisar",
       "data": "2026-09-09"
-    }
+    },
+    "grupo_de_teste": "REMOVIDO em 2026-09-09: o JID real do grupo de teste estava aqui, e este arquivo e versionado num repo publico — o proprio plano proibia (\"nenhum JID entra em teste, doc, mensagem de erro ou resposta de API\"; tarefa 2: \"nunca em arquivo versionado\"). O grupo e o unico grupo entre as contas pessoal e trabalho do proprio usuario; quem precisar dele descobre por list_chats, nao por este arquivo."
   },
   "revisar": {
     "status": "reprovado",
     "snapshot": {
-      "head": "d240e8cb90e49f72d1798acfa6d752fed5417c67",
+      "head": "af34dd5a441b7be5aec225f6ceeec736e87fb85a",
       "caminhos_sujos": [
         "docs/rainforest/estado/2026-09-08-responder-citando-e-mencionar.json"
       ]
@@ -148,24 +154,34 @@
     "em_voo": [
       {
         "agente": "revisor",
-        "tarefa": "revisao independente do diff 22dbfc2...d240e8c (PR 19)",
+        "tarefa": "revisao independente da rodada 2, diff 22dbfc2...af34dd5 (PR 19)",
         "desde": "2026-09-09"
       }
     ],
     "em": "2026-09-09",
-    "achados": 6,
+    "achados": 11,
     "bloqueiam": 3,
     "lista": [
-      "get_message_context devolve quoted_sender e mentions crus, sem passar por nome - vaza numero pela tool que o proprio docstring recomenda para achar o id da citacao",
-      "o ref da desambiguacao nao e escopado por chat: um ref gerado no chat A menciona a pessoa no chat B, escrevendo o numero dela no texto enviado a B",
-      "mentionRefs cresce sem teto: a unica remocao acontece quando alguem consulta um ref ja expirado; ref gerado e nunca reenviado fica para sempre"
+      "quoted_content sai cru na leitura e por protocolo carrega @<numero> de terceiro - mesma classe do achado 1 da rodada 1, num campo vizinho",
+      "applyMentions substitui por substring sem ordenar por comprimento: com Ana e Ana Paula no mesmo texto, Ana e grifada no lugar de Ana Paula e Ana Paula recebe mencao sem ancora",
+      "JID de grupo real gravado em docs/rainforest/estado (arquivo versionado de repo publico), contra a linha escrita do proprio plano - e o check-personal-data nao ve @g.us nem @lid"
     ],
     "observacoes": [
-      "citar historico anterior ao deploy em 1:1 fica recusado para sempre, porque sender_jid e coluna nova",
-      "comentario em whatsapp.py descreve fallback para JID cru que o codigo nao faz mais",
-      "test_display_name.py nao consta em arquivos: de nenhuma tarefa do plano; AGENTS.md consta na tarefa 9 e nao foi tocado"
+      "docstring de send_message promete campo candidates que o dict de retorno nao tem",
+      "README descreve get_message_context imprimindo a linha de citacao; ele devolve dict desde af34dd5",
+      "README nao menciona o escopo por chat do ref",
+      "mencao por nome e cega para remetente conhecido so por LID: 637 de 2518 linhas de senders na conta pessoal tem chave @lid, e o detector de ambiguidade da D6 conta menos candidatos do que existem",
+      "_display_name nao barra nome que E um telefone formatado",
+      "TestResolveMentionAmbigua/ref_expirado_recusa passa por dois motivos: sem chatJID no fixture, a trava de chat recusa mesmo sem a de TTL",
+      "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
+      "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 1
+    "tentativas": 3,
+    "creep": 2,
+    "creep_lista": [
+      "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",
+      "docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md"
+    ]
   },
   "verificar": {
     "status": "pendente"

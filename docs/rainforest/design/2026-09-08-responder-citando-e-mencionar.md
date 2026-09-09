@@ -178,7 +178,15 @@ Nada a migrar de comportamento anterior; é capacidade nova nas duas pontas.
 - **Citar mensagem por busca de conteúdo** ("responde aquela do link") — a
   citação se faz por id, que `list_messages` já imprime.
 - **Backfill do JID do autor no histórico** — impossível para as 9.433 (o dado
-  nunca existiu) e desnecessário para o resto (o número está lá).
+  nunca existiu). Para o resto, **não é que seja desnecessário: é que não vai
+  ser feito agora.** A frase original dizia "desnecessário (o número está lá)",
+  e a revisão de 2026-09-09 mostrou que ela descreve mal o código: `sender_jid`
+  é coluna nova, o `ALTER TABLE` deixa NULL nas ~128 mil linhas antigas, e
+  `isUnknownAuthor` recusa sempre que ela é vazia — em grupo **e** em 1:1. Ou
+  seja, todo o histórico anterior ao deploy fica não-citável até a pessoa
+  mandar mensagem nova. Em 1:1 seria recuperável (`is_from_me` diz de quem é a
+  mensagem, e o outro lado é o próprio `chat_jid`); fica fora de escopo por
+  escolha, com o custo escrito, não por impossibilidade.
 
 ## Em aberto
 
