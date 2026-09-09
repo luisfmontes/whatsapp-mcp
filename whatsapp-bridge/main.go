@@ -3784,14 +3784,18 @@ func stripAccents(s string) string {
 // APIMessage is the wire shape for a message row (Message is already taken by
 // the whatsmeow event struct above).
 type APIMessage struct {
-	Timestamp time.Time `json:"timestamp"`
-	Sender    string    `json:"sender"`
-	ChatName  *string   `json:"chat_name"`
-	Content   string    `json:"content"`
-	IsFromMe  bool      `json:"is_from_me"`
-	ChatJID   string    `json:"chat_jid"`
-	ID        string    `json:"id"`
-	MediaType *string   `json:"media_type"`
+	Timestamp       time.Time `json:"timestamp"`
+	Sender          string    `json:"sender"`
+	ChatName        *string   `json:"chat_name"`
+	Content         string    `json:"content"`
+	IsFromMe        bool      `json:"is_from_me"`
+	ChatJID         string    `json:"chat_jid"`
+	ID              string    `json:"id"`
+	MediaType       *string   `json:"media_type"`
+	QuotedMessageID *string   `json:"quoted_message_id"`
+	QuotedSender    *string   `json:"quoted_sender"`
+	QuotedContent   *string   `json:"quoted_content"`
+	Mentions        []string  `json:"mentions,omitempty"`
 }
 
 // APIChat is the wire shape for a chat row.
@@ -3952,28 +3956,49 @@ func scanAPIChatRow(rows interface {
 }
 
 // scanAPIMessageRow scans one row shaped like: timestamp, sender, chat_name,
-// content, is_from_me, chat_jid, id, media_type.
+// content, is_from_me, chat_jid, id, media_type, quoted_message_id,
+// quoted_sender, quoted_content, mentions.
 func scanAPIMessageRow(rows interface {
 	Scan(dest ...interface{}) error
 }) (APIMessage, error) {
 	var timestamp time.Time
 	var sender, content, chatJID, id string
-	var chatName, mediaType sql.NullString
+	var chatName, mediaType, quotedMessageID, quotedSender, quotedContent, mentions sql.NullString
 	var isFromMe bool
-	err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType)
+	err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions)
 	if err != nil {
 		return APIMessage{}, err
 	}
 	return APIMessage{
-		Timestamp: timestamp,
-		Sender:    sender,
-		ChatName:  nullStringToPtr(chatName),
-		Content:   content,
-		IsFromMe:  isFromMe,
-		ChatJID:   chatJID,
-		ID:        id,
-		MediaType: nullStringToPtr(mediaType),
+		Timestamp:       timestamp,
+		Sender:          sender,
+		ChatName:        nullStringToPtr(chatName),
+		Content:         content,
+		IsFromMe:        isFromMe,
+		ChatJID:         chatJID,
+		ID:              id,
+		MediaType:       nullStringToPtr(mediaType),
+		QuotedMessageID: nullStringToPtr(quotedMessageID),
+		QuotedSender:    nullStringToPtr(quotedSender),
+		QuotedContent:   nullStringToPtr(quotedContent),
+		Mentions:        decodeMentionsColumn(mentions),
 	}, nil
+}
+
+// decodeMentionsColumn deserializes the mentions column (a JSON array of
+// strings, or NULL/empty for no mentions) into a []string. Invalid JSON in
+// the column is treated as no mentions rather than failing the query — a
+// malformed row shouldn't take down a whole listMessages/getMessageContext
+// call.
+func decodeMentionsColumn(col sql.NullString) []string {
+	if !col.Valid || col.String == "" {
+		return nil
+	}
+	var mentions []string
+	if err := json.Unmarshal([]byte(col.String), &mentions); err != nil {
+		return nil
+	}
+	return mentions
 }
 
 // ---- /api/chats ----
@@ -4131,7 +4156,7 @@ func listMessages(db *sql.DB, req MessagesRequest) (MessagesResponse, error) {
 	}
 
 	queryParts := []string{
-		`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages`,
+		`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions FROM messages`,
 		`JOIN chats ON messages.chat_jid = chats.jid`,
 	}
 	var whereClauses []string
@@ -4223,7 +4248,7 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 	}
 
 	row := db.QueryRow(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.id = ?
@@ -4231,9 +4256,9 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 
 	var timestamp time.Time
 	var sender, content, chatJID, id, targetChatJID string
-	var chatName, mediaType sql.NullString
+	var chatName, mediaType, quotedMessageID, quotedSender, quotedContent, mentions sql.NullString
 	var isFromMe bool
-	err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &targetChatJID, &mediaType)
+	err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &targetChatJID, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions)
 	if err == sql.ErrNoRows {
 		return MessageContextResponse{}, false, nil
 	}
@@ -4241,18 +4266,22 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 		return MessageContextResponse{}, false, err
 	}
 	target := APIMessage{
-		Timestamp: timestamp,
-		Sender:    sender,
-		ChatName:  nullStringToPtr(chatName),
-		Content:   content,
-		IsFromMe:  isFromMe,
-		ChatJID:   chatJID,
-		ID:        id,
-		MediaType: nullStringToPtr(mediaType),
+		Timestamp:       timestamp,
+		Sender:          sender,
+		ChatName:        nullStringToPtr(chatName),
+		Content:         content,
+		IsFromMe:        isFromMe,
+		ChatJID:         chatJID,
+		ID:              id,
+		MediaType:       nullStringToPtr(mediaType),
+		QuotedMessageID: nullStringToPtr(quotedMessageID),
+		QuotedSender:    nullStringToPtr(quotedSender),
+		QuotedContent:   nullStringToPtr(quotedContent),
+		Mentions:        decodeMentionsColumn(mentions),
 	}
 
 	beforeRows, err := db.Query(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.chat_jid = ? AND messages.timestamp < ?
@@ -4276,7 +4305,7 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 	}
 
 	afterRows, err := db.Query(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.chat_jid = ? AND messages.timestamp > ?
@@ -4469,7 +4498,7 @@ type LastInteractionResponse struct {
 func getLastInteraction(db *sql.DB, jid string) (LastInteractionResponse, error) {
 	row := db.QueryRow(`
 		SELECT
-			m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type
+			m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type, m.quoted_message_id, m.quoted_sender, m.quoted_content, m.mentions
 		FROM messages m
 		JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.sender = ? OR c.jid = ?

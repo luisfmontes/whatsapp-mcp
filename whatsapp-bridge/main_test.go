@@ -2684,3 +2684,192 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		}
 	})
 }
+
+// TestAPIMessageWireShape locks the JSON wire shape of the four fields task 7
+// added to APIMessage: quoted_message_id/quoted_sender/quoted_content have no
+// omitempty (present as null when absent), mentions has omitempty (absent
+// entirely when there are none).
+func TestAPIMessageWireShape(t *testing.T) {
+	t.Run("sem_citacao_e_sem_mencao", func(t *testing.T) {
+		msg := APIMessage{
+			Timestamp: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC),
+			Sender:    "remetente-teste",
+			Content:   "oi",
+			ChatJID:   "chat-teste@s.whatsapp.net",
+			ID:        "MSG-1",
+		}
+		body, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		for _, field := range []string{"quoted_message_id", "quoted_sender", "quoted_content"} {
+			v, ok := got[field]
+			if !ok {
+				t.Errorf("%s missing from wire shape, want present (null)", field)
+			} else if v != nil {
+				t.Errorf("%s = %v, want null", field, v)
+			}
+		}
+		if v, ok := got["mentions"]; ok {
+			t.Errorf("mentions present in wire shape = %v, want omitted (omitempty, no mentions)", v)
+		}
+	})
+
+	t.Run("com_citacao_e_mencao", func(t *testing.T) {
+		quotedID := "MSG-CITADA"
+		quotedSender := "autor-citado@s.whatsapp.net"
+		quotedContent := "texto citado"
+		msg := APIMessage{
+			Timestamp:       time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC),
+			Sender:          "remetente-teste",
+			Content:         "respondendo",
+			ChatJID:         "chat-teste@s.whatsapp.net",
+			ID:              "MSG-2",
+			QuotedMessageID: &quotedID,
+			QuotedSender:    &quotedSender,
+			QuotedContent:   &quotedContent,
+			Mentions:        []string{"contato-mencionado@s.whatsapp.net"},
+		}
+		body, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		var got APIMessage
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got.QuotedMessageID == nil || *got.QuotedMessageID != quotedID {
+			t.Errorf("QuotedMessageID = %v, want %q", got.QuotedMessageID, quotedID)
+		}
+		if got.QuotedSender == nil || *got.QuotedSender != quotedSender {
+			t.Errorf("QuotedSender = %v, want %q", got.QuotedSender, quotedSender)
+		}
+		if got.QuotedContent == nil || *got.QuotedContent != quotedContent {
+			t.Errorf("QuotedContent = %v, want %q", got.QuotedContent, quotedContent)
+		}
+		if len(got.Mentions) != 1 || got.Mentions[0] != "contato-mencionado@s.whatsapp.net" {
+			t.Errorf("Mentions = %v, want [contato-mencionado@s.whatsapp.net]", got.Mentions)
+		}
+	})
+}
+
+// TestQueriesFeedingScanAPIMessageRowIncludeQuotedAndMentions is task 7's
+// column-order proof. scanAPIMessageRow (and the manual scan of
+// getMessageContext's target row) expects quoted_message_id, quoted_sender,
+// quoted_content, mentions appended, in that exact order, at the end of the
+// SELECT list. A query that feeds it out of order does not fail to compile —
+// it silently scans the wrong Go field from the wrong SQL column at runtime.
+// This drives all five call sites (listMessages; getMessageContext's target,
+// before and after; getLastInteraction) against one real row written through
+// the production StoreMessage + StoreMessageContext write path, and checks
+// the quoted/mentions fields come back scanned correctly on each.
+func TestQueriesFeedingScanAPIMessageRowIncludeQuotedAndMentions(t *testing.T) {
+	store := setupPollStore(t)
+	chatJID := "grupo-leitura@g.us"
+	if err := store.StoreChat(chatJID, "Grupo de leitura", time.Now()); err != nil {
+		t.Fatalf("StoreChat: %v", err)
+	}
+
+	// UTC explicitly: getMessageContext's before/after queries re-bind the
+	// timestamp it just scanned back from the target row as a query
+	// parameter, and a value carrying a non-UTC offset round-trips through
+	// modernc's sqlite driver with a different text rendering than what was
+	// stored, which corrupts the plain-text ">"/"<" comparison SQLite does
+	// on a TIMESTAMP column. UTC avoids that pre-existing quirk; it is not
+	// part of task 7's scope to fix.
+	beforeTS := time.Now().UTC().Add(-time.Hour)
+	targetTS := time.Now().UTC()
+	afterTS := time.Now().UTC().Add(time.Hour)
+
+	if err := store.StoreMessage("MSG-BEFORE", chatJID, "quem-mandou", "mensagem antes", beforeTS, false, "", "", "", nil, nil, nil, 0); err != nil {
+		t.Fatalf("StoreMessage(before): %v", err)
+	}
+	if err := store.StoreMessage("MSG-TARGET", chatJID, "quem-respondeu", "respondendo", targetTS, false, "", "", "", nil, nil, nil, 0); err != nil {
+		t.Fatalf("StoreMessage(target): %v", err)
+	}
+	if err := store.StoreMessage("MSG-AFTER", chatJID, "quem-mandou", "mensagem depois", afterTS, false, "", "", "", nil, nil, nil, 0); err != nil {
+		t.Fatalf("StoreMessage(after): %v", err)
+	}
+
+	ci := &waProto.ContextInfo{
+		StanzaID:      proto.String("MSG-CITADA-LEITURA"),
+		Participant:   proto.String("autor-citado-leitura@s.whatsapp.net"),
+		QuotedMessage: &waProto.Message{Conversation: proto.String("texto citado leitura")},
+		MentionedJID:  []string{"contato-mencionado-leitura@s.whatsapp.net"},
+	}
+	for _, id := range []string{"MSG-BEFORE", "MSG-TARGET", "MSG-AFTER"} {
+		if err := store.StoreMessageContext(id, chatJID, ci); err != nil {
+			t.Fatalf("StoreMessageContext(%s): %v", id, err)
+		}
+	}
+
+	checkQuoted := func(t *testing.T, label string, msg APIMessage) {
+		t.Helper()
+		if msg.QuotedMessageID == nil || *msg.QuotedMessageID != "MSG-CITADA-LEITURA" {
+			t.Errorf("%s: QuotedMessageID = %v, want MSG-CITADA-LEITURA", label, msg.QuotedMessageID)
+		}
+		if msg.QuotedSender == nil || *msg.QuotedSender != "autor-citado-leitura@s.whatsapp.net" {
+			t.Errorf("%s: QuotedSender = %v, want autor-citado-leitura@s.whatsapp.net", label, msg.QuotedSender)
+		}
+		if msg.QuotedContent == nil || *msg.QuotedContent != "texto citado leitura" {
+			t.Errorf("%s: QuotedContent = %v, want %q", label, msg.QuotedContent, "texto citado leitura")
+		}
+		if len(msg.Mentions) != 1 || msg.Mentions[0] != "contato-mencionado-leitura@s.whatsapp.net" {
+			t.Errorf("%s: Mentions = %v, want [contato-mencionado-leitura@s.whatsapp.net]", label, msg.Mentions)
+		}
+	}
+
+	t.Run("listMessages", func(t *testing.T) {
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: &chatJID, Limit: 10})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		var found *APIMessage
+		for i := range resp.Messages {
+			if resp.Messages[i].ID == "MSG-TARGET" {
+				found = &resp.Messages[i]
+			}
+		}
+		if found == nil {
+			t.Fatal("MSG-TARGET not found in listMessages result")
+		}
+		checkQuoted(t, "listMessages", *found)
+	})
+
+	t.Run("getMessageContext", func(t *testing.T) {
+		resp, ok, err := getMessageContext(store.db, MessageContextRequest{MessageID: "MSG-TARGET", Before: 5, After: 5})
+		if err != nil {
+			t.Fatalf("getMessageContext: %v", err)
+		}
+		if !ok {
+			t.Fatal("getMessageContext: message not found")
+		}
+		checkQuoted(t, "getMessageContext.target", resp.Message)
+		if len(resp.Before) != 1 {
+			t.Fatalf("getMessageContext.Before = %d messages, want 1", len(resp.Before))
+		}
+		checkQuoted(t, "getMessageContext.before", resp.Before[0])
+		if len(resp.After) != 1 {
+			t.Fatalf("getMessageContext.After = %d messages, want 1", len(resp.After))
+		}
+		checkQuoted(t, "getMessageContext.after", resp.After[0])
+	})
+
+	t.Run("getLastInteraction", func(t *testing.T) {
+		resp, err := getLastInteraction(store.db, chatJID)
+		if err != nil {
+			t.Fatalf("getLastInteraction: %v", err)
+		}
+		if resp.Message == nil {
+			t.Fatal("getLastInteraction: nil message")
+		}
+		if resp.Message.ID != "MSG-AFTER" {
+			t.Fatalf("getLastInteraction returned %q, want MSG-AFTER (most recent)", resp.Message.ID)
+		}
+		checkQuoted(t, "getLastInteraction", *resp.Message)
+	})
+}

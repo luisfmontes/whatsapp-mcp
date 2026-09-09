@@ -1,7 +1,7 @@
 import logging
 import unicodedata
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
 from urllib.parse import urlparse, urlunparse
 import os
@@ -199,6 +199,10 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    quoted_message_id: Optional[str] = None
+    quoted_sender: Optional[str] = None
+    quoted_content: Optional[str] = None
+    mentions: List[str] = field(default_factory=list)
 
 @dataclass
 class Chat:
@@ -237,6 +241,10 @@ def _message_from_dict(d: dict) -> Message:
         chat_jid=d.get("chat_jid"),
         id=d.get("id"),
         media_type=d.get("media_type"),
+        quoted_message_id=d.get("quoted_message_id"),
+        quoted_sender=d.get("quoted_sender"),
+        quoted_content=d.get("quoted_content"),
+        mentions=d.get("mentions") or [],
     )
 
 
@@ -273,6 +281,17 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     _sender_name_cache[cache_key] = name
     return name
 
+def _truncate_preview(text: str, limit: int = 80) -> str:
+    """Truncate a quoted-message preview to `limit` chars, appending an
+    ellipsis when it was actually cut. Empty/None input yields "".
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
 def format_message(message: Message, show_chat_info: bool = True, account: Optional[str] = None) -> str:
     """Format a single message with consistent formatting."""
     output = ""
@@ -296,6 +315,33 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
         # pattern get_message_context already uses for a failed fetch.
         logger.warning("Error formatting message %s: %s", message.id, e)
         output += f"[Error formatting message: {e}]\n"
+
+    # D13: show what this message replies to and who it mentions, by NAME
+    # (D3) never by number/JID. A name-resolution failure must not sink the
+    # rest of the line — fall back to the raw JID (D6's contract for
+    # get_sender_name already does this for its own transport/5xx failures;
+    # this catches anything else, e.g. a mock raising in tests).
+    if message.quoted_message_id:
+        quoted_name = ""
+        if message.quoted_sender:
+            try:
+                quoted_name = get_sender_name(message.quoted_sender, account)
+            except Exception as e:
+                logger.warning("Error resolving quoted sender name for message %s: %s", message.id, e)
+                quoted_name = message.quoted_sender
+        preview = _truncate_preview(message.quoted_content)
+        output += f'    ↳ reply to {quoted_name} [{message.quoted_message_id}]: "{preview}"\n'
+
+    if message.mentions:
+        names = []
+        for jid in message.mentions:
+            try:
+                names.append(get_sender_name(jid, account))
+            except Exception as e:
+                logger.warning("Error resolving mention name for message %s: %s", message.id, e)
+                names.append(jid)
+        output += f"    @ mentions: {', '.join(names)}\n"
+
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True, account: Optional[str] = None) -> str:
@@ -580,7 +626,13 @@ def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] 
 
     return _chat_from_dict(chat_data)
 
-def send_message(recipient: str, message: str, account: Optional[str] = None) -> Tuple[bool, str]:
+def send_message(
+    recipient: str,
+    message: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
     _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
@@ -593,6 +645,10 @@ def send_message(recipient: str, message: str, account: Optional[str] = None) ->
             "recipient": recipient,
             "message": message,
         }
+        if quoted_message_id:
+            payload["quoted_message_id"] = quoted_message_id
+        if mentions:
+            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload, headers=_auth_headers())
 
@@ -610,7 +666,13 @@ def send_message(recipient: str, message: str, account: Optional[str] = None) ->
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+def send_file(
+    recipient: str,
+    media_path: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
     _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
@@ -629,6 +691,10 @@ def send_file(recipient: str, media_path: str, account: Optional[str] = None) ->
             "recipient": recipient,
             "media_path": media_path
         }
+        if quoted_message_id:
+            payload["quoted_message_id"] = quoted_message_id
+        if mentions:
+            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload, headers=_auth_headers())
 

@@ -196,7 +196,9 @@ def get_message_context(
 def send_message(
     recipient: str,
     message: str,
-    account: Optional[str] = None
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -205,9 +207,25 @@ def send_message(
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
         account: Optional account alias to use (defaults to primary account)
+        quoted_message_id: Optional id of the message to reply to (quote). Get it from a
+                 message returned by list_messages or get_message_context (the "id" field,
+                 shown next to "[reply to ...]" for messages that are themselves replies).
+                 Quoting a message from a different chat, or an id the store doesn't have,
+                 is refused (nothing is sent) — same for a message whose author isn't known
+                 (older history recorded before this was tracked).
+        mentions: Optional list of PEOPLE'S NAMES to mention — never a phone number or JID.
+                 Each name is matched against that chat's participants only. For a mention to
+                 show up highlighted in the sent message, `message` must contain "@Name" for
+                 that same name — the bridge substitutes it with the right "@<number>" and
+                 marks it as a mention; any other "@..." in the text is left untouched. A name
+                 that matches nobody in the chat is refused (nothing is sent). A name that
+                 matches more than one participant is also refused, but the response carries
+                 a `candidates` list of {ref, name, ...} — no number or JID — describing each
+                 match; resend with `mentions: ["ref:<that token>"]` to pick one.
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message (and, on an ambiguous
+        mention refusal, a "candidates" list per the mentions doc above)
     """
     # Validate input
     if not recipient:
@@ -217,14 +235,26 @@ def send_message(
         }
 
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message, account=account)
+    success, status_message = whatsapp_send_message(
+        recipient,
+        message,
+        account=account,
+        quoted_message_id=quoted_message_id,
+        mentions=mentions,
+    )
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Dict[str, Any]:
+def send_file(
+    recipient: str,
+    media_path: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
     Args:
@@ -232,13 +262,24 @@ def send_file(recipient: str, media_path: str, account: Optional[str] = None) ->
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the media file to send (image, video, document)
         account: Optional account alias to use (defaults to primary account)
+        quoted_message_id: Optional id of the message to reply to (quote) — same contract as
+                 send_message's quoted_message_id.
+        mentions: Optional list of people's names to mention — same contract as send_message's
+                 mentions (names only, never a number or JID; ambiguous name refused with
+                 candidates to resend by ref).
 
     Returns:
         A dictionary containing success status and a status message
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, account=account)
+    success, status_message = whatsapp_send_file(
+        recipient,
+        media_path,
+        account=account,
+        quoted_message_id=quoted_message_id,
+        mentions=mentions,
+    )
     return {
         "success": success,
         "message": status_message
