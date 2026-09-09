@@ -46,8 +46,12 @@ sessão (`cp whatsapp-bridge/store/messages.db "$SCRATCH/m.db"`, banco de 128.37
 linhas gravado antes desta mudança, portanto sem nenhuma das 5 colunas), abrir a
 store contra ela acrescenta as 5 colunas e não perde nenhuma linha — provado por
 `python -c "import sqlite3;c=sqlite3.connect(r'$SCRATCH/m.db');print(sorted(r[1] for r in c.execute('PRAGMA table_info(messages)')));print(c.execute('SELECT COUNT(*) FROM messages').fetchone()[0])"`
-devolvendo uma lista que contém `mentions`, `quoted_content`, `quoted_message_id`,
-`quoted_sender` e `sender_jid`, e a contagem `128377`. A cópia é apagada ao fim da
+rodado **antes e depois** da migração, devolvendo uma lista que passa a conter
+`mentions`, `quoted_content`, `quoted_message_id`, `quoted_sender` e `sender_jid`,
+e **a mesma contagem** nas duas leituras. A contagem é comparada consigo mesma, e
+nunca com um literal: a ponte está no ar e recebe mensagem o tempo todo, então
+qualquer número fixo escrito aqui já nasce defasado — foi o que aconteceu com o
+`128377` que esta linha trazia na primeira versão. A cópia é apagada ao fim da
 tarefa (`rm "$SCRATCH/m.db"`), e o store real não é aberto para escrita em momento
 nenhum.
 

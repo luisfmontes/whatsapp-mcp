@@ -21,8 +21,20 @@
     "em": "2026-09-08"
   },
   "executar": {
-    "status": "pendente",
-    "catraca_mutacao": "2026-09-08"
+    "status": "parcial",
+    "catraca_mutacao": "2026-09-08",
+    "tarefas_ok": 2,
+    "tarefas": 11,
+    "em_voo": [
+      {
+        "agente": "executor-t1",
+        "tarefa": "tarefa 1 - colunas novas e migracao idempotente",
+        "desde": "2026-09-08"
+      }
+    ],
+    "em": "2026-09-08",
+    "grupo_de_teste": "REMOVIDO em 2026-09-09: o JID real do grupo de teste estava aqui, e este arquivo e versionado num repo publico. Reescrito do historico da branch.",
+    "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN."
   },
   "revisar": {
     "status": "pendente"
