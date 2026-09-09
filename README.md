@@ -429,6 +429,36 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 
 ---
 
+## Quoting messages and mentioning people
+
+`send_message` and `send_file` support two new optional parameters for richer conversation threading.
+
+### Quoting a message
+
+Pass `quoted_message_id` (the `id` field from `list_messages` or `get_message_context`) to reply to a message. The message you quote must:
+- Exist in the same chat as the recipient (quoting from chat A while sending to chat B is refused)
+- Have a known author — messages from the local history before sender tracking was enabled (D9) will be refused with a 400 status code
+
+The API returns:
+- **HTTP 404** if the message ID doesn't exist in the store
+- **HTTP 400** if the message's author is unknown (`message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it`)
+- **HTTP 400** if you're trying to quote from a different chat
+
+`list_messages`, `get_message_context`, and `get_last_interaction` now show quoted messages with the format `↳ reply to <Author Name>: <first ~50 chars of quoted text>` — no phone numbers or JIDs.
+
+### Mentioning people by name
+
+Pass `mentions` — a list of **people's names** (never phone numbers or JIDs) — and include `@Name` in your message text for each person you want to highlight. The bridge resolves each name against the chat's participants:
+- **Exact match**: `@Name` is replaced with `@<number>` and marked as a mention
+- **No match**: request refused with HTTP 400, message not sent
+- **Multiple matches** (e.g., two "Alice" contacts in a group): request returns HTTP 400 with a `candidates` list carrying opaque `ref` tokens and the matched names — **no phone numbers or JIDs in the list**. Resend with `mentions: ["ref:<that-token>"]` to pick a specific match.
+
+The `ref` tokens expire after 10 minutes and can only be used once. If you need to retry after that window, mention by name again.
+
+`list_messages` and other read operations now show mentions by name when displaying messages — `mentions: ["Alice", "Bob"]` for messages you haven't sent yet will appear as `mentioned: [Alice, Bob]` once received and stored.
+
+---
+
 ## Troubleshooting
 
 - **QR code not displaying**: terminal QR not working? Check `/tmp/whatsapp-qr.png` (macOS opens it automatically).
