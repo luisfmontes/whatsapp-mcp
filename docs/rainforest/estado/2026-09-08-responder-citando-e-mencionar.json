@@ -23,18 +23,65 @@
   "executar": {
     "status": "parcial",
     "catraca_mutacao": "2026-09-08",
-    "tarefas_ok": 2,
+    "tarefas_ok": 10,
     "tarefas": 11,
     "em_voo": [
       {
-        "agente": "executor-t1",
-        "tarefa": "tarefa 1 - colunas novas e migracao idempotente",
+        "agente": "documentador-t9",
+        "tarefa": "tarefa 9 - README e AGENTS",
         "desde": "2026-09-08"
       }
     ],
-    "em": "2026-09-08",
+    "em": "2026-09-09",
     "grupo_de_teste": "REMOVIDO em 2026-09-09: o JID real do grupo de teste estava aqui, e este arquivo e versionado num repo publico. Reescrito do historico da branch.",
-    "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN."
+    "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN.",
+    "mutacao_conferida": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "TestEnsureMessagesSchema/banco_legado_ganha_as_cinco_colunas"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "vermelho",
+        "fixture": "TestExtractContextInfo/extended_text_com_citacao"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "vermelho",
+        "fixture": "TestSendQuotedRecusa/id_inexistente_nao_envia"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "vermelho",
+        "fixture": "TestResolveMentionAmbigua/dois_candidatos_recusa_e_devolve_refs"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "TestActionSenderJIDGrupo/terceiro_em_grupo_usa_participante"
+      },
+      {
+        "tarefa": 7,
+        "resultado": "vermelho",
+        "fixture": "test_reply_mentions.FormatMessageCitacaoTest.test_format_message_mostra_citacao_por_nome"
+      }
+    ],
+    "pendentes": [
+      "tarefa 10: PR"
+    ],
+    "nota_t9": "o README entregue descrevia formato de saida inexistente em 3 pontos e afirmava uso unico do ref, que e falso; corrigido pela integracao no commit 9c2673e",
+    "tarefa_8": "fechada: grupo e conversa particular, os dois validados contra as pontes reais, com prova lida no store da ponte receptora. O usuario conferiu o balao no grupo em 2026-09-09 e aprovou.",
+    "achados_t8": [
+      "a linha de leitura imprime o JID cru quando o nome nao resolve - o quoted_sender vem com sufixo de dispositivo (:8) e nao casa com a tabela senders. Numero aparece na saida, o que contraria a D3",
+      "mensagem enviada por mim nao grava o proprio contexto: no store de quem enviou, a resposta nao aparece como resposta"
+    ],
+    "correcoes_pos_t8": [
+      "citar em 1:1 era recusado sempre - heuristica de autor desconhecido agora so vale em @g.us",
+      "envio nao gravava o proprio contexto nem o proprio sender_jid",
+      "JID cru impresso na leitura quando o nome nao resolve - normaliza o sufixo de dispositivo e cai em marcador neutro",
+      "corpo da mensagem passa a exibir @Nome no lugar de @numero na leitura"
+    ]
   },
   "revisar": {
     "status": "pendente"
