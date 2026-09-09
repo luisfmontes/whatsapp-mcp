@@ -559,6 +559,65 @@ func (store *MessageStore) StoreMessageSenderJID(id, chatJID, senderJID string) 
 	return err
 }
 
+// StoreMessageContext persists the ContextInfo a received message carries
+// (D1, D13): the id/author/content it quotes, and who it mentions. Own write
+// path, same reasoning as StoreMessageSenderJID — StoreMessage's signature and
+// COALESCE(NULLIF(...)) semantics are not touched. ci == nil is a no-op: no
+// UPDATE is issued, so a plain message (Conversation, no ContextInfo) never
+// pays for this write. mentions is stored as NULL (not "[]" or "") when the
+// message mentions no one, per contract.
+func (store *MessageStore) StoreMessageContext(id, chatJID string, ci *waProto.ContextInfo) error {
+	if ci == nil {
+		return nil
+	}
+	quotedMessageID := ci.GetStanzaID()
+	quotedSender := ci.GetParticipant()
+	quotedContent := extractTextContent(ci.GetQuotedMessage())
+
+	var mentionsJSON interface{}
+	if mentioned := ci.GetMentionedJID(); len(mentioned) > 0 {
+		b, err := json.Marshal(mentioned)
+		if err != nil {
+			return err
+		}
+		mentionsJSON = string(b)
+	}
+
+	_, err := store.db.Exec(
+		"UPDATE messages SET quoted_message_id = ?, quoted_sender = ?, quoted_content = ?, mentions = ? WHERE id = ? AND chat_jid = ?",
+		nullIfEmpty(quotedMessageID), nullIfEmpty(quotedSender), nullIfEmpty(quotedContent), mentionsJSON, id, chatJID,
+	)
+	return err
+}
+
+// nullIfEmpty maps an empty string to a SQL NULL parameter, so an absent value
+// is stored as NULL instead of as an empty TEXT — used by StoreMessageContext.
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// GetMessageForQuote looks up a message to quote by (id, chat_jid), scoped to
+// the destination chat exactly as the sender will resolve it. Scoping by
+// chat_jid does double duty: an id that exists only in a different chat comes
+// back as sql.ErrNoRows too, same as an id that doesn't exist anywhere — both
+// are "not found for this chat", which is the refusal in effect either way
+// (D12, and the mismatched-chat refusal). senderJID/sender are returned as
+// stored (possibly empty), for the caller to apply the D9 unknown-author check.
+func (store *MessageStore) GetMessageForQuote(id, chatJID string) (senderJID, sender, content string, err error) {
+	var senderJIDNull, senderNull, contentNull sql.NullString
+	err = store.db.QueryRow(
+		"SELECT sender_jid, sender, content FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	).Scan(&senderJIDNull, &senderNull, &contentNull)
+	if err != nil {
+		return "", "", "", err
+	}
+	return senderJIDNull.String, senderNull.String, contentNull.String, nil
+}
+
 // Get messages from a chat
 func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, error) {
 	rows, err := store.db.Query(
@@ -632,6 +691,48 @@ func extractTextContent(msg *waProto.Message) string {
 	return ""
 }
 
+// extractContextInfo returns the first non-nil ContextInfo carried by msg,
+// checked in this order: ExtendedTextMessage, ImageMessage, VideoMessage,
+// AudioMessage, DocumentMessage, StickerMessage, ContactMessage,
+// LocationMessage, PollCreationMessage. Plain text arrives as Conversation,
+// which is a bare string and never has a ContextInfo — that absence is what
+// tells a reply apart from a regular message (D1, D13, D14). Nil-safe: every
+// generated Get* is itself nil-safe, so a nil msg or a message of a type not
+// in this list returns nil without a type check.
+func extractContextInfo(msg *waProto.Message) *waProto.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	if ci := msg.GetExtendedTextMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetImageMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetVideoMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetAudioMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetDocumentMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetStickerMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetContactMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetLocationMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	if ci := msg.GetPollCreationMessage().GetContextInfo(); ci != nil {
+		return ci
+	}
+	return nil
+}
+
 // WatchdogStatus represents the state of the automatic reconnection watchdog.
 type WatchdogStatus struct {
 	IntervalSeconds int    `json:"interval_seconds"`
@@ -667,17 +768,52 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
+	Recipient       string `json:"recipient"`
+	Message         string `json:"message"`
+	MediaPath       string `json:"media_path,omitempty"`
+	QuotedMessageID string `json:"quoted_message_id,omitempty"`
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
-	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+// buildQuoteContextInfo resolves quotedMessageID against the message store
+// and builds the ContextInfo to attach to an outbound message (D9, D10, D11,
+// D12). It runs before any media upload or SendMessage call, so a refusal
+// (non-empty errMsg, with the 4xx to answer with) leaves nothing sent.
+func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID string) (ctxInfo *waProto.ContextInfo, errMsg string, statusCode int) {
+	if messageStore == nil {
+		return nil, "quoted_message_id given but no message store is available", http.StatusInternalServerError
 	}
+	senderJID, sender, content, err := messageStore.GetMessageForQuote(quotedMessageID, chatJID)
+	if err == sql.ErrNoRows {
+		// D12 (id doesn't exist) and the mismatched-chat refusal share this
+		// path: GetMessageForQuote scopes the lookup by chat_jid, so a
+		// quoted_message_id that belongs to a different chat also misses here.
+		return nil, "quoted_message_id not found for the destination chat", http.StatusNotFound
+	}
+	if err != nil {
+		return nil, fmt.Sprintf("Error looking up quoted_message_id: %v", err), http.StatusInternalServerError
+	}
+	// D9: sender_jid never recorded, or the sender stored as the chat's own
+	// user part — the 9,433 messages (D8) where the group JID got written as
+	// the author. Neither identifies a real participant to quote as.
+	chatUser := chatJID
+	if idx := strings.Index(chatJID, "@"); idx >= 0 {
+		chatUser = chatJID[:idx]
+	}
+	if senderJID == "" || sender == chatUser {
+		return nil, "quoted message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it", http.StatusBadRequest
+	}
+	return &waProto.ContextInfo{
+		StanzaID:    proto.String(quotedMessageID),
+		Participant: proto.String(senderJID),
+		// D10: always fill QuotedMessage — the library doesn't document
+		// whether the recipient app needs it or StanzaID+Participant suffice,
+		// and filling it costs nothing.
+		QuotedMessage: &waProto.Message{Conversation: proto.String(content)},
+	}, "", 0
+}
 
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMessageID string) (bool, string, int) {
 	// Create JID for recipient
 	var recipientJID types.JID
 	var err error
@@ -689,7 +825,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), http.StatusInternalServerError
 		}
 	} else {
 		// Create JID from phone number
@@ -699,6 +835,21 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
+	// D9/D12: resolve the citation before touching the client at all, so the
+	// three refusals reject with nothing sent regardless of connection state.
+	var quoteContextInfo *waProto.ContextInfo
+	if quotedMessageID != "" {
+		ctxInfo, errMsg, statusCode := buildQuoteContextInfo(messageStore, quotedMessageID, recipientJID.String())
+		if errMsg != "" {
+			return false, errMsg, statusCode
+		}
+		quoteContextInfo = ctxInfo
+	}
+
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp", http.StatusInternalServerError
+	}
+
 	msg := &waProto.Message{}
 
 	// Check if we have media to send
@@ -706,7 +857,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
+			return false, fmt.Sprintf("Error reading media file: %v", err), http.StatusInternalServerError
 		}
 
 		// Determine media type and mime type based on file extension
@@ -759,12 +910,15 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err)
+			return false, fmt.Sprintf("Error uploading media: %v", err), http.StatusInternalServerError
 		}
 
 		fmt.Println("Media uploaded", resp)
 
-		// Create the appropriate message type based on media type
+		// Create the appropriate message type based on media type.
+		// ContextInfo (D11: citing a media message is allowed, with the
+		// stored caption as its preview) is nil when there's no citation, so
+		// this is always safe to set.
 		switch mediaType {
 		case whatsmeow.MediaImage:
 			msg.ImageMessage = &waProto.ImageMessage{
@@ -776,6 +930,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
+				ContextInfo:   quoteContextInfo,
 			}
 		case whatsmeow.MediaAudio:
 			// Handle ogg audio files
@@ -789,7 +944,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 					seconds = analyzedSeconds
 					waveform = analyzedWaveform
 				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
+					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), http.StatusInternalServerError
 				}
 			} else {
 				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
@@ -806,6 +961,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				Seconds:       proto.Uint32(seconds),
 				PTT:           proto.Bool(true),
 				Waveform:      waveform,
+				ContextInfo:   quoteContextInfo,
 			}
 		case whatsmeow.MediaVideo:
 			msg.VideoMessage = &waProto.VideoMessage{
@@ -817,6 +973,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
+				ContextInfo:   quoteContextInfo,
 			}
 		case whatsmeow.MediaDocument:
 			docFilename := filepath.Base(mediaPath)
@@ -831,7 +988,16 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
+				ContextInfo:   quoteContextInfo,
 			}
+		}
+	} else if quoteContextInfo != nil {
+		// D14: a ContextInfo cannot ride on Conversation (a bare string) — it
+		// only exists on ExtendedTextMessage and the media types. Without a
+		// citation, the line below (msg.Conversation) is untouched.
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+			Text:        proto.String(message),
+			ContextInfo: quoteContextInfo,
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -841,7 +1007,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+		return false, fmt.Sprintf("Error sending message: %v", err), http.StatusInternalServerError
 	}
 
 	// Persist outbounds (text and media) so own-sends appear in the local store.
@@ -863,7 +1029,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	return true, fmt.Sprintf("Message sent to %s", recipient), http.StatusOK
 }
 
 // Extract media info from a message
@@ -1209,6 +1375,15 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		// above, via its own path — StoreMessage's signature stays at 13 params.
 		if err := messageStore.StoreMessageSenderJID(msg.Info.ID, chatJID, senderJID); err != nil {
 			logger.Warnf("Failed to store message sender_jid: %v", err)
+		}
+
+		// D1/D13: persist what this message quotes and who it mentions, if
+		// any. extractContextInfo returns nil for plain text (Conversation has
+		// no ContextInfo), so a regular message never pays for the UPDATE.
+		if ci := extractContextInfo(msg.Message); ci != nil {
+			if err := messageStore.StoreMessageContext(msg.Info.ID, chatJID, ci); err != nil {
+				logger.Warnf("Failed to store message context: %v", err)
+			}
 		}
 
 		// Log message reception
@@ -4247,14 +4422,17 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
+		success, message, statusCode := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath, req.QuotedMessageID)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
 		// Set appropriate status code
 		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
+			if statusCode == 0 {
+				statusCode = http.StatusInternalServerError
+			}
+			w.WriteHeader(statusCode)
 		}
 
 		// Send response

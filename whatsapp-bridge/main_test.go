@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // safeMediaPath is the load-bearing guard for two invariants: it must reject
@@ -2283,6 +2285,238 @@ func TestStoreMessageSenderJID(t *testing.T) {
 		}
 		if !senderJID.Valid || senderJID.String != "autor-b@s.whatsapp.net" {
 			t.Errorf("sender_jid = %v, want the previously stored value preserved", senderJID)
+		}
+	})
+}
+
+// TestExtractContextInfo covers extractContextInfo (D1, D13): the first
+// non-nil ContextInfo among the message types that can carry one, and the
+// nil-safety that lets a nil msg or a plain Conversation (which has no
+// ContextInfo at all) pass through as "not a reply" instead of panicking.
+//
+// Identifiers below are deliberately not phone-shaped, same convention as
+// TestStoreMessageSenderJID above: the behavior under test doesn't need
+// realistic-looking data.
+func TestExtractContextInfo(t *testing.T) {
+	t.Run("extended_text_com_citacao", func(t *testing.T) {
+		msg := &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String("respondendo"),
+				ContextInfo: &waProto.ContextInfo{
+					StanzaID:    proto.String("MSG-CITADA"),
+					Participant: proto.String("autor-citado@s.whatsapp.net"),
+				},
+			},
+		}
+		ci := extractContextInfo(msg)
+		if ci == nil {
+			t.Fatal("extractContextInfo() = nil, want a ContextInfo")
+		}
+		if ci.GetStanzaID() != "MSG-CITADA" {
+			t.Errorf("StanzaID = %q, want %q", ci.GetStanzaID(), "MSG-CITADA")
+		}
+		if ci.GetParticipant() != "autor-citado@s.whatsapp.net" {
+			t.Errorf("Participant = %q, want %q", ci.GetParticipant(), "autor-citado@s.whatsapp.net")
+		}
+	})
+
+	t.Run("conversation_pura_sem_contexto", func(t *testing.T) {
+		msg := &waProto.Message{Conversation: proto.String("oi")}
+		if ci := extractContextInfo(msg); ci != nil {
+			t.Errorf("extractContextInfo() = %v, want nil (Conversation has no ContextInfo)", ci)
+		}
+	})
+
+	t.Run("midia_com_citacao", func(t *testing.T) {
+		msg := &waProto.Message{
+			ImageMessage: &waProto.ImageMessage{
+				Caption: proto.String("legenda"),
+				ContextInfo: &waProto.ContextInfo{
+					StanzaID:    proto.String("MSG-IMG-CITADA"),
+					Participant: proto.String("autor-img@s.whatsapp.net"),
+				},
+			},
+		}
+		ci := extractContextInfo(msg)
+		if ci == nil {
+			t.Fatal("extractContextInfo() = nil, want a ContextInfo for an image message carrying a citation")
+		}
+		if ci.GetStanzaID() != "MSG-IMG-CITADA" {
+			t.Errorf("StanzaID = %q, want %q", ci.GetStanzaID(), "MSG-IMG-CITADA")
+		}
+	})
+
+	t.Run("nil", func(t *testing.T) {
+		if ci := extractContextInfo(nil); ci != nil {
+			t.Errorf("extractContextInfo(nil) = %v, want nil", ci)
+		}
+	})
+}
+
+// TestStoreMessageContext covers what handleMessage persists from a received
+// ContextInfo (D1, D13): the quote fields and mentions land on the row when
+// there's something to record, mentions is SQL NULL (never "[]" or "") when
+// nobody's mentioned, and a nil ContextInfo issues no UPDATE at all.
+//
+// Identifiers below are deliberately not phone-shaped, same convention as
+// TestStoreMessageSenderJID above.
+func TestStoreMessageContext(t *testing.T) {
+	store := setupPollStore(t)
+	chatJID := "grupo-contexto@g.us"
+	if err := store.StoreChat(chatJID, "Grupo de teste", time.Now()); err != nil {
+		t.Fatalf("StoreChat: %v", err)
+	}
+
+	t.Run("grava_citacao_e_mencoes", func(t *testing.T) {
+		if err := store.StoreMessage("MSG-CTX-A", chatJID, "quem-respondeu", "respondendo", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		ci := &waProto.ContextInfo{
+			StanzaID:      proto.String("MSG-CITADA"),
+			Participant:   proto.String("autor-citado@s.whatsapp.net"),
+			QuotedMessage: &waProto.Message{Conversation: proto.String("texto citado")},
+			MentionedJID:  []string{"contato-mencionado@s.whatsapp.net"},
+		}
+		if err := store.StoreMessageContext("MSG-CTX-A", chatJID, ci); err != nil {
+			t.Fatalf("StoreMessageContext: %v", err)
+		}
+
+		var quotedID, quotedSender, quotedContent, mentions sql.NullString
+		if err := store.db.QueryRow(
+			"SELECT quoted_message_id, quoted_sender, quoted_content, mentions FROM messages WHERE id = ? AND chat_jid = ?",
+			"MSG-CTX-A", chatJID,
+		).Scan(&quotedID, &quotedSender, &quotedContent, &mentions); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if quotedID.String != "MSG-CITADA" {
+			t.Errorf("quoted_message_id = %v, want %q", quotedID, "MSG-CITADA")
+		}
+		if quotedSender.String != "autor-citado@s.whatsapp.net" {
+			t.Errorf("quoted_sender = %v, want %q", quotedSender, "autor-citado@s.whatsapp.net")
+		}
+		if quotedContent.String != "texto citado" {
+			t.Errorf("quoted_content = %v, want %q", quotedContent, "texto citado")
+		}
+		var got []string
+		if err := json.Unmarshal([]byte(mentions.String), &got); err != nil {
+			t.Fatalf("mentions is not valid JSON: %v (%v)", mentions, err)
+		}
+		if len(got) != 1 || got[0] != "contato-mencionado@s.whatsapp.net" {
+			t.Errorf("mentions = %v, want [%q]", got, "contato-mencionado@s.whatsapp.net")
+		}
+	})
+
+	t.Run("sem_mencao_grava_NULL_nao_array_vazio", func(t *testing.T) {
+		if err := store.StoreMessage("MSG-CTX-B", chatJID, "quem-respondeu", "respondendo sem arroba", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		ci := &waProto.ContextInfo{
+			StanzaID:    proto.String("MSG-CITADA-B"),
+			Participant: proto.String("autor-citado@s.whatsapp.net"),
+		}
+		if err := store.StoreMessageContext("MSG-CTX-B", chatJID, ci); err != nil {
+			t.Fatalf("StoreMessageContext: %v", err)
+		}
+
+		var mentions sql.NullString
+		if err := store.db.QueryRow("SELECT mentions FROM messages WHERE id = ? AND chat_jid = ?", "MSG-CTX-B", chatJID).Scan(&mentions); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if mentions.Valid {
+			t.Errorf("mentions = %q, want SQL NULL (not \"[]\" or \"\")", mentions.String)
+		}
+	})
+
+	t.Run("sem_contexto_nao_faz_UPDATE", func(t *testing.T) {
+		if err := store.StoreMessage("MSG-CTX-C", chatJID, "quem-mandou", "mensagem normal", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		if err := store.StoreMessageContext("MSG-CTX-C", chatJID, nil); err != nil {
+			t.Fatalf("StoreMessageContext(nil): %v", err)
+		}
+		var quotedID sql.NullString
+		if err := store.db.QueryRow("SELECT quoted_message_id FROM messages WHERE id = ? AND chat_jid = ?", "MSG-CTX-C", chatJID).Scan(&quotedID); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if quotedID.Valid {
+			t.Errorf("quoted_message_id = %q, want NULL (StoreMessageContext(nil) must not UPDATE)", quotedID.String)
+		}
+	})
+}
+
+// TestSendQuotedRecusa covers the three D9/D12 send-side refusals resolved in
+// buildQuoteContextInfo (called from sendWhatsAppMessage): none of them may
+// reach client.SendMessage. client is passed as nil throughout — the citation
+// is resolved, and on refusal returned, before the function ever touches the
+// client. A nil client not panicking is itself part of the proof nothing was
+// sent: if the citation check regressed to run after the client is touched,
+// IsConnected()/SendMessage() would need a real client, and this test would
+// have to be rewritten to supply one.
+//
+// Identifiers below are deliberately not phone-shaped, same convention as
+// TestStoreMessageSenderJID above.
+func TestSendQuotedRecusa(t *testing.T) {
+	t.Run("id_inexistente_nao_envia", func(t *testing.T) {
+		store := setupPollStore(t)
+
+		ok, msg, status := sendWhatsAppMessage(nil, store, "contato-teste@s.whatsapp.net", "oi", "", "MSG-NAO-EXISTE")
+		if ok {
+			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
+		}
+		if status < 400 || status >= 500 {
+			t.Fatalf("status = %d, want 4xx; msg=%q", status, msg)
+		}
+	})
+
+	t.Run("autor_desconhecido_recusa", func(t *testing.T) {
+		store := setupPollStore(t)
+		chatJID := "grupo-autor-desconhecido@g.us"
+		if err := store.StoreChat(chatJID, "Grupo de teste", time.Now()); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		// sender_jid is never written (StoreMessageSenderJID not called) — D9's
+		// "sender_jid nulo/vazio" case.
+		if err := store.StoreMessage("MSG-AUTOR-DESCONHECIDO", chatJID, "alguem", "conteudo", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+
+		ok, msg, status := sendWhatsAppMessage(nil, store, chatJID, "respondendo", "", "MSG-AUTOR-DESCONHECIDO")
+		if ok {
+			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
+		}
+		if status < 400 || status >= 500 {
+			t.Fatalf("status = %d, want 4xx; msg=%q", status, msg)
+		}
+		if !strings.Contains(msg, "unknown") {
+			t.Errorf("message = %q, want it to say the author is unknown", msg)
+		}
+	})
+
+	t.Run("chat_divergente_recusa", func(t *testing.T) {
+		store := setupPollStore(t)
+		chatA := "chat-a@g.us"
+		chatB := "chat-b@g.us"
+		if err := store.StoreChat(chatA, "Chat A", time.Now()); err != nil {
+			t.Fatalf("StoreChat chatA: %v", err)
+		}
+		if err := store.StoreChat(chatB, "Chat B", time.Now()); err != nil {
+			t.Fatalf("StoreChat chatB: %v", err)
+		}
+		if err := store.StoreMessage("MSG-EM-CHAT-A", chatA, "autor-a", "conteudo em A", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		if err := store.StoreMessageSenderJID("MSG-EM-CHAT-A", chatA, "autor-a@s.whatsapp.net"); err != nil {
+			t.Fatalf("StoreMessageSenderJID: %v", err)
+		}
+
+		// MSG-EM-CHAT-A lives in chatA; citing it while sending to chatB must
+		// be refused — GetMessageForQuote scopes the lookup by (id, chat_jid).
+		ok, msg, status := sendWhatsAppMessage(nil, store, chatB, "respondendo", "", "MSG-EM-CHAT-A")
+		if ok {
+			t.Fatalf("sendWhatsAppMessage() ok = true, want false; msg=%q", msg)
+		}
+		if status < 400 || status >= 500 {
+			t.Fatalf("status = %d, want 4xx; msg=%q", status, msg)
 		}
 	})
 }
