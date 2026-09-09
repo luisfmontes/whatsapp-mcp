@@ -2066,3 +2066,223 @@ func TestAccountHeadingAlwaysIdentifies(t *testing.T) {
 		t.Errorf("unnamed bridge heading should carry the port, got %q", h)
 	}
 }
+
+// setupLegacyMessagesStore creates a temp SQLite database (via the real,
+// platform-registered driver, same as openMessagesDB) with the messages table
+// in the shape it had before D8/D15 — the 13 columns from the CREATE TABLE
+// block, none of sender_jid/quoted_message_id/quoted_sender/quoted_content/
+// mentions. This is what the real store looked like before this change, and
+// what ensureMessagesSchema has to migrate.
+func setupLegacyMessagesStore(t *testing.T) *sql.DB {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// Cleanups run LIFO, so registering the chdir-back after t.TempDir makes it
+	// run before TempDir removal — Windows cannot delete a process's CWD.
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll("store", 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMessagesDB()
+	if err != nil {
+		t.Fatalf("openMessagesDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE messages (
+			id TEXT,
+			chat_jid TEXT,
+			sender TEXT,
+			content TEXT,
+			timestamp TIMESTAMP,
+			is_from_me BOOLEAN,
+			media_type TEXT,
+			filename TEXT,
+			url TEXT,
+			media_key BLOB,
+			file_sha256 BLOB,
+			file_enc_sha256 BLOB,
+			file_length INTEGER,
+			PRIMARY KEY (id, chat_jid)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to create legacy messages table: %v", err)
+	}
+	return db
+}
+
+// messagesColumnNames reads the current column names of the messages table
+// via PRAGMA table_info, the same source ensureMessagesSchema reads from.
+func messagesColumnNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(messages)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(messages): %v", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info row: %v", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table_info rows: %v", err)
+	}
+	return names
+}
+
+// TestEnsureMessagesSchema covers D15: CREATE TABLE IF NOT EXISTS does not
+// add a column to a messages table that already exists, and the real store
+// (128,377 rows) predates sender_jid/quoted_*/mentions. ensureMessagesSchema
+// is what migrates it, and has to do so without erroring when run again.
+func TestEnsureMessagesSchema(t *testing.T) {
+	newColumns := []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions"}
+
+	t.Run("banco_legado_ganha_as_cinco_colunas", func(t *testing.T) {
+		db := setupLegacyMessagesStore(t)
+
+		before := messagesColumnNames(t, db)
+		beforeSet := make(map[string]bool, len(before))
+		for _, name := range before {
+			beforeSet[name] = true
+		}
+		for _, want := range newColumns {
+			if beforeSet[want] {
+				t.Fatalf("legacy fixture unexpectedly already has column %q; got %v", want, before)
+			}
+		}
+
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema: %v", err)
+		}
+
+		after := messagesColumnNames(t, db)
+		afterSet := make(map[string]bool, len(after))
+		for _, name := range after {
+			afterSet[name] = true
+		}
+		for _, want := range newColumns {
+			if !afterSet[want] {
+				t.Errorf("column %q missing after ensureMessagesSchema; got %v", want, after)
+			}
+		}
+	})
+
+	t.Run("idempotente_segunda_chamada_nao_falha_nem_duplica", func(t *testing.T) {
+		db := setupLegacyMessagesStore(t)
+
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema (1st run): %v", err)
+		}
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema (2nd run): %v", err)
+		}
+
+		after := messagesColumnNames(t, db)
+		counts := make(map[string]int, len(after))
+		for _, name := range after {
+			counts[name]++
+		}
+		for _, col := range newColumns {
+			if counts[col] != 1 {
+				t.Errorf("column %q appears %d times after two runs, want exactly 1; got %v", col, counts[col], after)
+			}
+		}
+	})
+
+	t.Run("banco_novo_via_NewMessageStore_ja_tem_as_cinco_colunas", func(t *testing.T) {
+		// NewMessageStore calls ensureMessagesSchema right after its own
+		// CREATE TABLE IF NOT EXISTS, which already declares the 5 columns for
+		// a brand-new database — this proves that path is a true no-op, not
+		// silently failing to find anything to add.
+		store := setupPollStore(t)
+		got := messagesColumnNames(t, store.db)
+		gotSet := make(map[string]bool, len(got))
+		for _, name := range got {
+			gotSet[name] = true
+		}
+		for _, want := range newColumns {
+			if !gotSet[want] {
+				t.Errorf("new store missing column %q; got %v", want, got)
+			}
+		}
+	})
+}
+
+// TestStoreMessageSenderJID covers D8: the full sender JID handleMessage
+// already computes reaches the sender_jid column via its own write path
+// (StoreMessageSenderJID), without StoreMessage's signature or its
+// COALESCE(NULLIF(...)) content-preservation semantics changing.
+//
+// The identifiers below are deliberately not phone-shaped (no digit run long
+// enough to look like a real number) — the column is plain TEXT and the
+// behavior under test (does the value reach the row, is it preserved when the
+// next write has nothing new) does not need realistic-looking data. The
+// "@s.whatsapp.net" suffix is kept (it is what a real JID looks like), with a
+// non-numeric local part that cannot match a phone number.
+func TestStoreMessageSenderJID(t *testing.T) {
+	store := setupPollStore(t)
+	chatJID := "grupo-de-teste@g.us"
+	// messages.chat_jid has a FOREIGN KEY into chats(jid) — the row has to
+	// exist before StoreMessage can insert against it.
+	if err := store.StoreChat(chatJID, "Grupo de teste", time.Now()); err != nil {
+		t.Fatalf("StoreChat: %v", err)
+	}
+
+	t.Run("grava_o_jid_completo_sem_mexer_em_StoreMessage", func(t *testing.T) {
+		if err := store.StoreMessage("MSG-A", chatJID, "autor-a", "oi", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		if err := store.StoreMessageSenderJID("MSG-A", chatJID, "autor-a@s.whatsapp.net"); err != nil {
+			t.Fatalf("StoreMessageSenderJID: %v", err)
+		}
+
+		var senderJID sql.NullString
+		var content string
+		if err := store.db.QueryRow("SELECT sender_jid, content FROM messages WHERE id = ? AND chat_jid = ?", "MSG-A", chatJID).Scan(&senderJID, &content); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if !senderJID.Valid || senderJID.String != "autor-a@s.whatsapp.net" {
+			t.Errorf("sender_jid = %v, want %q", senderJID, "autor-a@s.whatsapp.net")
+		}
+		if content != "oi" {
+			t.Errorf("content = %q, want %q (StoreMessage's own write must be untouched)", content, "oi")
+		}
+	})
+
+	t.Run("jid_vazio_nao_apaga_valor_ja_gravado", func(t *testing.T) {
+		if err := store.StoreMessage("MSG-B", chatJID, "autor-b", "oi de novo", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		if err := store.StoreMessageSenderJID("MSG-B", chatJID, "autor-b@s.whatsapp.net"); err != nil {
+			t.Fatalf("StoreMessageSenderJID (initial): %v", err)
+		}
+		if err := store.StoreMessageSenderJID("MSG-B", chatJID, ""); err != nil {
+			t.Fatalf("StoreMessageSenderJID (empty): %v", err)
+		}
+
+		var senderJID sql.NullString
+		if err := store.db.QueryRow("SELECT sender_jid FROM messages WHERE id = ? AND chat_jid = ?", "MSG-B", chatJID).Scan(&senderJID); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if !senderJID.Valid || senderJID.String != "autor-b@s.whatsapp.net" {
+			t.Errorf("sender_jid = %v, want the previously stored value preserved", senderJID)
+		}
+	})
+}

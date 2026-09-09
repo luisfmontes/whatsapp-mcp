@@ -274,6 +274,11 @@ func NewMessageStore() (*MessageStore, error) {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			sender_jid TEXT,
+			quoted_message_id TEXT,
+			quoted_sender TEXT,
+			quoted_content TEXT,
+			mentions TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -335,7 +340,59 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	// D8/D15: CREATE TABLE IF NOT EXISTS above does not add a column to a
+	// messages table that already exists — and the store in use predates
+	// sender_jid/quoted_*/mentions (128k+ rows). Without this, the bridge
+	// starts against that database and breaks on the first query touching a
+	// column that was never added.
+	if err := ensureMessagesSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate messages schema: %v", err)
+	}
+
 	return &MessageStore{db: db}, nil
+}
+
+// ensureMessagesSchema adds to an existing messages table the columns
+// introduced after the CREATE TABLE block above (sender_jid, quoted_message_id,
+// quoted_sender, quoted_content, mentions), for databases that were created
+// before those columns existed. Idempotent: reads the table's current columns
+// via PRAGMA table_info and only emits ALTER TABLE ADD COLUMN for the ones
+// still missing, so running it again (or against a brand-new database that
+// already has them from CREATE TABLE) is a no-op.
+func ensureMessagesSchema(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(messages)")
+	if err != nil {
+		return fmt.Errorf("failed to read messages table info: %v", err)
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan messages table info: %v", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to read messages table info: %v", err)
+	}
+	rows.Close()
+
+	for _, col := range []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions"} {
+		if existing[col] {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE messages ADD COLUMN %s TEXT", col)); err != nil {
+			return fmt.Errorf("failed to add column %s to messages: %v", col, err)
+		}
+	}
+	return nil
 }
 
 // Close the database connection
@@ -481,6 +538,23 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			file_enc_sha256 = CASE WHEN length(excluded.file_enc_sha256) > 0 THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
 			file_length     = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+	)
+	return err
+}
+
+// StoreMessageSenderJID persists the full JID of the message author (D8) in
+// its own dedicated column, by a path separate from StoreMessage: that
+// function's signature and its COALESCE(NULLIF(...)) content-preservation
+// semantics (the guard against a re-sync blowing away a transcription) are
+// not touched. An empty senderJID is a no-op — nothing new to record, and the
+// row's existing sender_jid (if any) is left as it is.
+func (store *MessageStore) StoreMessageSenderJID(id, chatJID, senderJID string) error {
+	if senderJID == "" {
+		return nil
+	}
+	_, err := store.db.Exec(
+		"UPDATE messages SET sender_jid = ? WHERE id = ? AND chat_jid = ?",
+		senderJID, id, chatJID,
 	)
 	return err
 }
@@ -1131,6 +1205,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
+		// D8: persist the full sender JID that resolveToPN already computed
+		// above, via its own path — StoreMessage's signature stays at 13 params.
+		if err := messageStore.StoreMessageSenderJID(msg.Info.ID, chatJID, senderJID); err != nil {
+			logger.Warnf("Failed to store message sender_jid: %v", err)
+		}
+
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
