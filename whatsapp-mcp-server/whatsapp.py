@@ -360,6 +360,38 @@ def _truncate_preview(text: str, limit: int = 80) -> str:
     return text[:limit] + "…"
 
 
+def message_to_public_dict(message: Message, account: Optional[str] = None) -> Dict[str, Any]:
+    """Shape of a message for a tool that returns STRUCTURED data.
+
+    `format_message` is the prose surface and already resolves names; a tool
+    that hands back the object itself bypasses it entirely, and the citation
+    and mention fields would go out as raw JIDs — which for a phone JID is the
+    phone number, in a public repo, of a third party (D3/D13). Found by the
+    independent review of 2026-09-09: `get_message_context` returned the
+    dataclass directly, and it is the very tool the `send_message` docstring
+    points at to find a `quoted_message_id`.
+
+    `sender` and `chat_jid` stay as they are: they are addressing handles that
+    already existed and that callers use to reply. What this function fixes is
+    what THIS work introduced.
+    """
+    return {
+        "id": message.id,
+        "timestamp": message.timestamp.isoformat() if message.timestamp else None,
+        "sender": message.sender,
+        "sender_name": "Me" if message.is_from_me else _display_name(message.sender, account),
+        "chat_jid": message.chat_jid,
+        "chat_name": message.chat_name,
+        "content": _mentions_by_name(message.content, message.mentions, account),
+        "is_from_me": message.is_from_me,
+        "media_type": message.media_type,
+        "quoted_message_id": message.quoted_message_id,
+        "quoted_sender_name": _display_name(message.quoted_sender, account) if message.quoted_message_id else None,
+        "quoted_content": message.quoted_content,
+        "mentions": [_display_name(j, account) for j in (message.mentions or [])],
+    }
+
+
 def format_message(message: Message, show_chat_info: bool = True, account: Optional[str] = None) -> str:
     """Format a single message with consistent formatting."""
     output = ""
@@ -387,9 +419,8 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
 
     # D13: show what this message replies to and who it mentions, by NAME
     # (D3) never by number/JID. A name-resolution failure must not sink the
-    # rest of the line — fall back to the raw JID (D6's contract for
-    # get_sender_name already does this for its own transport/5xx failures;
-    # this catches anything else, e.g. a mock raising in tests).
+    # rest of the line, and it must not fall back to the identifier either:
+    # _display_name absorbs the failure and answers with a neutral marker.
     if message.quoted_message_id:
         quoted_name = _display_name(message.quoted_sender, account)
         preview = _truncate_preview(message.quoted_content)

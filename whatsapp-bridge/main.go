@@ -975,8 +975,14 @@ func matchMentionName(participants []mentionParticipant, name string) []mentionM
 // JID, the name that was being disambiguated (needed to redo the same
 // "@name" text substitution on resend), and when it expires.
 type mentionRefEntry struct {
-	jid       string
-	name      string
+	jid  string
+	name string
+	// chatJID pins the ref to the conversation whose ambiguity minted it.
+	// Without it a ref from chat A resolves in chat B, and the substitution
+	// writes the number of someone who was never in B into a message sent to
+	// B — D6 restricts a mention to the participants of the destination chat,
+	// and the ref path bypassed that check entirely.
+	chatJID   string
 	expiresAt time.Time
 }
 
@@ -996,9 +1002,19 @@ var mentionRefs = struct {
 // come out all-digits is rerolled — [0-9]{8,} is exactly what D6 forbids from
 // appearing in the response body, and an 8-digit id would trip that check by
 // accident roughly 1 in 40 times.
-func storeMentionRef(jid, name string) string {
+func storeMentionRef(jid, name, chatJID string) string {
 	mentionRefs.Lock()
 	defer mentionRefs.Unlock()
+	// Sweep on insert. The only other removal happens when someone looks up an
+	// already-expired ref — and a ref that is minted and never resent (the
+	// caller picked the other candidate, or gave up) is never looked up again,
+	// so without this the map grows for the life of the process.
+	agora := time.Now()
+	for id, entry := range mentionRefs.byRef {
+		if agora.After(entry.expiresAt) {
+			delete(mentionRefs.byRef, id)
+		}
+	}
 	var refID string
 	for {
 		refID = randomHexID(8)
@@ -1010,18 +1026,24 @@ func storeMentionRef(jid, name string) string {
 		}
 		break
 	}
-	mentionRefs.byRef[refID] = mentionRefEntry{jid: jid, name: name, expiresAt: time.Now().Add(mentionRefTTL)}
+	mentionRefs.byRef[refID] = mentionRefEntry{jid: jid, name: name, chatJID: chatJID, expiresAt: agora.Add(mentionRefTTL)}
 	return refID
 }
 
 // resolveMentionRef looks up a "ref:<id>" mention. An expired or unknown id
 // is dropped (if present) and reported as not found.
-func resolveMentionRef(refID string) (jid, name string, ok bool) {
+func resolveMentionRef(refID, chatJID string) (jid, name string, ok bool) {
 	mentionRefs.Lock()
 	defer mentionRefs.Unlock()
 	entry, exists := mentionRefs.byRef[refID]
 	if !exists || time.Now().After(entry.expiresAt) {
 		delete(mentionRefs.byRef, refID)
+		return "", "", false
+	}
+	// A ref only resolves in the conversation that minted it. Resolving it
+	// elsewhere would mention someone who is not in the destination chat, and
+	// write their number into the text sent there.
+	if entry.chatJID != chatJID {
 		return "", "", false
 	}
 	return entry.jid, entry.name, true
@@ -1041,6 +1063,32 @@ func randomHexID(n int) string {
 // isAllDigits is defined once, further down (used by both the check-phones
 // path and storeMentionRef's reroll-on-all-digits guard).
 
+// isChatParticipant says whether jid is in the destination chat's participant
+// list, comparing without the device suffix — a participant list and a stored
+// JID do not always carry the same addressing.
+func isChatParticipant(participants []mentionParticipant, jid string) bool {
+	alvo := semDispositivo(jid)
+	for _, p := range participants {
+		if semDispositivo(p.jid) == alvo {
+			return true
+		}
+	}
+	return false
+}
+
+// semDispositivo drops the ":<device>" part of an addressed JID.
+func semDispositivo(jid string) string {
+	at := strings.Index(jid, "@")
+	if at < 0 {
+		return jid
+	}
+	user := jid[:at]
+	if colon := strings.Index(user, ":"); colon >= 0 {
+		user = user[:colon]
+	}
+	return user + jid[at:]
+}
+
 // resolveMentions resolves mentions (D3-D7) against chatJID's participants:
 // each entry is either a bare name (matched against the chat's participants)
 // or "ref:<id>" from a previous ambiguous refusal. Returns either the
@@ -1054,20 +1102,27 @@ func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJ
 	if err != nil {
 		return nil, nil, fmt.Sprintf("could not resolve chat participants: %v", err), http.StatusInternalServerError
 	}
-	return resolveMentionsAgainstParticipants(participants, mentions)
+	return resolveMentionsAgainstParticipants(participants, mentions, chatJID.String())
 }
 
 // resolveMentionsAgainstParticipants is resolveMentions' matching core, split
 // out so it's testable (TestResolveMentionAmbigua) without a live whatsmeow
 // client — it only touches the participants list and the in-process ref map,
 // never the network.
-func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
+func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string, chatJID string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
 	resolved := make([]resolvedMention, 0, len(mentions))
 	for _, raw := range mentions {
 		if refID, isRef := strings.CutPrefix(raw, "ref:"); isRef {
-			jid, name, ok := resolveMentionRef(refID)
+			jid, name, ok := resolveMentionRef(refID, chatJID)
 			if !ok {
 				return nil, nil, fmt.Sprintf("mention ref %q expired or unknown — redo the mention by name", refID), http.StatusBadRequest
+			}
+			// Belt and braces: the ref is already pinned to this chat, but the
+			// participant list is the authority on who can be mentioned here
+			// (D6), and membership can change between the refusal and the
+			// resend.
+			if !isChatParticipant(participants, jid) {
+				return nil, nil, fmt.Sprintf("mention ref %q is not a participant of this chat — redo the mention by name", refID), http.StatusBadRequest
 			}
 			phoneUser := jid
 			if idx := strings.Index(jid, "@"); idx >= 0 {
@@ -1084,7 +1139,7 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 			candidates := make([]MentionCandidateResponse, 0, len(matches))
 			for _, m := range matches {
 				candidates = append(candidates, MentionCandidateResponse{
-					Ref: storeMentionRef(m.jid, raw), Nome: m.name, Origem: m.origem,
+					Ref: storeMentionRef(m.jid, raw, chatJID), Nome: m.name, Origem: m.origem,
 				})
 			}
 			return nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest

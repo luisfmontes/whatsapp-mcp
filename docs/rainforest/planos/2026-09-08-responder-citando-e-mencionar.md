@@ -194,7 +194,7 @@ mais confirmação visual no celular de que a reação está no balão certo.
 
 ### 7. Superfície de leitura: REST e servidor MCP [tipo: implementar]
 atende: D13
-arquivos: `whatsapp-bridge/main.go`, `whatsapp-bridge/main_test.go`, `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/main.py`, `whatsapp-mcp-server/test_reply_mentions.py`
+arquivos: `whatsapp-bridge/main.go`, `whatsapp-bridge/main_test.go`, `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/main.py`, `whatsapp-mcp-server/test_reply_mentions.py`, `whatsapp-mcp-server/test_display_name.py`, `whatsapp-mcp-server/test_public_dict.py`
 depende de: 3, 4, 5
 paralela: nao
 
@@ -297,3 +297,27 @@ pronto quando: a Issue está aberta no fork e o corpo não contém identificador
 provado por `gh issue view 18 --repo luisfmontes/whatsapp-mcp --json state --jq .state`
 devolvendo `OPEN`, e `gh issue view 18 --repo luisfmontes/whatsapp-mcp --json body --jq .body | grep -cE '[0-9]{10,}@|55[0-9]{9,}'`
 devolvendo `0`.
+
+## Emendas
+
+Registradas aqui porque escopo que cresce sem rastro é escopo que ninguém
+revisa. Cada uma nasceu de um defeito medido, não de conveniência.
+
+- **2026-09-09 — tarefa 7 ganha dois arquivos de teste.**
+  `whatsapp-mcp-server/test_display_name.py` e
+  `whatsapp-mcp-server/test_public_dict.py` não existiam quando o plano foi
+  escrito: o primeiro cobre o vazamento de JID na linha de leitura, achado ao
+  rodar contra as pontes reais; o segundo cobre o vazamento por
+  `get_message_context`, achado pela revisão independente. Sem a emenda os dois
+  seriam creep — arquivo no diff sem tarefa que o reivindique.
+
+- **2026-09-09 — tarefa 9 não toca `AGENTS.md`.** O plano listava os dois
+  arquivos; só o `README.md` mudou. O `AGENTS.md` descreve como se trabalha
+  neste repositório, e nada em como se trabalha mudou com esta entrega — o que
+  mudou foi a interface, que é assunto do README. A lacuna fica registrada em
+  vez de ficar por explicar.
+
+- **2026-09-09 — o critério da tarefa 1 compara a contagem consigo mesma.**
+  Trazia o literal `128377`, medido antes da execução. A ponte está no ar e
+  recebe mensagem o tempo todo: na hora da execução eram 128.400. Número fixo
+  de tabela viva transforma medição correta em falso reprovado.

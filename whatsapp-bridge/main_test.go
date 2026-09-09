@@ -2568,6 +2568,11 @@ var eightPlusDigits = regexp.MustCompile(`[0-9]{8,}`)
 // directly against a hand-built participants list — no live whatsmeow client
 // needed, per resolveMentionsAgainstParticipants' doc comment. Identifiers
 // are deliberately not phone-shaped, same convention as TestSendQuotedRecusa.
+// chatDeTeste é o chat de destino usado pelos testes de menção. Um ref (D6)
+// só resolve no chat que o gerou, então o valor precisa ser o mesmo na
+// geração e no reenvio.
+const chatDeTeste = "grupo-de-teste@g.us"
+
 func TestResolveMentionAmbigua(t *testing.T) {
 	t.Run("dois_candidatos_recusa_e_devolve_refs", func(t *testing.T) {
 		// Two participants sharing the same first name (D6's "dois 'Rodrigo'
@@ -2577,7 +2582,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 			{jid: "participante-a@s.whatsapp.net", phoneUser: "participante-a", firstName: "Rodrigo", fullName: "Rodrigo Alfa"},
 			{jid: "participante-b@s.whatsapp.net", phoneUser: "participante-b", firstName: "Rodrigo", fullName: "Rodrigo Beta"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"})
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
 		if resolved != nil {
 			t.Fatalf("resolved = %v, want nil (nothing should be ready to send)", resolved)
 		}
@@ -2606,7 +2611,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Ana"})
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
 		if errMsg != "" || statusCode != 0 {
 			t.Fatalf("errMsg=%q statusCode=%d, want no refusal", errMsg, statusCode)
 		}
@@ -2632,7 +2637,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"NomeQueNaoEstaNoChat"})
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"NomeQueNaoEstaNoChat"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2645,7 +2650,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, _, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"})
+		resolved, _, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
 		if errMsg != "" {
 			t.Fatalf("unexpected refusal: %v", errMsg)
 		}
@@ -2665,7 +2670,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		}
 		mentionRefs.Unlock()
 
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:expirado1"})
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:expirado1"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2675,7 +2680,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 	})
 
 	t.Run("ref_desconhecido_recusa", func(t *testing.T) {
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:nunca-existiu"})
+		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:nunca-existiu"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2900,5 +2905,67 @@ func TestIsUnknownAuthorPrivado(t *testing.T) {
 				t.Fatalf("isUnknownAuthor(%q, %q, %q) = %v, want %v", c.senderJID, c.sender, c.chatJID, got, c.want)
 			}
 		})
+	}
+}
+
+// TestRefDeOutroChatNaoResolve cobre o achado 2 da revisão de 2026-09-09: o
+// ramo "ref:" resolvia sem olhar o chat, então um ref gerado no chat A
+// mencionava a pessoa no chat B — escrevendo o número dela no texto enviado a
+// B, para gente que nunca esteve naquela conversa.
+func TestRefDeOutroChatNaoResolve(t *testing.T) {
+	participants := []mentionParticipant{
+		{jid: "contato-a@s.whatsapp.net", phoneUser: "contato-a", firstName: "Rodrigo", fullName: "Rodrigo Um"},
+		{jid: "contato-b@s.whatsapp.net", phoneUser: "contato-b", firstName: "Rodrigo", fullName: "Rodrigo Dois"},
+	}
+	_, candidates, _, status := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
+	if status != http.StatusBadRequest || len(candidates) != 2 {
+		t.Fatalf("esperava recusa ambigua com 2 candidatos, veio status=%d candidatos=%d", status, len(candidates))
+	}
+	ref := "ref:" + candidates[0].Ref
+
+	t.Run("no chat que gerou, resolve", func(t *testing.T) {
+		resolved, _, errMsg, status := resolveMentionsAgainstParticipants(participants, []string{ref}, chatDeTeste)
+		if errMsg != "" || status != 0 || len(resolved) != 1 {
+			t.Fatalf("esperava resolver no chat de origem, veio errMsg=%q status=%d resolved=%d", errMsg, status, len(resolved))
+		}
+	})
+
+	t.Run("em outro chat, recusa e nao resolve ninguem", func(t *testing.T) {
+		outroChat := "outro-grupo@g.us"
+		outrosParticipantes := []mentionParticipant{
+			{jid: "contato-c@s.whatsapp.net", phoneUser: "contato-c", firstName: "Carla", fullName: "Carla Tres"},
+		}
+		resolved, _, errMsg, status := resolveMentionsAgainstParticipants(outrosParticipantes, []string{ref}, outroChat)
+		if status != http.StatusBadRequest || errMsg == "" {
+			t.Fatalf("esperava 4xx recusando o ref de outro chat, veio status=%d errMsg=%q", status, errMsg)
+		}
+		if len(resolved) != 0 {
+			t.Fatalf("nenhuma mencao pode ser resolvida na recusa, veio %d", len(resolved))
+		}
+	})
+}
+
+// TestSweepDeRefsExpirados cobre o achado 3: a única remoção acontecia quando
+// alguém consultava um ref já expirado, então ref gerado e nunca reenviado
+// ficava no mapa para sempre.
+func TestSweepDeRefsExpirados(t *testing.T) {
+	mentionRefs.Lock()
+	mentionRefs.byRef = make(map[string]mentionRefEntry)
+	mentionRefs.byRef["velho1"] = mentionRefEntry{jid: "contato-x@s.whatsapp.net", name: "X", chatJID: chatDeTeste, expiresAt: time.Now().Add(-time.Hour)}
+	mentionRefs.byRef["velho2"] = mentionRefEntry{jid: "contato-y@s.whatsapp.net", name: "Y", chatJID: chatDeTeste, expiresAt: time.Now().Add(-time.Minute)}
+	mentionRefs.Unlock()
+
+	novo := storeMentionRef("contato-z@s.whatsapp.net", "Z", chatDeTeste)
+
+	mentionRefs.Lock()
+	defer mentionRefs.Unlock()
+	if _, existe := mentionRefs.byRef["velho1"]; existe {
+		t.Error("ref expirado velho1 continuou no mapa depois de um insert")
+	}
+	if _, existe := mentionRefs.byRef["velho2"]; existe {
+		t.Error("ref expirado velho2 continuou no mapa depois de um insert")
+	}
+	if _, existe := mentionRefs.byRef[novo]; !existe {
+		t.Error("o ref recem-criado sumiu no sweep")
 	}
 }

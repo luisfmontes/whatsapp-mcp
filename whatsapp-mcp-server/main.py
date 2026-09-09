@@ -9,6 +9,7 @@ from whatsapp import (
     get_contact_chats as whatsapp_get_contact_chats,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
+    message_to_public_dict as whatsapp_message_to_public_dict,
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
@@ -190,7 +191,16 @@ def get_message_context(
         account: Optional account alias to use (defaults to primary account)
     """
     context = whatsapp_get_message_context(message_id, before, after, account=account)
-    return context
+    # Not the dataclass: it carries quoted_sender and the mention JIDs raw, and
+    # this tool is exactly where a caller comes looking for a quoted_message_id
+    # (see send_message's docstring). Returning it whole put a third party's
+    # phone number in the tool's answer — the one thing the read surface must
+    # never do. Caught by the independent review of 2026-09-09.
+    return {
+        "message": whatsapp_message_to_public_dict(context.message, account),
+        "before": [whatsapp_message_to_public_dict(m, account) for m in context.before],
+        "after": [whatsapp_message_to_public_dict(m, account) for m in context.after],
+    }
 
 @mcp.tool()
 def send_message(
