@@ -266,7 +266,6 @@ def send_file(
     media_path: str,
     account: Optional[str] = None,
     quoted_message_id: Optional[str] = None,
-    mentions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
@@ -277,9 +276,11 @@ def send_file(
         account: Optional account alias to use (defaults to primary account)
         quoted_message_id: Optional id of the message to reply to (quote) — same contract as
                  send_message's quoted_message_id.
-        mentions: Optional list of people's names to mention — same contract as send_message's
-                 mentions (names only, never a number or JID; ambiguous name refused with
-                 candidates to resend by ref).
+
+    There is no `mentions` here: a mention only renders if the message BODY writes
+    "@<number>", and this route sends media without a caption, so there is nowhere to
+    anchor one. To mention someone alongside a file, send the text with `send_message`
+    first and the file after.
 
     Returns:
         A dictionary containing success status and a status message
@@ -291,7 +292,6 @@ def send_file(
         media_path,
         account=account,
         quoted_message_id=quoted_message_id,
-        mentions=mentions,
     )
     return {
         "success": success,

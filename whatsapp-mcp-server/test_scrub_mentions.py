@@ -18,6 +18,7 @@ from unittest import mock
 
 from whatsapp import (
     Message,
+    _chat_from_dict,
     UNNAMED_CONTACT,
     _display_name,
     _scrub_mention_numbers,
@@ -97,6 +98,26 @@ class CitacaoNaoVazaNumeroDeTerceiroTest(unittest.TestCase):
             saida = format_message(msg)
         self.assertNotIn(FALSO, d["content"])
         self.assertNotIn(FALSO, saida)
+
+
+class UltimaMensagemDoChatTest(unittest.TestCase):
+    """Bloqueante 3 da rodada 3: `list_chats` é a tool mais usada do servidor,
+    e `Chat.last_message` é o corpo cru de `messages.content`. Basta a última
+    mensagem do chat ser uma menção para o número do mencionado sair por ali.
+    """
+
+    def test_last_message_passa_pela_limpeza(self):
+        chat = _chat_from_dict({
+            "jid": "grupo-teste@g.us",
+            "name": "Grupo",
+            "last_message": "@" + FALSO + " bom dia",
+        })
+        self.assertNotIn(FALSO, chat.last_message)
+        self.assertIn(UNNAMED_CONTACT, chat.last_message)
+
+    def test_last_message_ausente_nao_quebra(self):
+        chat = _chat_from_dict({"jid": "grupo-teste@g.us", "name": "Grupo"})
+        self.assertIsNone(chat.last_message)
 
 
 class NomeQueEUmTelefoneTest(unittest.TestCase):

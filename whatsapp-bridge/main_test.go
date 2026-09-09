@@ -2582,7 +2582,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 			{jid: "participante-a@s.whatsapp.net", phoneUser: "participante-a", firstName: "Rodrigo", fullName: "Rodrigo Alfa"},
 			{jid: "participante-b@s.whatsapp.net", phoneUser: "participante-b", firstName: "Rodrigo", fullName: "Rodrigo Beta"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
+		resolved, _, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
 		if resolved != nil {
 			t.Fatalf("resolved = %v, want nil (nothing should be ready to send)", resolved)
 		}
@@ -2611,7 +2611,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
+		resolved, outrosNomes, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
 		if errMsg != "" || statusCode != 0 {
 			t.Fatalf("errMsg=%q statusCode=%d, want no refusal", errMsg, statusCode)
 		}
@@ -2621,7 +2621,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		if len(resolved) != 1 {
 			t.Fatalf("len(resolved) = %d, want 1", len(resolved))
 		}
-		text, mentionedJIDs, ancoraErr, _ := applyMentions("oi @Ana tudo bem?", resolved)
+		text, mentionedJIDs, ancoraErr, _ := applyMentions("oi @Ana tudo bem?", resolved, outrosNomes)
 		if ancoraErr != "" {
 			t.Fatalf("unexpected anchor refusal: %v", ancoraErr)
 		}
@@ -2640,7 +2640,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"NomeQueNaoEstaNoChat"}, chatDeTeste)
+		resolved, _, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participants, []string{"NomeQueNaoEstaNoChat"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2653,14 +2653,14 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		participants := []mentionParticipant{
 			{jid: "participante-c@s.whatsapp.net", phoneUser: "participante-c", pushName: "Ana"},
 		}
-		resolved, _, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
+		resolved, outrosNomes, _, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
 		if errMsg != "" {
 			t.Fatalf("unexpected refusal: %v", errMsg)
 		}
 		// "@contato-fake.exemplo" is never listed in mentions — D5 says the
 		// ponte never scans the text for it, only for the names it was asked
 		// to substitute.
-		text, _, ancoraErr, _ := applyMentions("fala com @contato-fake.exemplo e com @Ana", resolved)
+		text, _, ancoraErr, _ := applyMentions("fala com @contato-fake.exemplo e com @Ana", resolved, outrosNomes)
 		if ancoraErr != "" {
 			t.Fatalf("unexpected anchor refusal: %v", ancoraErr)
 		}
@@ -2679,7 +2679,13 @@ func TestResolveMentionAmbigua(t *testing.T) {
 		}
 		mentionRefs.Unlock()
 
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:expirado1"}, chatDeTeste)
+		// Participante presente de proposito: sem ele, isChatParticipant
+		// recusaria sozinho e o teste ficaria verde com a checagem de TTL
+		// removida (achado da revisao de 2026-09-09, rodada 3).
+		participantes := []mentionParticipant{
+			{jid: "participante-a@s.whatsapp.net", phoneUser: "participante-a", firstName: "Rodrigo"},
+		}
+		resolved, _, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(participantes, []string{"ref:expirado1"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2689,7 +2695,7 @@ func TestResolveMentionAmbigua(t *testing.T) {
 	})
 
 	t.Run("ref_desconhecido_recusa", func(t *testing.T) {
-		resolved, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:nunca-existiu"}, chatDeTeste)
+		resolved, _, candidates, errMsg, statusCode := resolveMentionsAgainstParticipants(nil, []string{"ref:nunca-existiu"}, chatDeTeste)
 		if resolved != nil || candidates != nil {
 			t.Fatalf("resolved=%v candidates=%v, want both nil", resolved, candidates)
 		}
@@ -2926,14 +2932,14 @@ func TestRefDeOutroChatNaoResolve(t *testing.T) {
 		{jid: "contato-a@s.whatsapp.net", phoneUser: "contato-a", firstName: "Rodrigo", fullName: "Rodrigo Um"},
 		{jid: "contato-b@s.whatsapp.net", phoneUser: "contato-b", firstName: "Rodrigo", fullName: "Rodrigo Dois"},
 	}
-	_, candidates, _, status := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
+	_, _, candidates, _, status := resolveMentionsAgainstParticipants(participants, []string{"Rodrigo"}, chatDeTeste)
 	if status != http.StatusBadRequest || len(candidates) != 2 {
 		t.Fatalf("esperava recusa ambigua com 2 candidatos, veio status=%d candidatos=%d", status, len(candidates))
 	}
 	ref := "ref:" + candidates[0].Ref
 
 	t.Run("no chat que gerou, resolve", func(t *testing.T) {
-		resolved, _, errMsg, status := resolveMentionsAgainstParticipants(participants, []string{ref}, chatDeTeste)
+		resolved, _, _, errMsg, status := resolveMentionsAgainstParticipants(participants, []string{ref}, chatDeTeste)
 		if errMsg != "" || status != 0 || len(resolved) != 1 {
 			t.Fatalf("esperava resolver no chat de origem, veio errMsg=%q status=%d resolved=%d", errMsg, status, len(resolved))
 		}
@@ -2941,10 +2947,15 @@ func TestRefDeOutroChatNaoResolve(t *testing.T) {
 
 	t.Run("em outro chat, recusa e nao resolve ninguem", func(t *testing.T) {
 		outroChat := "outro-grupo@g.us"
-		outrosParticipantes := []mentionParticipant{
+		// A pessoa do ref participa TAMBEM deste outro chat, de proposito: se
+		// ela nao participasse, isChatParticipant recusaria sozinho e este
+		// teste ficaria verde mesmo com a fixacao por chat removida — que e o
+		// unico mecanismo que ele existe para medir (achado da revisao de
+		// 2026-09-09, rodada 3).
+		outrosParticipantes := append([]mentionParticipant{
 			{jid: "contato-c@s.whatsapp.net", phoneUser: "contato-c", firstName: "Carla", fullName: "Carla Tres"},
-		}
-		resolved, _, errMsg, status := resolveMentionsAgainstParticipants(outrosParticipantes, []string{ref}, outroChat)
+		}, participants...)
+		resolved, _, _, errMsg, status := resolveMentionsAgainstParticipants(outrosParticipantes, []string{ref}, outroChat)
 		if status != http.StatusBadRequest || errMsg == "" {
 			t.Fatalf("esperava 4xx recusando o ref de outro chat, veio status=%d errMsg=%q", status, errMsg)
 		}
@@ -2991,6 +3002,43 @@ func TestSweepDeRefsExpirados(t *testing.T) {
 	}
 }
 
+// TestResolveDevolveNomesDoChat cobre a fiacao entre resolveMentions e
+// applyMentions: a varredura so consegue deixar "@Ana Paula" intacto se
+// receber os nomes de QUEM MAIS esta no chat, e quem os conhece e a resolucao.
+// Sem esta bateria, o defeito da rodada 3 volta apagando um `return` — o teste
+// de applyMentions passa a lista na mao e nao ve a fiacao sumir.
+func TestResolveDevolveNomesDoChat(t *testing.T) {
+	participants := []mentionParticipant{
+		{jid: "contato-ana@s.whatsapp.net", phoneUser: "contato-ana", pushName: "Ana"},
+		{jid: "contato-ap@s.whatsapp.net", phoneUser: "contato-ap", fullName: "Ana Paula"},
+	}
+	resolved, outrosNomes, candidates, errMsg, _ := resolveMentionsAgainstParticipants(participants, []string{"Ana"}, chatDeTeste)
+	if errMsg != "" || candidates != nil || len(resolved) != 1 {
+		t.Fatalf("errMsg=%q candidates=%v resolved=%d, want a single clean match", errMsg, candidates, len(resolved))
+	}
+	achou := false
+	for _, n := range outrosNomes {
+		if n == "Ana Paula" {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Fatalf("outrosNomes = %v, want it to carry the other participant's longer name", outrosNomes)
+	}
+
+	texto, jids, ancoraErr, _ := applyMentions("bom dia @Ana e @Ana Paula", resolved, outrosNomes)
+	if ancoraErr != "" {
+		t.Fatalf("unexpected refusal: %v", ancoraErr)
+	}
+	esperado := "bom dia @contato-ana e @Ana Paula"
+	if texto != esperado {
+		t.Fatalf("texto = %q, want %q", texto, esperado)
+	}
+	if len(jids) != 1 {
+		t.Fatalf("jids = %v, want only the requested mention", jids)
+	}
+}
+
 // TestApplyMentionsPrefixo cobre o bloqueante 2 da revisao de 2026-09-09: o
 // laco de strings.ReplaceAll por nome, na ordem em que o chamador listou,
 // deixava o nome curto comer o prefixo do longo. Com "Ana" e "Ana Paula" no
@@ -3007,6 +3055,7 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		texto, jids, errMsg, _ := applyMentions(
 			"@Ana e @Ana Paula, vejam isso",
 			[]resolvedMention{curta, longa},
+			nil,
 		)
 		if errMsg != "" {
 			t.Fatalf("unexpected refusal: %v", errMsg)
@@ -3027,6 +3076,7 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		texto, _, errMsg, _ := applyMentions(
 			"@Ana Paula bom dia",
 			[]resolvedMention{longa},
+			nil,
 		)
 		if errMsg != "" {
 			t.Fatalf("unexpected refusal: %v", errMsg)
@@ -3036,10 +3086,68 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		}
 	})
 
+	t.Run("nome_pedido_nao_come_o_nome_de_participante_nao_pedido", func(t *testing.T) {
+		// Achado da rodada 3: ordenar por comprimento so desempata entre os
+		// nomes PEDIDOS. Aqui so "Ana" foi pedida, e "Ana Paula" e o nome de
+		// outra participante — que matchMentionName nao devolve, porque nao
+		// casa "Ana" por campo nenhum. Sem a lista de nomes do chat, "@Ana
+		// Paula" virava "@<numero da Ana> Paula": a Ana grifada onde o autor
+		// escreveu Ana Paula, em grupo, sem a D6 poder segurar.
+		texto, jids, errMsg, _ := applyMentions(
+			"bom dia @Ana e @Ana Paula",
+			[]resolvedMention{curta},
+			[]string{"Ana Paula"},
+		)
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		esperado := "bom dia @ana-user e @Ana Paula"
+		if texto != esperado {
+			t.Fatalf("texto = %q, want %q", texto, esperado)
+		}
+		if len(jids) != 1 {
+			t.Fatalf("jids = %v, want only the requested mention", jids)
+		}
+	})
+
+	t.Run("nome_pedido_nao_come_palavra_maior", func(t *testing.T) {
+		// "@RodrigoPG" com mentions:["Rodrigo"] virava "@<numero>PG": texto
+		// corrompido e mencao sem ancora valida. A D5 promete que "@" nao
+		// pedido passa intacto — e passava so o que nao COMECAVA com um nome
+		// pedido.
+		rodrigo := resolvedMention{name: "Rodrigo", phoneUser: "rodrigo-user", jid: "rodrigo@s.whatsapp.net"}
+		texto, _, errMsg, statusCode := applyMentions(
+			"fala com @RodrigoPG",
+			[]resolvedMention{rodrigo},
+			nil,
+		)
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal — there is no valid anchor", errMsg, statusCode)
+		}
+		if strings.Contains(texto, "rodrigo-user") {
+			t.Fatalf("texto = %q, want @RodrigoPG left intact", texto)
+		}
+	})
+
+	t.Run("acentos_e_pontuacao_encerram_o_nome", func(t *testing.T) {
+		texto, _, errMsg, _ := applyMentions(
+			"@Ana, bom dia",
+			[]resolvedMention{curta},
+			nil,
+		)
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		if texto != "@ana-user, bom dia" {
+			t.Fatalf("texto = %q", texto)
+		}
+	})
+
 	t.Run("mencao_sem_ancora_no_texto_recusa", func(t *testing.T) {
 		texto, jids, errMsg, statusCode := applyMentions(
 			"bom dia, pessoal",
 			[]resolvedMention{curta},
+			nil,
 		)
 		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
 			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal", errMsg, statusCode)

@@ -431,7 +431,9 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 
 ## Quoting messages and mentioning people
 
-`send_message` and `send_file` support two new optional parameters for richer conversation threading.
+`send_message` supports two new optional parameters for richer conversation threading; `send_file` supports the first of them.
+
+`send_file` has no `mentions`: WhatsApp only highlights a mention when the message **body** writes `@<number>`, and this route sends media without a caption. To mention someone alongside a file, send the text with `send_message` first and the file after.
 
 ### Quoting a message
 

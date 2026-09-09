@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/mdp/qrterminal"
 	goqr "github.com/skip2/go-qrcode"
@@ -1114,13 +1115,13 @@ func semDispositivo(jid string) string {
 // or "ref:<id>" from a previous ambiguous refusal. Returns either the
 // resolved mentions ready to apply to the text, or a refusal — 4xx, nothing
 // sent — carrying candidates only for the ambiguous case (D6).
-func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
+func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []string, []MentionCandidateResponse, string, int) {
 	if len(mentions) == 0 {
-		return nil, nil, "", 0
+		return nil, nil, nil, "", 0
 	}
 	participants, err := chatParticipants(client, messageStore, chatJID)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("could not resolve chat participants: %v", err), http.StatusInternalServerError
+		return nil, nil, nil, fmt.Sprintf("could not resolve chat participants: %v", err), http.StatusInternalServerError
 	}
 	return resolveMentionsAgainstParticipants(participants, mentions, chatJID.String())
 }
@@ -1129,20 +1130,20 @@ func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJ
 // out so it's testable (TestResolveMentionAmbigua) without a live whatsmeow
 // client — it only touches the participants list and the in-process ref map,
 // never the network.
-func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string, chatJID string) ([]resolvedMention, []MentionCandidateResponse, string, int) {
+func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string, chatJID string) ([]resolvedMention, []string, []MentionCandidateResponse, string, int) {
 	resolved := make([]resolvedMention, 0, len(mentions))
 	for _, raw := range mentions {
 		if refID, isRef := strings.CutPrefix(raw, "ref:"); isRef {
 			jid, name, ok := resolveMentionRef(refID, chatJID)
 			if !ok {
-				return nil, nil, fmt.Sprintf("mention ref %q expired or unknown — redo the mention by name", refID), http.StatusBadRequest
+				return nil, nil, nil, fmt.Sprintf("mention ref %q expired or unknown — redo the mention by name", refID), http.StatusBadRequest
 			}
 			// Belt and braces: the ref is already pinned to this chat, but the
 			// participant list is the authority on who can be mentioned here
 			// (D6), and membership can change between the refusal and the
 			// resend.
 			if !isChatParticipant(participants, jid) {
-				return nil, nil, fmt.Sprintf("mention ref %q is not a participant of this chat — redo the mention by name", refID), http.StatusBadRequest
+				return nil, nil, nil, fmt.Sprintf("mention ref %q is not a participant of this chat — redo the mention by name", refID), http.StatusBadRequest
 			}
 			phoneUser := jid
 			if idx := strings.Index(jid, "@"); idx >= 0 {
@@ -1153,7 +1154,7 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 		}
 		matches := matchMentionName(participants, raw)
 		if len(matches) == 0 {
-			return nil, nil, fmt.Sprintf("no participant named %q found in this chat", raw), http.StatusBadRequest
+			return nil, nil, nil, fmt.Sprintf("no participant named %q found in this chat", raw), http.StatusBadRequest
 		}
 		if len(matches) > 1 {
 			candidates := make([]MentionCandidateResponse, 0, len(matches))
@@ -1162,7 +1163,7 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 					Ref: storeMentionRef(m.jid, raw, chatJID), Nome: m.name, Origem: m.origem,
 				})
 			}
-			return nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest
+			return nil, nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest
 		}
 		phoneUser := matches[0].jid
 		if idx := strings.Index(phoneUser, "@"); idx >= 0 {
@@ -1170,7 +1171,35 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 		}
 		resolved = append(resolved, resolvedMention{name: raw, phoneUser: phoneUser, jid: matches[0].jid})
 	}
-	return resolved, nil, "", 0
+	return resolved, nomesDeParticipantes(participants), nil, "", 0
+}
+
+// nomesDeParticipantes junta todo nome pelo qual alguem desta conversa pode ser
+// escrito depois de um "@". applyMentions usa a lista para NAO substituir um
+// nome pedido dentro do nome mais longo de outro participante.
+func nomesDeParticipantes(participants []mentionParticipant) []string {
+	nomes := make([]string, 0, len(participants)*4)
+	for _, p := range participants {
+		for _, n := range []string{p.fullName, p.pushName, p.businessName, p.firstName} {
+			if n != "" {
+				nomes = append(nomes, n)
+			}
+		}
+	}
+	return nomes
+}
+
+// fronteiraDeNome diz se o que vem DEPOIS de um "@nome" encerra o nome. Sem
+// isso, "@RodrigoPG" com `mentions: ["Rodrigo"]` virava "@<número>PG": texto
+// corrompido e menção sem âncora válida, contra a D5 ("@" não pedido passa
+// intacto — que passava a valer só para o que não COMEÇA com um nome pedido).
+// Letra ou dígito logo depois significa que o "@" era outra palavra.
+func fronteiraDeNome(resto string) bool {
+	if resto == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(resto)
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 }
 
 // applyMentions substitutes every "@name" occurrence for each resolved
@@ -1192,17 +1221,35 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 // sent: WhatsApp only highlights what the text actually writes, so a
 // MentionedJID without its anchor notifies someone with nothing on screen
 // explaining why.
-func applyMentions(text string, resolved []resolvedMention) (string, []string, string, int) {
+func applyMentions(text string, resolved []resolvedMention, outrosNomes []string) (string, []string, string, int) {
 	if len(resolved) == 0 {
 		return text, nil, "", 0
 	}
 
-	ordem := make([]int, len(resolved))
-	for i := range ordem {
-		ordem[i] = i
+	// Todos os nomes que podem aparecer depois de um "@" nesta conversa, não só
+	// os pedidos: o nome de participante que NÃO foi pedido entra como
+	// candidato justamente para vencer o pedido mais curto e ser deixado
+	// intacto. Sem ele, "@Ana Paula" num pedido de `mentions: ["Ana"]` virava
+	// "@<número da Ana> Paula" — a Ana grifada onde o autor escreveu Ana Paula,
+	// e a D6 não tem como segurar, porque "Ana Paula" nunca casou "Ana" e
+	// portanto não houve ambiguidade a perguntar.
+	type candidato struct {
+		nome string
+		idx  int // índice em resolved, ou -1 para nome que não foi pedido
 	}
-	sort.SliceStable(ordem, func(a, b int) bool {
-		return len(resolved[ordem[a]].name) > len(resolved[ordem[b]].name)
+	cands := make([]candidato, 0, len(resolved)+len(outrosNomes))
+	for i, r := range resolved {
+		if r.name != "" {
+			cands = append(cands, candidato{nome: r.name, idx: i})
+		}
+	}
+	for _, n := range outrosNomes {
+		if n != "" {
+			cands = append(cands, candidato{nome: n, idx: -1})
+		}
+	}
+	sort.SliceStable(cands, func(a, b int) bool {
+		return len(cands[a].nome) > len(cands[b].nome)
 	})
 
 	usados := make([]bool, len(resolved))
@@ -1213,24 +1260,30 @@ func applyMentions(text string, resolved []resolvedMention) (string, []string, s
 			i++
 			continue
 		}
-		casou := -1
-		for _, idx := range ordem {
-			if resolved[idx].name == "" {
+		casou := false
+		for _, c := range cands {
+			if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
 				continue
 			}
-			if strings.HasPrefix(text[i+1:], resolved[idx].name) {
-				casou = idx
-				break
+			casou = true
+			b.WriteString("@")
+			if c.idx >= 0 {
+				b.WriteString(resolved[c.idx].phoneUser)
+				usados[c.idx] = true
+			} else {
+				// Nome de participante que ninguém pediu: fica como está
+				// (D5 — "@" não listado passa intacto).
+				b.WriteString(c.nome)
 			}
+			i += 1 + len(c.nome)
+			break
 		}
-		if casou < 0 {
+		if !casou {
+			// Nada casou nesta posição: nem nome pedido, nem nome de
+			// participante. Copia o "@" e segue.
 			b.WriteByte(text[i])
 			i++
-			continue
 		}
-		b.WriteString("@" + resolved[casou].phoneUser)
-		i += 1 + len(resolved[casou].name)
-		usados[casou] = true
 	}
 
 	mentionedJIDs := make([]string, 0, len(resolved))
@@ -1291,13 +1344,13 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	// SendMessage call, so an ambiguous/unmatched mention leaves nothing sent.
 	var mentionedJIDs []string
 	if len(mentions) > 0 {
-		resolvedMentions, candidates, errMsg, statusCode := resolveMentions(client, messageStore, recipientJID, mentions)
+		resolvedMentions, outrosNomes, candidates, errMsg, statusCode := resolveMentions(client, messageStore, recipientJID, mentions)
 		if errMsg != "" {
 			return false, errMsg, statusCode, candidates
 		}
 		var anchorErr string
 		var anchorStatus int
-		message, mentionedJIDs, anchorErr, anchorStatus = applyMentions(message, resolvedMentions)
+		message, mentionedJIDs, anchorErr, anchorStatus = applyMentions(message, resolvedMentions, outrosNomes)
 		if anchorErr != "" {
 			return false, anchorErr, anchorStatus, nil
 		}

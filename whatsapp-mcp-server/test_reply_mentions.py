@@ -222,22 +222,37 @@ class SendPayloadTest(unittest.TestCase):
         self.assertNotIn("quoted_message_id", payload)
         self.assertNotIn("mentions", payload)
 
-    def test_send_file_payload_com_campos_novos(self):
-        with mock.patch("whatsapp.requests.post") as mock_post, \
-             mock.patch("whatsapp.os.path.isfile", return_value=True):
+    def test_send_file_payload_com_citacao(self):
+        with mock.patch("whatsapp.requests.post") as mock_post,              mock.patch("whatsapp.os.path.isfile", return_value=True):
             mock_post.return_value = self._fake_response({"success": True, "message": "ok"})
             ok, msg = whatsapp.send_file(
                 "destino-teste@s.whatsapp.net",
                 "arquivo.jpg",
                 account="conta-teste",
                 quoted_message_id="MSG-CITADA-TESTE",
-                mentions=["Fulano"],
             )
 
         self.assertTrue(ok)
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["quoted_message_id"], "MSG-CITADA-TESTE")
-        self.assertEqual(payload["mentions"], ["Fulano"])
+
+    def test_send_file_nao_aceita_mentions(self):
+        """Achado da rodada 3: o parametro existia, era documentado, e nao
+        podia dar certo em chamada nenhuma.
+
+        A rota de midia nao manda `message`, e a ponte usa `message` como
+        legenda e como texto onde a mencao e ancorada. Sem ancora o WhatsApp
+        nao grifa nada — e, desde a recusa por ancora ausente, a ponte devolve
+        400 para 100% das chamadas. Some da assinatura em vez de ficar
+        prometendo.
+        """
+        with self.assertRaises(TypeError):
+            whatsapp.send_file(
+                "destino-teste@s.whatsapp.net",
+                "arquivo.jpg",
+                account="conta-teste",
+                mentions=["Fulano"],
+            )
 
 
 if __name__ == "__main__":

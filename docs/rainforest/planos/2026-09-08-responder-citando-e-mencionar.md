@@ -359,3 +359,23 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `python scripts/check-personal-data.py` sai 1 e nomeia o arquivo — provado por
   `conferir-mutacao.cjs` sobre `scripts/check-personal-data.py`, inserindo um
   literal `@g.us` fora do baseline e exigindo a bateria vermelha.
+
+- **2026-09-09 (rodada 3) — `send_file` perde o `mentions` que a tarefa 7 lhe
+  deu.** O parâmetro existia, era documentado no docstring e no README, e não
+  podia dar certo em chamada nenhuma: a rota de mídia não manda `message`, e a
+  ponte usa `message` tanto como legenda quanto como texto onde a menção é
+  ancorada. Sem âncora o WhatsApp não grifa nada — e, depois da recusa por
+  âncora ausente introduzida na rodada 2, a ponte passou a devolver 400 para
+  100% das chamadas. Some da assinatura em vez de ficar prometendo. Quem quiser
+  mencionar junto de um arquivo manda o texto por `send_message` primeiro e o
+  arquivo depois, que é a ordem que a skill de mensagens já prescreve.
+  `quoted_message_id` fica: esse funciona, porque o `ContextInfo` não depende de
+  texto.
+
+- **2026-09-09 (rodada 3) — tarefa 7 ganha a limpeza de `Chat.last_message`.**
+  A alegação fechada na rodada 2 era "toda superfície de leitura passa pelo
+  scrub", e era falsa: `list_chats`, `get_chat`, `get_contact_chats` e
+  `get_direct_chat_by_contact` devolvem `last_message`, que é o corpo cru de
+  `messages.content`. Basta a última mensagem do chat ser uma menção para o
+  número do mencionado sair pela tool mais usada do servidor. Pré-existente ao
+  trabalho, mas dentro da D3 e dentro da alegação que se fez.

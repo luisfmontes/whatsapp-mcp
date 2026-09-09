@@ -254,7 +254,12 @@ def _chat_from_dict(d: dict) -> Chat:
         jid=d.get("jid"),
         name=d.get("name"),
         last_message_time=_parse_ts(d.get("last_message_time")),
-        last_message=d.get("last_message"),
+        # `last_message` é o corpo cru de `messages.content`, e um corpo que
+        # menciona alguém carrega "@<número>" por protocolo. `list_chats` é a
+        # tool mais usada do servidor: sem esta limpeza, basta a última
+        # mensagem do chat ser uma menção para o número do mencionado sair
+        # daqui. A D3 não distingue por qual tool o número escapa.
+        last_message=_scrub_mention_numbers(d.get("last_message")),
         last_sender=d.get("last_sender"),
         last_is_from_me=d.get("last_is_from_me"),
     )
@@ -796,8 +801,17 @@ def send_file(
     media_path: str,
     account: Optional[str] = None,
     quoted_message_id: Optional[str] = None,
-    mentions: Optional[List[str]] = None,
 ) -> Tuple[bool, str]:
+    """Envia midia. NAO aceita `mentions`, e a ausencia e deliberada.
+
+    O WhatsApp so grifa uma mencao se o CORPO da mensagem escrever
+    "@<numero>", e envio de midia por esta rota nao carrega legenda: a ponte
+    usa `message` como legenda, e aqui nao ha `message`. Um `mentions` aqui
+    notificaria a pessoa com nada na tela explicando — e, desde a rodada 2 da
+    revisao, seria recusado pela ponte em 100% das chamadas, por falta de
+    ancora. Achado da rodada 3: o parametro existia, era documentado, e nao
+    podia dar certo em chamada nenhuma.
+    """
     _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
@@ -818,8 +832,6 @@ def send_file(
         }
         if quoted_message_id:
             payload["quoted_message_id"] = quoted_message_id
-        if mentions:
-            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload, headers=_auth_headers())
 
