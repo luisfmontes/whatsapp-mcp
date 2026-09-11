@@ -73,7 +73,7 @@
     ],
     "pr": 19,
     "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m pytest -q) ; python scripts/check-personal-data.py",
-    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.469s (exit 0); 157 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.163s (exit 0); 161 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -98,7 +98,7 @@
       {
         "tarefa": 5,
         "resultado": "vermelho",
-        "fixture": "TestMencaoPorNumeroRecusaExplicitamente"
+        "fixture": "TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro"
       },
       {
         "tarefa": 6,
@@ -108,7 +108,7 @@
       {
         "tarefa": 7,
         "resultado": "vermelho",
-        "fixture": "test_scrub_mentions.NomeDoChatTest.test_nome_de_chat_com_forma_de_telefone_vira_marcador"
+        "fixture": "test_scrub_mentions.AvisoDeFalhaNaSuperficieEstruturadaTest.test_falha_aparece_como_campo"
       },
       {
         "tarefa": 8,
@@ -131,7 +131,7 @@
         "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
       }
     ],
-    "rodada": 7,
+    "rodada": 8,
     "achados_da_revisao_fechados": [
       1,
       2,
@@ -165,27 +165,27 @@
       1,
       2
     ],
-    "creep_rodada6_fechado": true
+    "creep_rodada6_fechado": true,
+    "bloqueante_rodada7_fechado": true
   },
   "revisar": {
     "status": "reprovado",
     "snapshot": {
-      "head": "d439bba2f85f61109bc4b4787cf9c04e3f7a45d3",
+      "head": "60ec2a1a7a2d7aaf5634dc2f7f3d10f98788c39d",
       "caminhos_sujos": []
     },
     "em_voo": [
       {
         "agente": "revisor",
-        "tarefa": "revisao independente da rodada 6, diff 22dbfc2...d439bba (PR 19)",
+        "tarefa": "revisao independente da rodada 7, diff 22dbfc2...60ec2a1 (PR 19)",
         "desde": "2026-09-11"
       }
     ],
     "em": "2026-09-11",
-    "achados": 9,
-    "bloqueiam": 2,
+    "achados": 6,
+    "bloqueiam": 1,
     "lista": [
-      "chat_name e Chat.name saiam crus: chats.name cai no telefone quando o contato nao tem nome - 1658 de 2162 chats 1:1 do store real. E o README deste diff afirma que toda superficie de leitura responde por nome",
-      "last_sender_name resolvia contra a conta primaria, nao contra a conta de quem pediu a lista - nome perdido e rotulo da conta errada atravessando a fronteira"
+      "regressao da rodada 6: a preferencia por candidato nao usado valia entre comprimentos diferentes, entao @Luis Montes caia num Luis de OUTRA pessoa - numero do B onde o autor escreveu o nome do A, sem recusa"
     ],
     "observacoes": [
       "docstring de send_message promete campo candidates que o dict de retorno nao tem",
@@ -197,8 +197,8 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 7,
-    "creep": 1,
+    "tentativas": 8,
+    "creep": 0,
     "creep_lista": [
       "whatsapp-mcp-server/test_api_errors.py sem arquivos: de tarefa nenhuma"
     ],

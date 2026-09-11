@@ -330,9 +330,22 @@ def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) ->
     user_part = (normalized or "").split("@", 1)[0]
     if not name or name in (normalized, jid, user_part):
         return UNNAMED_CONTACT, None
-    if len(re.sub(r"\D", "", name)) >= 8:
+    if _tem_forma_de_telefone(name):
         return UNNAMED_CONTACT, None
     return name, None
+
+
+def _tem_forma_de_telefone(nome: str) -> bool:
+    """`nome` é um número escrito por extenso, e não o nome de alguém?
+
+    Contar dígitos sozinho é grosseiro demais: um grupo chamado "Turma 2026 —
+    Projeto 12345678" tem oito dígitos e é um nome de verdade (observação 3 da
+    rodada 7). O que caracteriza um telefone é ser FEITO de dígitos, com no
+    máximo a pontuação que se usa para escrevê-los.
+    """
+    if len(re.sub(r"\D", "", nome)) < 8:
+        return False
+    return re.fullmatch(r"[\d\s\-+()./]+", nome) is not None
 
 
 def _nome_visivel(nome: Optional[str]) -> Optional[str]:
@@ -346,7 +359,7 @@ def _nome_visivel(nome: Optional[str]) -> Optional[str]:
     """
     if not nome:
         return nome
-    if len(re.sub(r"\D", "", nome)) >= 8:
+    if _tem_forma_de_telefone(nome):
         return UNNAMED_CONTACT
     return nome
 
@@ -376,7 +389,7 @@ def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
     # label that IS a phone number, just typed with punctuation — country
     # code, spaces, a dash. Printing it satisfies the letter of "we printed a
     # name" and breaks D3 anyway, so judge the digits, not the formatting.
-    if len(re.sub(r"\D", "", name)) >= 8:
+    if _tem_forma_de_telefone(name):
         return UNNAMED_CONTACT
     return name
 
@@ -457,11 +470,21 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
     put that third party's number in the answer. Bodies go out through
     `_scrub_mention_numbers`, here and in `format_message`.
     """
+    # Mesma decisão do PR #12 que `format_message` já respeita: falha
+    # inesperada na busca do nome não some calada. A superfície estruturada
+    # engolia o aviso que a de prosa dá (observação 2 da rodada 7). A chave
+    # `sender_name_error` só existe quando houve falha.
+    if message.is_from_me:
+        sender_name, falha_do_nome = "Me", None
+    else:
+        sender_name, falha_do_nome = _display_name_ou_falha(message.sender, account)
+
     return {
         "id": message.id,
         "timestamp": message.timestamp.isoformat() if message.timestamp else None,
         "sender": message.sender,
-        "sender_name": "Me" if message.is_from_me else _display_name(message.sender, account),
+        "sender_name": sender_name,
+        **({"sender_name_error": falha_do_nome} if falha_do_nome else {}),
         "chat_jid": message.chat_jid,
         "chat_name": _nome_visivel(message.chat_name),
         "content": _scrub_mention_numbers(

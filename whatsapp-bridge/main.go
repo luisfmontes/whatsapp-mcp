@@ -983,6 +983,20 @@ func digitosDe(s string) string {
 	return b.String()
 }
 
+// rotuloDoParticipante escolhe COMO chamar esta pessoa na pergunta da D6. O
+// campo que casou nao serve: dois homonimos de primeiro nome saem com rotulo
+// identico, e a pergunta "qual dos dois?" fica impossivel de responder —
+// exatamente o contrario do que a D6 existe para fazer (achado da rodada 7).
+// Vai o nome mais especifico que se conhece, e nunca o numero (D3).
+func rotuloDoParticipante(p mentionParticipant, casou string) string {
+	for _, n := range []string{p.fullName, p.businessName, p.pushName, p.firstName} {
+		if n != "" && len(digitosDe(n)) < 8 {
+			return n
+		}
+	}
+	return casou
+}
+
 // matchMentionName finds every participant whose full_name, first_name,
 // push_name or business_name matches name exactly (case/accent-insensitive,
 // via stripAccents) — never a substring or prefix match, so requesting
@@ -1007,13 +1021,13 @@ func matchMentionName(participants []mentionParticipant, name string) []mentionM
 	for _, p := range participants {
 		switch {
 		case p.fullName != "" && stripAccents(p.fullName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: p.fullName, origem: "agenda"})
+			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.fullName), origem: "agenda"})
 		case p.firstName != "" && stripAccents(p.firstName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: p.firstName, origem: "agenda"})
+			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.firstName), origem: "agenda"})
 		case p.pushName != "" && stripAccents(p.pushName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: p.pushName, origem: "whatsapp"})
+			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.pushName), origem: "whatsapp"})
 		case p.businessName != "" && stripAccents(p.businessName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: p.businessName, origem: "negocio"})
+			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.businessName), origem: "negocio"})
 		}
 	}
 	return matches
@@ -1346,14 +1360,34 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			i++
 			continue
 		}
-		// Duas passadas: primeiro procura um candidato AINDA NAO usado, so
-		// depois aceita repetir. Sem isso, dois homonimos desambiguados por
-		// ref na mesma mensagem casavam os dois "@Luís" na mesma pessoa, e a
-		// outra mencao morria sem ancora — recusa dizendo que a ancora nao
-		// existe, com ela escrita duas vezes (observacao 1 da rodada 6).
+		// Nesta posicao, o nome MAIS LONGO que casa vence — sempre. Essa regra
+		// e o que segura os achados das rodadas 4 e 5 (nome curto comendo o
+		// prefixo do longo), e nao pode ser negociada.
+		//
+		// A preferencia por "ainda nao usado" vale SO entre candidatos desse
+		// mesmo comprimento. A rodada 6 a aplicou entre comprimentos
+		// diferentes, e com isso "@Luis Montes" — cujo casamento longo ja
+		// estava usado — caia num "Luis" de OUTRA pessoa: o texto saia com o
+		// numero do B onde o autor escreveu o nome do A, e sem recusa. Era
+		// trocar uma recusa segura por um envio errado, que e exatamente o
+		// dano que a D6 existe para impedir (achado da rodada 7).
+		//
+		// Se o unico casamento mais longo ja foi usado, repete-se ele: a
+		// mencao que sobrar sem ancora vira recusa 400 — falha segura.
+		maiorCasamento := -1
+		for _, c := range cands {
+			if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
+				continue
+			}
+			maiorCasamento = len(c.nome)
+			break // cands esta ordenado por comprimento decrescente
+		}
 		escolhido := -1
 		for passada := 0; passada < 2 && escolhido < 0; passada++ {
 			for ci, c := range cands {
+				if len(c.nome) != maiorCasamento {
+					continue
+				}
 				if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
 					continue
 				}

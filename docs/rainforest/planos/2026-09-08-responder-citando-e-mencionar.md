@@ -524,3 +524,40 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `resolveMentions`, que sabe devolver status. O README documenta 400 para toda
   recusa de menção, e a ponte não errou: o pedido é que não cabe naquela
   conversa.
+
+- **2026-09-11 (rodada 7) — a preferência por candidato não usado valia entre
+  comprimentos diferentes, e isso trocava uma recusa segura por um envio
+  errado.** Regressão da rodada 6. Com dois homônimos desambiguados por `ref` e
+  o texto `"@Luis e @Luis Montes"`, a segunda âncora — cujo casamento mais longo
+  ("Luis Montes", do A) já estava usado — caía num `"Luis"` de **outra pessoa**:
+  saía o número do B onde o autor escreveu o nome do A, **sem recusa**. É o dano
+  que a D6 existe para impedir, passando por baixo dela porque a checagem final
+  só pergunta "toda menção foi usada?", e ambas foram — em posições trocadas.
+  A regra "o nome mais longo vence na posição" volta a ser inegociável; a
+  preferência por não usado passa a valer **só entre candidatos desse mesmo
+  comprimento**. Se o único casamento mais longo já foi usado, repete-se ele e a
+  menção que sobrar sem âncora vira recusa 400 — falha segura.
+  `pronto quando:` com dois homônimos por `ref` e `"@Luis e @Luis Montes"`, a
+  ponte recusa 400 e o texto não carrega o número do outro — provado por
+  `TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro`.
+
+- **2026-09-11 (rodada 7) — a pergunta da D6 passa a ser respondível.**
+  `matchMentionName` rotulava o candidato com **o campo que casou**, então dois
+  homônimos de primeiro nome saíam com nome e origem idênticos e o usuário
+  escolhia no escuro — a D6 para de enviar justamente para perguntar, e a
+  pergunta não ajudava a escolher. O rótulo passa a ser o nome mais específico
+  conhecido (`full_name` → `business_name` → `push_name` → `first_name`),
+  sempre filtrado pela régua de dígitos, nunca o número.
+
+- **2026-09-11 (rodada 7) — a régua de "isto é um telefone?" deixa de contar só
+  dígitos.** `"Turma 2026 - Projeto 12345678"` tem oito dígitos e é nome de
+  verdade; o que caracteriza telefone é ser **feito** de dígitos, com no máximo
+  a pontuação usada para escrevê-los. Medido contra os dois stores reais:
+  a régua antiga marcava 1.846 nomes de chat, a nova marca 1.844 — e os dois
+  soltos são nomes legítimos (um grupo de casamento com a data, um grupo com
+  faixa numérica). Protege o mesmo e devolve dois nomes reais.
+
+- **2026-09-11 (rodada 7) — a superfície estruturada passa a dizer a falha que a
+  de prosa já dizia.** `format_message` imprime `[name lookup failed: ...]` ao
+  lado do marcador (decisão do PR #12) e `message_to_public_dict` engolia a
+  exceção calada. Ganha `sender_name_error`, que só existe quando houve falha.

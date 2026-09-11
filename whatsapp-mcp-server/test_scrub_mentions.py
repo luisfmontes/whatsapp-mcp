@@ -214,6 +214,43 @@ class NomeDoChatTest(unittest.TestCase):
         self.assertNotIn(FALSO, repr(chat))
 
 
+class NomeComDigitosMasDeVerdadeTest(unittest.TestCase):
+    """Observacao 3 da rodada 7: contar digitos sozinho e grosseiro demais.
+
+    Um grupo chamado "Turma 2026 - Projeto 12345678" tem oito digitos e e nome
+    de verdade. O que caracteriza telefone e ser FEITO de digitos, com no
+    maximo a pontuacao que se usa para escreve-los.
+    """
+
+    def test_nome_de_grupo_com_digitos_sobrevive(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name="Turma 2026 - Projeto 12345678"))
+        self.assertEqual(d["chat_name"], "Turma 2026 - Projeto 12345678")
+
+    def test_telefone_com_pontuacao_continua_virando_marcador(self):
+        formatado = "+" + DDI_DDD[:2] + " (" + DDI_DDD[2:] + ") " + FALSO[4:9] + "-" + FALSO[9:]
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name=formatado))
+        self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
+
+
+class AvisoDeFalhaNaSuperficieEstruturadaTest(unittest.TestCase):
+    """Observacao 2 da rodada 7: `format_message` imprime o motivo da falha ao
+    lado do marcador (decisao do PR #12), e o dicionario engolia calado.
+    """
+
+    def test_falha_aparece_como_campo(self):
+        with mock.patch("whatsapp.get_sender_name", side_effect=RuntimeError("boom")):
+            d = message_to_public_dict(_msg())
+        self.assertEqual(d["sender_name"], UNNAMED_CONTACT)
+        self.assertIn("boom", d["sender_name_error"])
+
+    def test_sem_falha_o_campo_nao_existe(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg())
+        self.assertNotIn("sender_name_error", d)
+
+
 class ContaDoUltimoRemetenteTest(unittest.TestCase):
     """Bloqueante 2 da rodada 6: `_chat_from_dict` resolvia o nome contra a
     conta PRIMARIA, nao contra a conta de quem pediu a lista — o campo criado

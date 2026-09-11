@@ -3018,8 +3018,14 @@ func TestRefReenviaComONomeQueAPonteMostrou(t *testing.T) {
 	if status != http.StatusBadRequest || len(candidates) != 2 {
 		t.Fatalf("esperava recusa ambigua com 2 candidatos, veio status=%d candidatos=%d", status, len(candidates))
 	}
-	if candidates[1].Nome != "Luís" {
-		t.Fatalf("candidates[1].Nome = %q, want the participant name the bridge shows", candidates[1].Nome)
+	// Os dois rotulos tem de ser DISTINGUIVEIS: rotular pelo campo que casou
+	// fazia os dois homonimos sairem como "Luís", e a pergunta da D6 ficava
+	// impossivel de responder (achado da rodada 7).
+	if candidates[0].Nome == candidates[1].Nome {
+		t.Fatalf("os dois candidatos saem como %q — a pergunta da D6 nao da para responder", candidates[0].Nome)
+	}
+	if candidates[1].Nome != "Luís Dois" {
+		t.Fatalf("candidates[1].Nome = %q, want the most specific name known", candidates[1].Nome)
 	}
 
 	// O autor reescreve o texto com o nome que a ponte mostrou.
@@ -3095,6 +3101,40 @@ func TestDoisHomonimosPorRefNaMesmaMensagem(t *testing.T) {
 	}
 	if len(jids) != 2 {
 		t.Fatalf("jids = %v, want both mentions", jids)
+	}
+}
+
+// TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro cobre o bloqueante da rodada 7,
+// que foi regressao da rodada 6: a preferencia por "candidato ainda nao usado"
+// valia ENTRE COMPRIMENTOS DIFERENTES, entao "@Luis Montes" — cujo casamento
+// longo ja estava usado — caia num "Luis" de OUTRA pessoa. O texto saia com o
+// numero do B onde o autor escreveu o nome do A, e sem recusa: uma recusa
+// segura virava um envio errado, que e o dano que a D6 existe para impedir.
+func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
+	a := resolvedMention{name: "Luis", phoneUser: "c-a", jid: "c-a@s.whatsapp.net", viaRef: true}
+	b := resolvedMention{name: "Luis", phoneUser: "c-b", jid: "c-b@s.whatsapp.net", viaRef: true}
+	outros := []nomeDeParticipante{
+		{nome: "Luis Montes", jid: a.jid},
+		{nome: "Luis", jid: a.jid},
+		{nome: "Luis Silva", jid: b.jid},
+		{nome: "Luis", jid: b.jid},
+	}
+
+	texto, jids, errMsg, status := applyMentions(
+		"@Luis e @Luis Montes, olhem isso", []resolvedMention{a, b}, outros)
+
+	// A primeira ancora leva o A; na segunda, o casamento mais longo
+	// ("Luis Montes", do A) ja foi usado. A resposta certa e repetir o A e
+	// deixar a mencao do B sem ancora — recusa — e NUNCA grifar o B onde
+	// esta escrito o nome do A.
+	if errMsg == "" || status != http.StatusBadRequest {
+		t.Fatalf("errMsg=%q status=%d, want a 400 refusal", errMsg, status)
+	}
+	if jids != nil {
+		t.Fatalf("jids = %v, want nil — nothing may be sent", jids)
+	}
+	if strings.Contains(texto, "c-b") {
+		t.Fatalf("texto = %q, want no trace of the other person's number where the author wrote a full name", texto)
 	}
 }
 
