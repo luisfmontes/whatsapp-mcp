@@ -392,9 +392,23 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `pronto quando:` nenhum commit de `origin/main..origin/feat/citacao-e-mencao`
   serve o campo com forma de JID de grupo — provado por laço de `git show` sobre
   `git rev-list` procurando `[0-9]{12,25}@g\.us` no arquivo de estado, sem
-  nenhuma saída; e `git diff --stat backup/citacao-antes-da-reescrita HEAD`
-  vazio, provando que só o histórico mudou, não a entrega.
-  Limite que fica escrito em vez de ficar implícito: objetos órfãos podem seguir
-  alcançáveis por SHA no GitHub até o GC da rede de forks. O dado é um JID de
-  grupo (opaco, não deriva de telefone, não dá acesso sem convite), então não se
-  abriu chamado no Support — a decisão foi essa, não um esquecimento.
+  nenhuma saída; e `git diff --stat 0506eeb 5ead104` vazio (o último commit
+  pré-reescrita contra seu equivalente reescrito), provando que só o histórico
+  mudou, não a entrega. **Corrigido em 2026-09-11 (rodada 4):** a primeira
+  redação comparava `backup/citacao-antes-da-reescrita` com `HEAD`, e isso
+  deixou de dar vazio assim que um commit novo entrou por cima — critério que
+  não roda mais não serve ao `verificar`.
+
+  **A reescrita NÃO fechou o vazamento, e isso está medido.** A rodada 4 da
+  revisão levantou o resíduo de "possibilidade futura" para fato presente, com
+  comando: `gh api repos/luisfmontes/whatsapp-mcp/contents/<arquivo de
+  estado>?ref=<SHA pré-reescrita>` devolve o JID real hoje, e
+  `gh api repos/rodrigopg/whatsapp-mcp/commits/<mesmo SHA>` responde 200 — o
+  objeto órfão é servido pelo fork **e** pelo repositório pai. Pior, o SHA não
+  precisa ser adivinhado: `gh api repos/luisfmontes/whatsapp-mcp/events` lista
+  os `PushEvent` pré-reescrita, sem autenticação. Ou seja, há rota pública de
+  descoberta. Só o Support do GitHub remove objeto do storage da rede de forks;
+  enquanto não removerem, o dado segue acessível a quem procurar.
+  O que pesa do outro lado: é JID de grupo — opaco, não deriva de telefone, não
+  dá acesso ao grupo sem convite. **Decisão do usuário, registrada aqui quando
+  ele decidir.**

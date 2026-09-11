@@ -1115,7 +1115,7 @@ func semDispositivo(jid string) string {
 // or "ref:<id>" from a previous ambiguous refusal. Returns either the
 // resolved mentions ready to apply to the text, or a refusal — 4xx, nothing
 // sent — carrying candidates only for the ambiguous case (D6).
-func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []string, []MentionCandidateResponse, string, int) {
+func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []nomeDeParticipante, []MentionCandidateResponse, string, int) {
 	if len(mentions) == 0 {
 		return nil, nil, nil, "", 0
 	}
@@ -1130,7 +1130,7 @@ func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJ
 // out so it's testable (TestResolveMentionAmbigua) without a live whatsmeow
 // client — it only touches the participants list and the in-process ref map,
 // never the network.
-func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string, chatJID string) ([]resolvedMention, []string, []MentionCandidateResponse, string, int) {
+func resolveMentionsAgainstParticipants(participants []mentionParticipant, mentions []string, chatJID string) ([]resolvedMention, []nomeDeParticipante, []MentionCandidateResponse, string, int) {
 	resolved := make([]resolvedMention, 0, len(mentions))
 	for _, raw := range mentions {
 		if refID, isRef := strings.CutPrefix(raw, "ref:"); isRef {
@@ -1174,15 +1174,25 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 	return resolved, nomesDeParticipantes(participants), nil, "", 0
 }
 
+// nomeDeParticipante e um nome pelo qual alguem desta conversa pode ser escrito
+// depois de um "@", junto do JID de quem o usa. O JID importa: o mesmo nome
+// longo pode ser de um participante que NAO foi pedido (e ai o texto fica
+// intacto) ou da PROPRIA pessoa pedida, escrita pelo nome completo em vez do
+// nome que veio em `mentions` — e ai tem de substituir, nao deixar intacto.
+type nomeDeParticipante struct {
+	nome string
+	jid  string
+}
+
 // nomesDeParticipantes junta todo nome pelo qual alguem desta conversa pode ser
 // escrito depois de um "@". applyMentions usa a lista para NAO substituir um
 // nome pedido dentro do nome mais longo de outro participante.
-func nomesDeParticipantes(participants []mentionParticipant) []string {
-	nomes := make([]string, 0, len(participants)*4)
+func nomesDeParticipantes(participants []mentionParticipant) []nomeDeParticipante {
+	nomes := make([]nomeDeParticipante, 0, len(participants)*4)
 	for _, p := range participants {
 		for _, n := range []string{p.fullName, p.pushName, p.businessName, p.firstName} {
 			if n != "" {
-				nomes = append(nomes, n)
+				nomes = append(nomes, nomeDeParticipante{nome: n, jid: p.jid})
 			}
 		}
 	}
@@ -1221,7 +1231,7 @@ func fronteiraDeNome(resto string) bool {
 // sent: WhatsApp only highlights what the text actually writes, so a
 // MentionedJID without its anchor notifies someone with nothing on screen
 // explaining why.
-func applyMentions(text string, resolved []resolvedMention, outrosNomes []string) (string, []string, string, int) {
+func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDeParticipante) (string, []string, string, int) {
 	if len(resolved) == 0 {
 		return text, nil, "", 0
 	}
@@ -1244,9 +1254,25 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []string
 		}
 	}
 	for _, n := range outrosNomes {
-		if n != "" {
-			cands = append(cands, candidato{nome: n, idx: -1})
+		if n.nome == "" {
+			continue
 		}
+		// Nome longo da PROPRIA pessoa pedida nao pode comer a ancora dela.
+		// Achado da rodada 4: com `mentions: ["Ana Paula"]` e o autor
+		// escrevendo "@Ana Paula Souza", o nome completo vencia por ser mais
+		// longo, ficava intacto, e a mencao saia sem uso — recusa 400 dizendo
+		// que "@Ana Paula" nao esta no texto, com "@Ana Paula" no texto. Mesma
+		// armadilha no fluxo da D6: a recusa ambigua mostra o nome do
+		// candidato, e quem reescreve o texto com o nome que a ponte mostrou
+		// tomava 400.
+		idx := -1
+		for i, r := range resolved {
+			if r.jid != "" && r.jid == n.jid {
+				idx = i
+				break
+			}
+		}
+		cands = append(cands, candidato{nome: n.nome, idx: idx})
 	}
 	sort.SliceStable(cands, func(a, b int) bool {
 		return len(cands[a].nome) > len(cands[b].nome)

@@ -3018,7 +3018,7 @@ func TestResolveDevolveNomesDoChat(t *testing.T) {
 	}
 	achou := false
 	for _, n := range outrosNomes {
-		if n == "Ana Paula" {
+		if n.nome == "Ana Paula" {
 			achou = true
 		}
 	}
@@ -3096,7 +3096,7 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		texto, jids, errMsg, _ := applyMentions(
 			"bom dia @Ana e @Ana Paula",
 			[]resolvedMention{curta},
-			[]string{"Ana Paula"},
+			[]nomeDeParticipante{{nome: "Ana Paula", jid: "anapaula@s.whatsapp.net"}},
 		)
 		if errMsg != "" {
 			t.Fatalf("unexpected refusal: %v", errMsg)
@@ -3129,7 +3129,7 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		}
 	})
 
-	t.Run("acentos_e_pontuacao_encerram_o_nome", func(t *testing.T) {
+	t.Run("pontuacao_encerra_o_nome", func(t *testing.T) {
 		texto, _, errMsg, _ := applyMentions(
 			"@Ana, bom dia",
 			[]resolvedMention{curta},
@@ -3140,6 +3140,48 @@ func TestApplyMentionsPrefixo(t *testing.T) {
 		}
 		if texto != "@ana-user, bom dia" {
 			t.Fatalf("texto = %q", texto)
+		}
+	})
+
+	t.Run("letra_acentuada_logo_depois_nao_encerra_o_nome", func(t *testing.T) {
+		// Todo texto passado a applyMentions nos testes era ASCII puro, entao
+		// uma fronteira feita byte a byte passaria na bateria inteira e
+		// reintroduziria o defeito para nome com acento — num repositorio em
+		// pt-BR. "Anailza" com i acentuado comeca com "Ana", e o primeiro byte
+		// da rune acentuada nao e letra ASCII.
+		texto, _, errMsg, statusCode := applyMentions(
+			"fala com @Anaílza",
+			[]resolvedMention{curta},
+			nil,
+		)
+		if errMsg == "" || statusCode < 400 || statusCode >= 500 {
+			t.Fatalf("errMsg=%q statusCode=%d, want a 4xx refusal — there is no valid anchor", errMsg, statusCode)
+		}
+		if strings.Contains(texto, "ana-user") {
+			t.Fatalf("texto = %q, want the accented word left intact", texto)
+		}
+	})
+
+	t.Run("nome_completo_da_propria_pessoa_pedida_ancora_a_mencao", func(t *testing.T) {
+		// Achado da rodada 4: o nome longo da PROPRIA pessoa pedida vencia por
+		// comprimento, ficava intacto, e a mencao saia sem uso — 400 dizendo
+		// que "@Ana Paula" nao esta no texto, com "@Ana Paula" no texto.
+		texto, jids, errMsg, _ := applyMentions(
+			"bom dia @Ana Paula Souza",
+			[]resolvedMention{longa},
+			[]nomeDeParticipante{
+				{nome: "Ana Paula Souza", jid: longa.jid},
+				{nome: "Ana Paula", jid: longa.jid},
+			},
+		)
+		if errMsg != "" {
+			t.Fatalf("unexpected refusal: %v", errMsg)
+		}
+		if texto != "bom dia @anapaula-user" {
+			t.Fatalf("texto = %q, want the full name to anchor the mention", texto)
+		}
+		if len(jids) != 1 || jids[0] != longa.jid {
+			t.Fatalf("jids = %v, want the requested mention", jids)
 		}
 	})
 

@@ -21,7 +21,7 @@
     "em": "2026-09-08"
   },
   "executar": {
-    "status": "ok",
+    "status": "parcial",
     "catraca_mutacao": "2026-09-08",
     "tarefas_ok": 11,
     "tarefas": 11,
@@ -154,31 +154,31 @@
       "como": "git filter-branch --tree-filter sobre origin/main..HEAD, push com --force-with-lease",
       "backup_local": "backup/citacao-antes-da-reescrita",
       "limite": "objetos orfaos podem seguir alcancaveis por SHA no GitHub ate o GC da rede de forks"
+    },
+    "reaberto_por": {
+      "estagio": "revisar",
+      "data": "2026-09-11"
     }
   },
   "revisar": {
     "status": "reprovado",
     "snapshot": {
-      "head": "67d580be43018f34b1827c282773bf0b0706600e",
-      "caminhos_sujos": [
-        "docs/rainforest/estado/2026-09-08-responder-citando-e-mencionar.json"
-      ]
+      "head": "127af4c31221ac98d50350141d50e436538565c6",
+      "caminhos_sujos": []
     },
     "em_voo": [
       {
         "agente": "revisor",
-        "tarefa": "revisao independente da rodada 3, diff 22dbfc2...67d580b (PR 19)",
-        "desde": "2026-09-09"
+        "tarefa": "revisao independente da rodada 4, diff 22dbfc2...127af4c (PR 19)",
+        "desde": "2026-09-11"
       }
     ],
-    "em": "2026-09-09",
-    "achados": 12,
-    "bloqueiam": 4,
+    "em": "2026-09-11",
+    "achados": 10,
+    "bloqueiam": 2,
     "lista": [
-      "JID real do grupo publicado em 9 commits ja empurrados para origin (fork publico); so o tip esta limpo, e o job de CI roda sobre a working tree, nunca sobre o historico",
-      "applyMentions casava prefixo sem fronteira e so desempatava entre nomes PEDIDOS: com Ana pedida e Ana Paula participante nao pedida, @Ana Paula virava @<numero da Ana> Paula sem a D6 poder segurar; e @RodrigoPG virava @<numero>PG",
-      "Chat.last_message saia cru em list_chats/get_chat/get_contact_chats/get_direct_chat_by_contact - mencao na ultima mensagem do chat vazava o numero pela tool mais usada",
-      "send_file(mentions=...) era recusa garantida: a rota de midia nao manda message, entao nunca ha ancora e a ponte devolve 400 em 100% das chamadas"
+      "o JID real segue servido por SHA pelo fork E pelo repositorio pai, e o feed publico de eventos entrega os SHAs pre-reescrita sem autenticacao - a reescrita nao fechou o vazamento, so o Support do GitHub remove",
+      "nomesDeParticipantes nao excluia quem ja estava resolvido: o nome longo da propria pessoa pedida comia a ancora dela e a mencao virava recusa 400 em caminho documentado"
     ],
     "observacoes": [
       "docstring de send_message promete campo candidates que o dict de retorno nao tem",
@@ -190,19 +190,18 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 4,
+    "tentativas": 5,
     "creep": 0,
     "creep_lista": [
       "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",
       "docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md"
     ],
     "fechados_nesta_rodada": [
-      2,
-      3,
-      4
+      2
     ],
     "pendente": "bloqueante 1 depende de decisao do usuario sobre reescrever a branch e force-push no PR 19",
-    "head_com_correcoes": "0506eeb"
+    "head_com_correcoes": "0506eeb",
+    "pendente_com_o_usuario": "abrir chamado no Support do GitHub para remover os objetos orfaos - decisao dele, medida e apresentada em 2026-09-11"
   },
   "verificar": {
     "status": "pendente"
