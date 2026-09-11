@@ -72,8 +72,8 @@
       "corpo da mensagem passa a exibir @Nome no lugar de @numero na leitura"
     ],
     "pr": 19,
-    "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m unittest test_scrub_mentions test_public_dict test_display_name test_reply_mentions test_transcribe) ; python scripts/check-personal-data.py",
-    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.443s (exit 0); Ran 59 tests OK; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m unittest test_scrub_mentions test_public_dict test_display_name test_reply_mentions test_transcribe) ; (cd whatsapp-mcp-server && python -m pytest test_api_errors.py -q) ; python scripts/check-personal-data.py",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.279s (exit 0); Ran 65 tests OK; 8 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -98,7 +98,7 @@
       {
         "tarefa": 5,
         "resultado": "vermelho",
-        "fixture": "TestApplyMentionsPrefixo/nome_completo_da_propria_pessoa_pedida_ancora_a_mencao"
+        "fixture": "TestNomeCompartilhadoNaoLigaSemDesambiguacao"
       },
       {
         "tarefa": 6,
@@ -108,7 +108,7 @@
       {
         "tarefa": 7,
         "resultado": "vermelho",
-        "fixture": "test_scrub_mentions.UltimaMensagemDoChatTest.test_last_message_passa_pela_limpeza"
+        "fixture": "test_scrub_mentions.LinhaFromTest.test_nome_que_nao_resolve_vira_marcador_e_nao_o_numero"
       },
       {
         "tarefa": 8,
@@ -131,7 +131,7 @@
         "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
       }
     ],
-    "rodada": 5,
+    "rodada": 6,
     "achados_da_revisao_fechados": [
       1,
       2,
@@ -156,27 +156,31 @@
       "limite": "objetos orfaos podem seguir alcancaveis por SHA no GitHub ate o GC da rede de forks"
     },
     "bloqueante_1_da_rodada_4": "aceito pelo usuario em 2026-09-11: JID de grupo e opaco, nao carrega telefone e nao da acesso ao grupo; apagar o fork custaria 19 PRs e a Issue 18 e nao tiraria o objeto do repositorio pai",
-    "bloqueante_2_da_rodada_4": "fechado: nomes de participante viajam com o JID, e nome da propria pessoa pedida ancora a mencao"
+    "bloqueante_2_da_rodada_4": "fechado: nomes de participante viajam com o JID, e nome da propria pessoa pedida ancora a mencao",
+    "bloqueantes_rodada5_fechados": [
+      1,
+      2
+    ]
   },
   "revisar": {
     "status": "reprovado",
     "snapshot": {
-      "head": "127af4c31221ac98d50350141d50e436538565c6",
+      "head": "543a7fe9fb634001af86c411cc409c2fb2b5eed3",
       "caminhos_sujos": []
     },
     "em_voo": [
       {
         "agente": "revisor",
-        "tarefa": "revisao independente da rodada 4, diff 22dbfc2...127af4c (PR 19)",
+        "tarefa": "revisao independente da rodada 5, diff 22dbfc2...543a7fe (PR 19)",
         "desde": "2026-09-11"
       }
     ],
     "em": "2026-09-11",
-    "achados": 10,
+    "achados": 9,
     "bloqueiam": 2,
     "lista": [
-      "o JID real segue servido por SHA pelo fork E pelo repositorio pai, e o feed publico de eventos entrega os SHAs pre-reescrita sem autenticacao - a reescrita nao fechou o vazamento, so o Support do GitHub remove",
-      "nomesDeParticipantes nao excluia quem ja estava resolvido: o nome longo da propria pessoa pedida comia a ancora dela e a mencao virava recusa 400 em caminho documentado"
+      "a linha From de list_messages caia no identificador cru quando o nome nao resolvia - 130 de 665 remetentes, 2152 mensagens, 100% com forma de telefone no store real",
+      "Chat.last_sender saia cru: em chat de grupo o jid e @g.us e nao carrega numero, entao era o unico lugar por onde o telefone de um terceiro saia em list_chats - 31 de 141 grupos"
     ],
     "observacoes": [
       "docstring de send_message promete campo candidates que o dict de retorno nao tem",
@@ -188,7 +192,7 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 5,
+    "tentativas": 6,
     "creep": 0,
     "creep_lista": [
       "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",

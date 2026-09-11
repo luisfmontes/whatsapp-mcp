@@ -211,7 +211,12 @@ class Chat:
     name: Optional[str]
     last_message_time: Optional[datetime]
     last_message: Optional[str] = None
-    last_sender: Optional[str] = None
+    # Nome, nunca o identificador: em chat de GRUPO o `jid` acima e @g.us e nao
+    # carrega numero nenhum, entao este campo era o unico lugar por onde o
+    # telefone de um terceiro saia em `list_chats`. Medido em 2026-09-11: 31 de
+    # 141 grupos do store real. Renomeado de `last_sender` de proposito — um
+    # campo que muda de significado calado e pior que um campo que some.
+    last_sender_name: Optional[str] = None
     last_is_from_me: Optional[bool] = None
 
     @property
@@ -260,7 +265,7 @@ def _chat_from_dict(d: dict) -> Chat:
         # mensagem do chat ser uma menção para o número do mencionado sair
         # daqui. A D3 não distingue por qual tool o número escapa.
         last_message=_scrub_mention_numbers(d.get("last_message")),
-        last_sender=d.get("last_sender"),
+        last_sender_name=_display_name(d.get("last_sender")) if d.get("last_sender") else None,
         last_is_from_me=d.get("last_is_from_me"),
     )
 
@@ -305,6 +310,29 @@ def _strip_device_suffix(jid: Optional[str]) -> Optional[str]:
     user, _, server = jid.partition("@")
     user = user.split(":", 1)[0]
     return f"{user}@{server}"
+
+
+def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """`_display_name`, mais o motivo quando a busca do nome levantou exceção.
+
+    Quem chama decide o que fazer com o motivo. `format_message` o imprime ao
+    lado do marcador, porque existe decisão anterior (PR #12) de que exceção
+    inesperada saindo de `get_sender_name` não pode sumir calada — o que some
+    agora é o identificador, não o aviso.
+    """
+    if not jid:
+        return UNNAMED_CONTACT, None
+    normalized = _strip_device_suffix(jid)
+    try:
+        name = get_sender_name(normalized, account)
+    except Exception as e:
+        return UNNAMED_CONTACT, str(e)
+    user_part = (normalized or "").split("@", 1)[0]
+    if not name or name in (normalized, jid, user_part):
+        return UNNAMED_CONTACT, None
+    if len(re.sub(r"\D", "", name)) >= 8:
+        return UNNAMED_CONTACT, None
+    return name, None
 
 
 def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
@@ -447,7 +475,20 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
 
     try:
-        sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
+        # `get_sender_name` devolve o PROPRIO identificador quando nao acha
+        # nome — e `messages.sender` e gravado como a parte de usuario do JID,
+        # ou seja, o telefone puro. Medido no store real em 2026-09-11: 130 de
+        # 665 remetentes sem nome resolvivel, 2.152 mensagens, 100% delas com
+        # forma de telefone. Duas linhas abaixo, a citacao e as mencoes ja
+        # saiam por `_display_name`; esta ficou para tras, e a mesma mensagem
+        # respondia "(contato sem nome)" em `get_message_context` e o numero em
+        # `list_messages`.
+        if message.is_from_me:
+            sender_name, falha_do_nome = "Me", None
+        else:
+            sender_name, falha_do_nome = _display_name_ou_falha(message.sender, account)
+        if falha_do_nome:
+            sender_name = f"{sender_name} [name lookup failed: {falha_do_nome}]"
         corpo = _scrub_mention_numbers(
             _mentions_by_name(message.content, message.mentions, account)
         )

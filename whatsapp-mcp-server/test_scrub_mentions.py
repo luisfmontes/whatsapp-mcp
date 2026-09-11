@@ -17,6 +17,7 @@ from datetime import datetime
 from unittest import mock
 
 from whatsapp import (
+    Chat,
     Message,
     _chat_from_dict,
     UNNAMED_CONTACT,
@@ -118,6 +119,67 @@ class UltimaMensagemDoChatTest(unittest.TestCase):
     def test_last_message_ausente_nao_quebra(self):
         chat = _chat_from_dict({"jid": "grupo-teste@g.us", "name": "Grupo"})
         self.assertIsNone(chat.last_message)
+
+
+class LinhaFromTest(unittest.TestCase):
+    """Bloqueante 1 da rodada 5: a linha `From:` de `list_messages` caia no
+    identificador cru quando o nome nao resolvia — e `messages.sender` e a
+    parte de usuario do JID, ou seja, o telefone puro. Medido no store real em
+    2026-09-11: 130 de 665 remetentes, 2.152 mensagens, 100% com forma de
+    telefone. A mesma mensagem respondia "(contato sem nome)" em
+    `get_message_context` e o numero em `list_messages`.
+    """
+
+    def test_nome_que_nao_resolve_vira_marcador_e_nao_o_numero(self):
+        msg = _msg(sender=FALSO + "@s.whatsapp.net")
+        with mock.patch("whatsapp.get_sender_name", side_effect=lambda j, a=None: j):
+            saida = format_message(msg, show_chat_info=False)
+        self.assertNotIn(FALSO, saida)
+        self.assertIn("From: " + UNNAMED_CONTACT, saida)
+        self.assertIn("corpo da mensagem", saida)
+
+    def test_nome_que_resolve_continua_saindo(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            saida = format_message(_msg(), show_chat_info=False)
+        self.assertIn("From: Fulana", saida)
+
+    def test_excecao_na_busca_do_nome_continua_sendo_dita(self):
+        """Decisao anterior a este trabalho (PR #12) que continua valendo."""
+        with mock.patch("whatsapp.get_sender_name", side_effect=RuntimeError("boom")):
+            saida = format_message(_msg(), show_chat_info=False)
+        self.assertIn("boom", saida)
+        self.assertIn(UNNAMED_CONTACT, saida)
+        self.assertIn("corpo da mensagem", saida)
+
+
+class UltimoRemetenteDoChatTest(unittest.TestCase):
+    """Bloqueante 2 da rodada 5: em chat de GRUPO o `jid` e @g.us e nao carrega
+    numero nenhum — `last_sender` era o unico lugar por onde o telefone de um
+    terceiro saia em `list_chats`. Medido: 31 de 141 grupos do store real.
+    """
+
+    def test_sai_por_nome(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            chat = _chat_from_dict({
+                "jid": "grupo-teste@g.us",
+                "name": "Grupo",
+                "last_sender": FALSO,
+            })
+        self.assertEqual(chat.last_sender_name, "Fulana")
+        self.assertNotIn(FALSO, repr(chat))
+
+    def test_nome_que_nao_resolve_vira_marcador(self):
+        with mock.patch("whatsapp.get_sender_name", side_effect=lambda j, a=None: j):
+            chat = _chat_from_dict({
+                "jid": "grupo-teste@g.us",
+                "name": "Grupo",
+                "last_sender": FALSO,
+            })
+        self.assertEqual(chat.last_sender_name, UNNAMED_CONTACT)
+        self.assertNotIn(FALSO, repr(chat))
+
+    def test_campo_cru_nao_existe_mais(self):
+        self.assertFalse(hasattr(Chat(jid="x@g.us", name="x", last_message_time=None), "last_sender"))
 
 
 class NomeQueEUmTelefoneTest(unittest.TestCase):

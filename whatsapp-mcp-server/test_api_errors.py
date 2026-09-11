@@ -156,9 +156,18 @@ def test_get_sender_name_falls_back_on_value_error(monkeypatch):
 
 
 def test_format_message_survives_sender_name_500(fake_bridge, monkeypatch):
-    """End to end: format_message keeps the content and falls back to the
-    JID as the sender name when /sender_name 500s - it must not come back
-    as just the '[timestamp] Chat: X ' prefix (the regression this closes)."""
+    """End to end: format_message keeps the content when /sender_name 500s -
+    it must not come back as just the '[timestamp] Chat: X ' prefix (the
+    regression this closes).
+
+    Updated on 2026-09-11: the fallback used to be the JID itself, and this
+    test asserted it. D3 forbids that - for a phone JID the JID IS the phone
+    number, and on 2026-09-11 that fallback was measured firing on 2.152
+    messages from 130 senders of the real store. The invariant this test
+    exists for ("a message never disappears silently") is unchanged and still
+    asserted; what changed is that the gap is filled with a neutral marker
+    instead of the identifier.
+    """
     monkeypatch.setattr(whatsapp.accounts, "resolve_account", lambda account=None: fake_bridge)
     whatsapp._sender_name_cache.clear()
 
@@ -166,7 +175,8 @@ def test_format_message_survives_sender_name_500(fake_bridge, monkeypatch):
     result = whatsapp.format_message(message)
 
     assert "From:" in result
-    assert message.sender in result
+    assert whatsapp.UNNAMED_CONTACT in result
+    assert message.sender not in result
     assert message.content in result
 
 

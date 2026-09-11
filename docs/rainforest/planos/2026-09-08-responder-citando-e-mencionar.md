@@ -394,7 +394,10 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `git rev-list` procurando `[0-9]{12,25}@g\.us` no arquivo de estado, sem
   nenhuma saída; e `git diff --stat 0506eeb 5ead104` vazio (o último commit
   pré-reescrita contra seu equivalente reescrito), provando que só o histórico
-  mudou, não a entrega. **Corrigido em 2026-09-11 (rodada 4):** a primeira
+  mudou, não a entrega. Limite deste critério, dito porque o `verificar` vai
+  rodá-lo: `0506eeb` só é alcançável pela branch local
+  `backup/citacao-antes-da-reescrita`. Num clone novo o comando erra em vez de
+  sair vazio — a prova vale nesta máquina, enquanto o backup existir. **Corrigido em 2026-09-11 (rodada 4):** a primeira
   redação comparava `backup/citacao-antes-da-reescrita` com `HEAD`, e isso
   deixou de dar vazio assim que um commit novo entrou por cima — critério que
   não roda mais não serve ao `verificar`.
@@ -414,10 +417,13 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   opaco — não carrega telefone, e ninguém entra no grupo com ele (entrar exige
   link de convite com token, ou um admin adicionar). O que ele revela é que o
   grupo existe, e o grupo é entre as duas contas do próprio Luís. O custo do
-  caminho alternativo era desproporcional: apagar o fork levaria junto 19 PRs
-  (17 mesclados, com as threads de review) e a Issue #18 — que é a tarefa 11
+  caminho alternativo era desproporcional: apagar o fork levaria junto 18 PRs
+  (16 mesclados, com as threads de review) e a Issue #18 — que é a tarefa 11
   deste mesmo trabalho — e ainda assim não tiraria o objeto do repositório pai,
-  porque a rede de forks é compartilhada.
+  porque a rede de forks é compartilhada. (Os números eram 19/17 na primeira
+  redação; a rodada 5 contou `gh pr list --state all` e achou 18 PRs, 16
+  mesclados — #18 é a Issue, não um PR. Registro de decisão de segurança não
+  pode apresentar como medido um número que não foi.)
 
   **O que fica valendo daqui para a frente, e é a parte que não é opinião:** a
   trava (`scripts/check-personal-data.py`) agora enxerga `@g.us` e `@lid`, e
@@ -425,3 +431,49 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   roda no push (`.github/workflows/build.yml`), nunca antes do commit — pega
   depois da exposição, que é exatamente a mecânica deste incidente. Fechar isso
   pede um hook de pre-commit, que não foi feito aqui.
+
+- **2026-09-11 (rodada 5) — tarefa 7 termina de aplicar a D3 na linha `From:`,
+  e isso revisa uma decisão anterior ao trabalho.** `format_message` resolvia o
+  autor por `get_sender_name`, que devolve o próprio identificador quando não
+  acha nome — e `messages.sender` é gravado como a parte de usuário do JID, ou
+  seja, o telefone puro. Medido no store real em 2026-09-11: **130 de 665
+  remetentes sem nome resolvível, 2.152 mensagens, 100% delas com forma de
+  telefone**. A incoerência era deste trabalho: `get_message_context` já
+  respondia `(contato sem nome)` e `list_messages` respondia o número, para a
+  mesma mensagem.
+  O que precisa ficar escrito é o que foi revisado: existia decisão do PR #12 de
+  que um 5xx em `/sender_name` degrada para o JID em vez de perder a mensagem, e
+  havia teste afirmando exatamente isso
+  (`test_api_errors.py::test_format_message_survives_sender_name_500`). O
+  invariante dela — *a mensagem nunca desaparece calada* — continua valendo e
+  continua asserido; o que muda é que a lacuna passa a ser preenchida pelo
+  marcador neutro, não pelo identificador. A outra metade daquela decisão
+  (exceção inesperada não some calada) também continua: `_display_name_ou_falha`
+  devolve o motivo, e a linha o imprime ao lado do marcador.
+  **Custo aceito, para ficar explícito:** mensagem de quem não está na agenda
+  passa a aparecer como `(contato sem nome)` em vez do número. Quem era
+  identificável só pelo número deixa de ser, na leitura.
+  `pronto quando:` com um remetente cujo nome não resolve, `format_message` não
+  imprime nenhuma sequência de 8+ dígitos e imprime `From: (contato sem nome)` —
+  provado por `test_scrub_mentions.LinhaFromTest`.
+
+- **2026-09-11 (rodada 5) — `Chat.last_sender` vira `last_sender_name`.** Em
+  chat de **grupo** o `jid` é `@g.us` e não carrega número nenhum; esse campo era
+  o único lugar por onde o telefone de um terceiro saía em `list_chats`. Medido:
+  **31 de 141 grupos** do store real. Renomeado em vez de trocado de valor
+  calado — campo que muda de significado sem mudar de nome é pior que campo que
+  some. Nada no repositório consumia `last_sender`.
+
+- **2026-09-11 (rodada 5) — nome compartilhado por dois participantes só liga à
+  menção quando o usuário já desambiguou.** O conserto da rodada 4 ligava nome de
+  participante à menção pedida pelo JID, e isso reintroduzia pelo texto a escolha
+  que a D6 existe para a ponte não fazer sozinha: com "Ana Paula" sendo nome da
+  Ana **e** de uma terceira, `mentions:["Ana"]` reescrevia `@Ana Paula` como o
+  número da Ana. Agora nome compartilhado só liga quando a menção veio por
+  `ref:` — isto é, quando a pergunta da D6 já foi respondida. E o desempate entre
+  homônimos passa a preferir quem está ligado à menção pedida, que era o que
+  fazia o reenvio por `ref` recusar com "não tem âncora" tendo âncora.
+  `pronto quando:` o caminho feliz da D6 (recusa ambígua → `ref` → envio) sai sem
+  recusa, com o nome que a ponte mostrou escrito no texto — provado por
+  `TestRefReenviaComONomeQueAPonteMostrou`, que não existia (o caminho feliz da
+  D6 não tinha bateria nenhuma até aqui).

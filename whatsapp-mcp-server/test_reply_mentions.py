@@ -18,7 +18,7 @@ from datetime import datetime
 from unittest import mock
 
 import whatsapp
-from whatsapp import Message, format_message, _message_from_dict
+from whatsapp import Message, UNNAMED_CONTACT, format_message, _message_from_dict
 
 
 def _msg(**overrides):
@@ -114,9 +114,16 @@ class FormatMessageCitacaoTest(unittest.TestCase):
         with mock.patch("whatsapp.get_sender_name", side_effect=RuntimeError("boom")):
             output = format_message(msg, show_chat_info=False)
 
-        # The main line's own try/except already handled this failure mode
-        # before task 7 (get_sender_name raising for message.sender).
-        self.assertIn("[Error formatting message: boom]", output)
+        # There is a decision older than this work (PR #12): an unexpected
+        # exception out of get_sender_name must not vanish in silence. It
+        # still holds - the reason is printed. What changed on 2026-09-11 is
+        # where it is printed and what sits next to it: the author line used
+        # to fall back to the raw identifier, which for a phone JID is the
+        # phone number (D3). Now the line renders, the body survives, and the
+        # failure is named beside the neutral marker.
+        self.assertIn("boom", output)
+        self.assertIn(UNNAMED_CONTACT, output)
+        self.assertIn("respondendo", output)
         # The quoted-sender resolution has its own independent fallback: the
         # rest of the line (id, preview) survives. The fallback is a neutral
         # marker, never the JID — D3 forbids a number reaching this output, and

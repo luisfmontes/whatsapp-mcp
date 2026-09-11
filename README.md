@@ -453,6 +453,8 @@ Nothing is sent when a quote is refused. The API returns:
 
 Names, never phone numbers or JIDs. The preview is truncated at 80 characters with an ellipsis.
 
+Every reading surface answers with **names**. A sender whose name cannot be resolved comes back as `(contato sem nome)`, never as the number — including the `From:` line of `list_messages` and `get_last_interaction`, and `list_chats`' `last_sender_name` (which replaced the raw `last_sender`). When the name lookup fails with an unexpected error, the reason is printed beside the marker rather than swallowed.
+
 `get_message_context` returns structured data rather than that line: each message carries `quoted_message_id`, `quoted_sender_name`, `quoted_content` and `mentions` (names). Same rule — no JIDs, no numbers. A `@<number>` left inside a message body that could not be resolved to a name is blanked out on the way to you.
 
 ### Mentioning people by name

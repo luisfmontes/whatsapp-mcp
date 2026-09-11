@@ -858,9 +858,14 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 // ---------------------------------------------------------------------------
 
 // mentionParticipant is one candidate for a mention target inside a chat
-// (D5): the list resolveMentions matches requested names against. jid is
-// always a phone-number JID (@s.whatsapp.net) — never @lid — so it can key
-// the senders table and go straight into ContextInfo.MentionedJID.
+// (D5): the list resolveMentions matches requested names against.
+//
+// In a GROUP, jid is always a phone-number JID (@s.whatsapp.net) — chatParticipants
+// builds it from gp.PhoneNumber and skips whoever has none — so it keys the senders
+// table and goes straight into ContextInfo.MentionedJID. In a 1:1 it is whatever
+// addresses the chat, which can be an @lid when no PN mapping exists yet; mentioning
+// in that case is refused rather than sent, because WhatsApp will not highlight an
+// @lid and the text would carry a stranger-looking identifier (achado da rodada 5).
 type mentionParticipant struct {
 	jid          string
 	altJID       string // the same person's @lid form, when the group gave us one
@@ -887,6 +892,7 @@ type resolvedMention struct {
 	name      string
 	phoneUser string
 	jid       string
+	viaRef    bool // veio de "ref:<id>", ou seja, o usuario ja desambiguou
 }
 
 // MentionCandidateResponse is one entry of the ambiguous-mention refusal body
@@ -944,6 +950,9 @@ func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
 // is skipped: there's no number to mention them with.
 func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID) ([]mentionParticipant, error) {
 	if chatJID.Server != types.GroupServer {
+		if chatJID.Server != types.DefaultUserServer {
+			return nil, fmt.Errorf("this conversation is addressed as %s, and a mention only renders against a phone-number address", chatJID.Server)
+		}
 		p := mentionParticipant{jid: chatJID.String(), phoneUser: chatJID.User}
 		messageStore.fillSenderNames(&p)
 		return []mentionParticipant{p}, nil
@@ -1149,7 +1158,7 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 			if idx := strings.Index(jid, "@"); idx >= 0 {
 				phoneUser = jid[:idx]
 			}
-			resolved = append(resolved, resolvedMention{name: name, phoneUser: phoneUser, jid: jid})
+			resolved = append(resolved, resolvedMention{name: name, phoneUser: phoneUser, jid: jid, viaRef: true})
 			continue
 		}
 		matches := matchMentionName(participants, raw)
@@ -1261,21 +1270,44 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 		// Achado da rodada 4: com `mentions: ["Ana Paula"]` e o autor
 		// escrevendo "@Ana Paula Souza", o nome completo vencia por ser mais
 		// longo, ficava intacto, e a mencao saia sem uso — recusa 400 dizendo
-		// que "@Ana Paula" nao esta no texto, com "@Ana Paula" no texto. Mesma
-		// armadilha no fluxo da D6: a recusa ambigua mostra o nome do
-		// candidato, e quem reescreve o texto com o nome que a ponte mostrou
-		// tomava 400.
+		// que "@Ana Paula" nao esta no texto, com "@Ana Paula" no texto.
+		//
+		// Mas ligar por JID sozinho reintroduz o defeito que a D6 existe para
+		// impedir (achado da rodada 5): se o mesmo NOME pertence a mais de um
+		// participante, substituir e escolher por conta propria qual dos dois
+		// o autor quis — so que reescrevendo o texto dele, nao a notificacao.
+		// Entao nome compartilhado so liga quando o usuario JA desambiguou,
+		// isto e, quando a mencao veio por "ref:". Fora disso fica intacto, e
+		// no maximo se paga uma recusa — que e a falha segura.
+		donos := 0
+		for _, outro := range outrosNomes {
+			if outro.nome == n.nome && outro.jid != n.jid {
+				donos++
+			}
+		}
 		idx := -1
 		for i, r := range resolved {
-			if r.jid != "" && r.jid == n.jid {
-				idx = i
+			if r.jid == "" || r.jid != n.jid {
+				continue
+			}
+			if donos > 0 && !r.viaRef {
 				break
 			}
+			idx = i
+			break
 		}
 		cands = append(cands, candidato{nome: n.nome, idx: idx})
 	}
 	sort.SliceStable(cands, func(a, b int) bool {
-		return len(cands[a].nome) > len(cands[b].nome)
+		if len(cands[a].nome) != len(cands[b].nome) {
+			return len(cands[a].nome) > len(cands[b].nome)
+		}
+		// Mesmo nome, duas pessoas: quem esta ligado a uma mencao pedida vem
+		// primeiro. Sem este desempate, o homonimo que NAO foi pedido casava
+		// antes, ficava intacto, e a mencao morria sem ancora — a recusa
+		// contraditoria da observacao 1 da rodada 5, no caminho que o README
+		// ensina (recusa ambigua -> reenvio por ref).
+		return cands[a].idx >= 0 && cands[b].idx < 0
 	})
 
 	usados := make([]bool, len(resolved))

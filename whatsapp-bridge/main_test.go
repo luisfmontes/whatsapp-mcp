@@ -3002,6 +3002,78 @@ func TestSweepDeRefsExpirados(t *testing.T) {
 	}
 }
 
+// TestRefReenviaComONomeQueAPonteMostrou cobre o caminho feliz da D6, que nao
+// tinha bateria nenhuma (observacao 3 da rodada 5): a recusa ambigua devolve
+// `candidates[].Nome`, o autor reescreve o texto com esse nome, e o reenvio por
+// ref tem de sair. Cobre tambem a observacao 1: o ref guarda o `raw` pedido
+// ("Luis", sem acento), enquanto o texto tem o nome do participante ("Luís") —
+// e nome compartilhado por dois participantes so liga quando o usuario ja
+// desambiguou, que e exatamente este caso.
+func TestRefReenviaComONomeQueAPonteMostrou(t *testing.T) {
+	participants := []mentionParticipant{
+		{jid: "contato-um@s.whatsapp.net", phoneUser: "contato-um", firstName: "Luís", fullName: "Luís Um"},
+		{jid: "contato-dois@s.whatsapp.net", phoneUser: "contato-dois", firstName: "Luís", fullName: "Luís Dois"},
+	}
+	_, _, candidates, _, status := resolveMentionsAgainstParticipants(participants, []string{"Luis"}, chatDeTeste)
+	if status != http.StatusBadRequest || len(candidates) != 2 {
+		t.Fatalf("esperava recusa ambigua com 2 candidatos, veio status=%d candidatos=%d", status, len(candidates))
+	}
+	if candidates[1].Nome != "Luís" {
+		t.Fatalf("candidates[1].Nome = %q, want the participant name the bridge shows", candidates[1].Nome)
+	}
+
+	// O autor reescreve o texto com o nome que a ponte mostrou.
+	resolved, outrosNomes, _, errMsg, _ := resolveMentionsAgainstParticipants(
+		participants, []string{"ref:" + candidates[1].Ref}, chatDeTeste)
+	if errMsg != "" {
+		t.Fatalf("unexpected refusal resolving the ref: %v", errMsg)
+	}
+	texto, jids, ancoraErr, _ := applyMentions("bom dia @Luís", resolved, outrosNomes)
+	if ancoraErr != "" {
+		t.Fatalf("unexpected anchor refusal: %v", ancoraErr)
+	}
+	if texto != "bom dia @contato-dois" {
+		t.Fatalf("texto = %q, want the chosen candidate substituted", texto)
+	}
+	if len(jids) != 1 || jids[0] != "contato-dois@s.whatsapp.net" {
+		t.Fatalf("jids = %v, want only the chosen candidate", jids)
+	}
+}
+
+// TestNomeCompartilhadoNaoLigaSemDesambiguacao cobre a observacao 2 da rodada 5:
+// o conserto da rodada 4 ligou nome de participante a mencao pedida pelo JID, e
+// isso reintroduzia, pelo texto, a escolha que a D6 existe para nao deixar a
+// ponte fazer sozinha — quando o MESMO nome pertence a dois participantes.
+func TestNomeCompartilhadoNaoLigaSemDesambiguacao(t *testing.T) {
+	ana := resolvedMention{name: "Ana", phoneUser: "ana-user", jid: "ana@s.whatsapp.net"}
+	// "Ana Paula" e nome da propria Ana E de uma terceira pessoa.
+	outros := []nomeDeParticipante{
+		{nome: "Ana Paula", jid: ana.jid},
+		{nome: "Ana Paula", jid: "beatriz@s.whatsapp.net"},
+	}
+	texto, jids, errMsg, _ := applyMentions("bom dia @Ana Paula, avisa a @Ana", []resolvedMention{ana}, outros)
+	if errMsg != "" {
+		t.Fatalf("unexpected refusal: %v", errMsg)
+	}
+	if texto != "bom dia @Ana Paula, avisa a @ana-user" {
+		t.Fatalf("texto = %q, want the shared name left intact", texto)
+	}
+	if len(jids) != 1 || jids[0] != ana.jid {
+		t.Fatalf("jids = %v", jids)
+	}
+
+	// Com desambiguacao explicita (viaRef), o mesmo nome compartilhado liga.
+	anaViaRef := ana
+	anaViaRef.viaRef = true
+	texto, _, errMsg, _ = applyMentions("bom dia @Ana Paula", []resolvedMention{anaViaRef}, outros)
+	if errMsg != "" {
+		t.Fatalf("unexpected refusal after explicit disambiguation: %v", errMsg)
+	}
+	if texto != "bom dia @ana-user" {
+		t.Fatalf("texto = %q, want the shared name substituted once the user disambiguated", texto)
+	}
+}
+
 // TestResolveDevolveNomesDoChat cobre a fiacao entre resolveMentions e
 // applyMentions: a varredura so consegue deixar "@Ana Paula" intacto se
 // receber os nomes de QUEM MAIS esta no chat, e quem os conhece e a resolucao.
