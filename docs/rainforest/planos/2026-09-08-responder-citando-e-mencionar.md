@@ -409,6 +409,19 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   os `PushEvent` pré-reescrita, sem autenticação. Ou seja, há rota pública de
   descoberta. Só o Support do GitHub remove objeto do storage da rede de forks;
   enquanto não removerem, o dado segue acessível a quem procurar.
-  O que pesa do outro lado: é JID de grupo — opaco, não deriva de telefone, não
-  dá acesso ao grupo sem convite. **Decisão do usuário, registrada aqui quando
-  ele decidir.**
+  **Decidido pelo Luís em 2026-09-11: aceitar o resíduo, sem chamado no Support
+  e sem apagar o fork.** O motivo é o que o dado é: um `@g.us` é identificador
+  opaco — não carrega telefone, e ninguém entra no grupo com ele (entrar exige
+  link de convite com token, ou um admin adicionar). O que ele revela é que o
+  grupo existe, e o grupo é entre as duas contas do próprio Luís. O custo do
+  caminho alternativo era desproporcional: apagar o fork levaria junto 19 PRs
+  (17 mesclados, com as threads de review) e a Issue #18 — que é a tarefa 11
+  deste mesmo trabalho — e ainda assim não tiraria o objeto do repositório pai,
+  porque a rede de forks é compartilhada.
+
+  **O que fica valendo daqui para a frente, e é a parte que não é opinião:** a
+  trava (`scripts/check-personal-data.py`) agora enxerga `@g.us` e `@lid`, e
+  passa a barrar a próxima ocorrência. E o limite dela continua escrito: ela
+  roda no push (`.github/workflows/build.yml`), nunca antes do commit — pega
+  depois da exposição, que é exatamente a mecânica deste incidente. Fechar isso
+  pede um hook de pre-commit, que não foi feito aqui.
