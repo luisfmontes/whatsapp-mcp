@@ -25,7 +25,7 @@
     "catraca_mutacao": "2026-09-08",
     "tarefas_ok": 11,
     "tarefas": 11,
-    "em": "2026-09-09",
+    "em": "2026-09-11",
     "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN.",
     "mutacao_conferida": [
       {
@@ -73,7 +73,7 @@
     ],
     "pr": 19,
     "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m unittest test_scrub_mentions test_public_dict test_display_name test_reply_mentions test_transcribe) ; python scripts/check-personal-data.py",
-    "saida": "gofmt e go vet sem saida; ok whatsapp-client 0.982s (exit 0); Ran 56 tests OK; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client (exit 0); Ran 59 tests OK; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -98,7 +98,7 @@
       {
         "tarefa": 5,
         "resultado": "vermelho",
-        "fixture": "TestApplyMentionsPrefixo/nome_curto_nao_come_o_prefixo_do_longo"
+        "fixture": "TestApplyMentionsPrefixo/nome_pedido_nao_come_o_nome_de_participante_nao_pedido"
       },
       {
         "tarefa": 6,
@@ -108,7 +108,7 @@
       {
         "tarefa": 7,
         "resultado": "vermelho",
-        "fixture": "test_scrub_mentions.CitacaoNaoVazaNumeroDeTerceiroTest.test_dict_publico_nao_carrega_o_numero_do_terceiro"
+        "fixture": "test_scrub_mentions.UltimaMensagemDoChatTest.test_last_message_passa_pela_limpeza"
       },
       {
         "tarefa": 8,
@@ -131,7 +131,7 @@
         "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
       }
     ],
-    "rodada": 3,
+    "rodada": 4,
     "achados_da_revisao_fechados": [
       1,
       2,
@@ -142,10 +142,22 @@
       1,
       2,
       3
-    ]
+    ],
+    "bloqueantes_rodada3_fechados": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "reescrita_de_historico": {
+      "quando": "2026-09-11",
+      "como": "git filter-branch --tree-filter sobre origin/main..HEAD, push com --force-with-lease",
+      "backup_local": "backup/citacao-antes-da-reescrita",
+      "limite": "objetos orfaos podem seguir alcancaveis por SHA no GitHub ate o GC da rede de forks"
+    }
   },
   "revisar": {
-    "status": "parcial",
+    "status": "reprovado",
     "snapshot": {
       "head": "67d580be43018f34b1827c282773bf0b0706600e",
       "caminhos_sujos": [
@@ -160,12 +172,13 @@
       }
     ],
     "em": "2026-09-09",
-    "achados": 11,
-    "bloqueiam": 3,
+    "achados": 12,
+    "bloqueiam": 4,
     "lista": [
-      "quoted_content sai cru na leitura e por protocolo carrega @<numero> de terceiro - mesma classe do achado 1 da rodada 1, num campo vizinho",
-      "applyMentions substitui por substring sem ordenar por comprimento: com Ana e Ana Paula no mesmo texto, Ana e grifada no lugar de Ana Paula e Ana Paula recebe mencao sem ancora",
-      "JID de grupo real gravado em docs/rainforest/estado (arquivo versionado de repo publico), contra a linha escrita do proprio plano - e o check-personal-data nao ve @g.us nem @lid"
+      "JID real do grupo publicado em 9 commits ja empurrados para origin (fork publico); so o tip esta limpo, e o job de CI roda sobre a working tree, nunca sobre o historico",
+      "applyMentions casava prefixo sem fronteira e so desempatava entre nomes PEDIDOS: com Ana pedida e Ana Paula participante nao pedida, @Ana Paula virava @<numero da Ana> Paula sem a D6 poder segurar; e @RodrigoPG virava @<numero>PG",
+      "Chat.last_message saia cru em list_chats/get_chat/get_contact_chats/get_direct_chat_by_contact - mencao na ultima mensagem do chat vazava o numero pela tool mais usada",
+      "send_file(mentions=...) era recusa garantida: a rota de midia nao manda message, entao nunca ha ancora e a ponte devolve 400 em 100% das chamadas"
     ],
     "observacoes": [
       "docstring de send_message promete campo candidates que o dict de retorno nao tem",
@@ -177,12 +190,19 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 3,
-    "creep": 2,
+    "tentativas": 4,
+    "creep": 0,
     "creep_lista": [
       "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",
       "docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md"
-    ]
+    ],
+    "fechados_nesta_rodada": [
+      2,
+      3,
+      4
+    ],
+    "pendente": "bloqueante 1 depende de decisao do usuario sobre reescrever a branch e force-push no PR 19",
+    "head_com_correcoes": "0506eeb"
   },
   "verificar": {
     "status": "pendente"

@@ -379,3 +379,22 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `messages.content`. Basta a última mensagem do chat ser uma menção para o
   número do mencionado sair pela tool mais usada do servidor. Pré-existente ao
   trabalho, mas dentro da D3 e dentro da alegação que se fez.
+
+- **2026-09-11 (rodada 3, bloqueante 1) — a tarefa 12 ganha a reescrita da
+  branch.** Tirar o JID do arquivo num commit posterior não desfaz um push: os
+  nove commits de `05316f7` a `af34dd5` já estavam em `origin`, que é fork de
+  repositório público, e o próprio docstring da trava
+  (`scripts/check-personal-data.py`) diz por quê — "in a fork network the object
+  is still served by SHA". Pior, o job `personal data` da CI roda sobre a
+  *working tree*, nunca sobre o histórico: ele era verde e sempre seria, por
+  construção. A branch foi reescrita com `git filter-branch --tree-filter` sobre
+  `origin/main..HEAD` e empurrada com `--force-with-lease`.
+  `pronto quando:` nenhum commit de `origin/main..origin/feat/citacao-e-mencao`
+  serve o campo com forma de JID de grupo — provado por laço de `git show` sobre
+  `git rev-list` procurando `[0-9]{12,25}@g\.us` no arquivo de estado, sem
+  nenhuma saída; e `git diff --stat backup/citacao-antes-da-reescrita HEAD`
+  vazio, provando que só o histórico mudou, não a entrega.
+  Limite que fica escrito em vez de ficar implícito: objetos órfãos podem seguir
+  alcançáveis por SHA no GitHub até o GC da rede de forks. O dado é um JID de
+  grupo (opaco, não deriva de telefone, não dá acesso sem convite), então não se
+  abriu chamado no Support — a decisão foi essa, não um esquecimento.
