@@ -31,6 +31,7 @@ from whatsapp import (
 # público e a trava de dado pessoal recusa a sequência escrita por extenso.
 DDI_DDD = "55" + "62"
 FALSO = DDI_DDD + "0" * 6 + "33"
+OUTRO_FALSO = DDI_DDD + "0" * 6 + "44"
 
 
 def _msg(**kw):
@@ -131,11 +132,16 @@ class LinhaFromTest(unittest.TestCase):
     """
 
     def test_nome_que_nao_resolve_vira_marcador_e_nao_o_numero(self):
-        msg = _msg(sender=FALSO + "@s.whatsapp.net")
+        # Linha INTEIRA, com show_chat_info ligado: a versao anterior deste
+        # teste desligava o cabecalho do chat e o fixture fixava um chat_name
+        # legivel, entao ele media meia linha — e a metade nao medida era o
+        # bloqueante 1 da rodada 6 (achado da propria rodada 6).
+        msg = _msg(sender=FALSO + "@s.whatsapp.net", chat_name=OUTRO_FALSO)
         with mock.patch("whatsapp.get_sender_name", side_effect=lambda j, a=None: j):
-            saida = format_message(msg, show_chat_info=False)
-        self.assertNotIn(FALSO, saida)
+            saida = format_message(msg, show_chat_info=True)
+        self.assertEqual(re.findall(r"\d{8,}", saida), [])
         self.assertIn("From: " + UNNAMED_CONTACT, saida)
+        self.assertIn("Chat: " + UNNAMED_CONTACT, saida)
         self.assertIn("corpo da mensagem", saida)
 
     def test_nome_que_resolve_continua_saindo(self):
@@ -180,6 +186,51 @@ class UltimoRemetenteDoChatTest(unittest.TestCase):
 
     def test_campo_cru_nao_existe_mais(self):
         self.assertFalse(hasattr(Chat(jid="x@g.us", name="x", last_message_time=None), "last_sender"))
+
+
+class NomeDoChatTest(unittest.TestCase):
+    """Bloqueante 1 da rodada 6: `chats.name` cai no telefone quando o contato
+    nao tem nome — a ponte faz `name = sender` e depois `name = jid.User`, que
+    sao a parte de usuario do JID. Medido no store real em 2026-09-11: 1.658 de
+    2.162 chats 1:1 com o nome igual ao numero. Era a mesma linha em que
+    `From:` ja dizia "(contato sem nome)", um campo a esquerda.
+    """
+
+    def test_nome_de_chat_com_forma_de_telefone_vira_marcador(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name=FALSO))
+        self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
+        self.assertNotIn(FALSO, repr(d))
+
+    def test_nome_de_chat_de_verdade_continua_saindo(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name="Grupo do Trabalho"))
+        self.assertEqual(d["chat_name"], "Grupo do Trabalho")
+
+    def test_lista_de_chats_tambem(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            chat = _chat_from_dict({"jid": "contato@s.whatsapp.net", "name": FALSO})
+        self.assertEqual(chat.name, UNNAMED_CONTACT)
+        self.assertNotIn(FALSO, repr(chat))
+
+
+class ContaDoUltimoRemetenteTest(unittest.TestCase):
+    """Bloqueante 2 da rodada 6: `_chat_from_dict` resolvia o nome contra a
+    conta PRIMARIA, nao contra a conta de quem pediu a lista — o campo criado
+    na rodada 5 para mostrar nome mostrava o marcador justamente quando o nome
+    existia na outra ponte, e podia trazer o rotulo da conta errada.
+    """
+
+    def test_a_conta_pedida_e_a_que_resolve_o_nome(self):
+        vistas = []
+
+        def espiao(jid, account=None):
+            vistas.append(account)
+            return "Fulana"
+
+        with mock.patch("whatsapp.get_sender_name", side_effect=espiao):
+            _chat_from_dict({"jid": "g@g.us", "name": "Grupo", "last_sender": FALSO}, "trabalho")
+        self.assertEqual(vistas, ["trabalho"])
 
 
 class NomeQueEUmTelefoneTest(unittest.TestCase):

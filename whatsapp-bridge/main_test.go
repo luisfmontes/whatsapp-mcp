@@ -3074,6 +3074,48 @@ func TestNomeCompartilhadoNaoLigaSemDesambiguacao(t *testing.T) {
 	}
 }
 
+// TestDoisHomonimosPorRefNaMesmaMensagem cobre a observacao 1 da rodada 6: a
+// varredura casava sempre o primeiro candidato da lista ordenada, entao as duas
+// ancoras "@Luís" viravam a MESMA pessoa, a segunda mencao ficava sem uso, e a
+// ponte recusava dizendo que a ancora nao existe — com ela escrita duas vezes.
+// Caminho que o README ensina, e que ficava impossivel de completar.
+func TestDoisHomonimosPorRefNaMesmaMensagem(t *testing.T) {
+	um := resolvedMention{name: "Luis", phoneUser: "c-um", jid: "c-um@s.whatsapp.net", viaRef: true}
+	dois := resolvedMention{name: "Luis", phoneUser: "c-dois", jid: "c-dois@s.whatsapp.net", viaRef: true}
+	outros := []nomeDeParticipante{
+		{nome: "Luís", jid: um.jid},
+		{nome: "Luís", jid: dois.jid},
+	}
+	texto, jids, errMsg, _ := applyMentions("bom dia @Luís e @Luís", []resolvedMention{um, dois}, outros)
+	if errMsg != "" {
+		t.Fatalf("unexpected refusal: %v", errMsg)
+	}
+	if texto != "bom dia @c-um e @c-dois" {
+		t.Fatalf("texto = %q, want one anchor per person", texto)
+	}
+	if len(jids) != 2 {
+		t.Fatalf("jids = %v, want both mentions", jids)
+	}
+}
+
+// TestMencaoPorNumeroRecusaExplicitamente cobre a observacao 5 da rodada 6: a
+// defesa contra mencionar por numero era acidental ("numero nao casa nome").
+// Basta o push_name de alguem SER o proprio telefone — medido: 1 em 2.547
+// remetentes do store real — para a borda abrir.
+func TestMencaoPorNumeroRecusaExplicitamente(t *testing.T) {
+	const comCaraDeTelefone = "5562" + "000000" + "55"
+	participants := []mentionParticipant{
+		{jid: "contato-a@s.whatsapp.net", phoneUser: "contato-a", pushName: comCaraDeTelefone},
+	}
+	if m := matchMentionName(participants, comCaraDeTelefone); m != nil {
+		t.Fatalf("matches = %v, want none — a mention is by name, never by number", m)
+	}
+	_, _, _, errMsg, status := resolveMentionsAgainstParticipants(participants, []string{comCaraDeTelefone}, chatDeTeste)
+	if errMsg == "" || status != http.StatusBadRequest {
+		t.Fatalf("errMsg=%q status=%d, want a 400 refusal", errMsg, status)
+	}
+}
+
 // TestResolveDevolveNomesDoChat cobre a fiacao entre resolveMentions e
 // applyMentions: a varredura so consegue deixar "@Ana Paula" intacto se
 // receber os nomes de QUEM MAIS esta no chat, e quem os conhece e a resolucao.

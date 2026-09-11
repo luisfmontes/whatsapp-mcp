@@ -950,9 +950,6 @@ func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
 // is skipped: there's no number to mention them with.
 func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID) ([]mentionParticipant, error) {
 	if chatJID.Server != types.GroupServer {
-		if chatJID.Server != types.DefaultUserServer {
-			return nil, fmt.Errorf("this conversation is addressed as %s, and a mention only renders against a phone-number address", chatJID.Server)
-		}
 		p := mentionParticipant{jid: chatJID.String(), phoneUser: chatJID.User}
 		messageStore.fillSenderNames(&p)
 		return []mentionParticipant{p}, nil
@@ -973,6 +970,19 @@ func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chat
 	return participants, nil
 }
 
+// digitosDe devolve so os digitos de s — o teste de "isto tem cara de
+// telefone?" que a D3 usa nas duas pontas: aqui, para nao casar nome por
+// numero; e no servidor MCP, para nao imprimir numero no lugar de nome.
+func digitosDe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // matchMentionName finds every participant whose full_name, first_name,
 // push_name or business_name matches name exactly (case/accent-insensitive,
 // via stripAccents) — never a substring or prefix match, so requesting
@@ -983,6 +993,14 @@ func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chat
 func matchMentionName(participants []mentionParticipant, name string) []mentionMatch {
 	target := stripAccents(strings.TrimSpace(name))
 	if target == "" {
+		return nil
+	}
+	// Mencao se faz por NOME, nunca por numero (D3, palavra do Luis). Hoje um
+	// numero pedido nao casaria nome nenhum — mas isso e acidente, nao defesa:
+	// basta o push_name de alguem SER o proprio telefone (medido: 1 em 2.547
+	// remetentes do store real) para a borda abrir. Restricao dura merece
+	// guarda explicita.
+	if len(digitosDe(target)) >= 8 {
 		return nil
 	}
 	var matches []mentionMatch
@@ -1127,6 +1145,16 @@ func semDispositivo(jid string) string {
 func resolveMentions(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID, mentions []string) ([]resolvedMention, []nomeDeParticipante, []MentionCandidateResponse, string, int) {
 	if len(mentions) == 0 {
 		return nil, nil, nil, "", 0
+	}
+	// Mencao so renderiza contra endereco de telefone: num 1:1 endereçado por
+	// @lid o texto sairia com um identificador estranho e o WhatsApp nao
+	// grifaria nada. Recusa, e recusa 4xx — a ponte nao errou, o pedido e que
+	// nao cabe naquela conversa (observacao 2 da rodada 6: isto saia 500).
+	if chatJID.Server != types.GroupServer && chatJID.Server != types.DefaultUserServer {
+		return nil, nil, nil, fmt.Sprintf(
+			"this conversation is addressed as %s, and a mention only renders against a phone-number address",
+			chatJID.Server,
+		), http.StatusBadRequest
 	}
 	participants, err := chatParticipants(client, messageStore, chatJID)
 	if err != nil {
@@ -1318,30 +1346,42 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			i++
 			continue
 		}
-		casou := false
-		for _, c := range cands {
-			if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
-				continue
+		// Duas passadas: primeiro procura um candidato AINDA NAO usado, so
+		// depois aceita repetir. Sem isso, dois homonimos desambiguados por
+		// ref na mesma mensagem casavam os dois "@Luís" na mesma pessoa, e a
+		// outra mencao morria sem ancora — recusa dizendo que a ancora nao
+		// existe, com ela escrita duas vezes (observacao 1 da rodada 6).
+		escolhido := -1
+		for passada := 0; passada < 2 && escolhido < 0; passada++ {
+			for ci, c := range cands {
+				if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
+					continue
+				}
+				if passada == 0 && c.idx >= 0 && usados[c.idx] {
+					continue
+				}
+				escolhido = ci
+				break
 			}
-			casou = true
-			b.WriteString("@")
-			if c.idx >= 0 {
-				b.WriteString(resolved[c.idx].phoneUser)
-				usados[c.idx] = true
-			} else {
-				// Nome de participante que ninguém pediu: fica como está
-				// (D5 — "@" não listado passa intacto).
-				b.WriteString(c.nome)
-			}
-			i += 1 + len(c.nome)
-			break
 		}
-		if !casou {
+		if escolhido < 0 {
 			// Nada casou nesta posição: nem nome pedido, nem nome de
 			// participante. Copia o "@" e segue.
 			b.WriteByte(text[i])
 			i++
+			continue
 		}
+		c := cands[escolhido]
+		b.WriteString("@")
+		if c.idx >= 0 {
+			b.WriteString(resolved[c.idx].phoneUser)
+			usados[c.idx] = true
+		} else {
+			// Nome de participante que ninguém pediu: fica como está
+			// (D5 — "@" não listado passa intacto).
+			b.WriteString(c.nome)
+		}
+		i += 1 + len(c.nome)
 	}
 
 	mentionedJIDs := make([]string, 0, len(resolved))

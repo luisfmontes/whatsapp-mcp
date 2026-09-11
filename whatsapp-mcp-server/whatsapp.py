@@ -254,10 +254,10 @@ def _message_from_dict(d: dict) -> Message:
     )
 
 
-def _chat_from_dict(d: dict) -> Chat:
+def _chat_from_dict(d: dict, account: Optional[str] = None) -> Chat:
     return Chat(
         jid=d.get("jid"),
-        name=d.get("name"),
+        name=_nome_visivel(d.get("name")),
         last_message_time=_parse_ts(d.get("last_message_time")),
         # `last_message` é o corpo cru de `messages.content`, e um corpo que
         # menciona alguém carrega "@<número>" por protocolo. `list_chats` é a
@@ -265,7 +265,7 @@ def _chat_from_dict(d: dict) -> Chat:
         # mensagem do chat ser uma menção para o número do mencionado sair
         # daqui. A D3 não distingue por qual tool o número escapa.
         last_message=_scrub_mention_numbers(d.get("last_message")),
-        last_sender_name=_display_name(d.get("last_sender")) if d.get("last_sender") else None,
+        last_sender_name=_display_name(d.get("last_sender"), account) if d.get("last_sender") else None,
         last_is_from_me=d.get("last_is_from_me"),
     )
 
@@ -333,6 +333,22 @@ def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) ->
     if len(re.sub(r"\D", "", name)) >= 8:
         return UNNAMED_CONTACT, None
     return name, None
+
+
+def _nome_visivel(nome: Optional[str]) -> Optional[str]:
+    """Nome que veio pronto (de `chats.name`), filtrado pela mesma régua da D3.
+
+    Diferente de `_display_name`, aqui não há JID para consultar: a ponte já
+    resolveu, e quando não conseguiu resolveu para o próprio número —
+    `main.go` cai em `name = sender` e depois em `name = jid.User`, que são a
+    parte de usuário do JID. O que este filtro faz é não repetir esse número
+    na superfície de leitura.
+    """
+    if not nome:
+        return nome
+    if len(re.sub(r"\D", "", nome)) >= 8:
+        return UNNAMED_CONTACT
+    return nome
 
 
 def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
@@ -447,7 +463,7 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
         "sender": message.sender,
         "sender_name": "Me" if message.is_from_me else _display_name(message.sender, account),
         "chat_jid": message.chat_jid,
-        "chat_name": message.chat_name,
+        "chat_name": _nome_visivel(message.chat_name),
         "content": _scrub_mention_numbers(
             _mentions_by_name(message.content, message.mentions, account)
         ),
@@ -466,7 +482,7 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
     ts_str = f"{message.timestamp:%Y-%m-%d %H:%M:%S}" if message.timestamp else "unknown time"
 
     if show_chat_info and message.chat_name:
-        output += f"[{ts_str}] Chat: {message.chat_name} "
+        output += f"[{ts_str}] Chat: {_nome_visivel(message.chat_name)} "
     else:
         output += f"[{ts_str}] "
 
@@ -681,7 +697,7 @@ def list_chats(
     if result is None:
         return []
 
-    return [_chat_from_dict(c) for c in result.get("chats", [])]
+    return [_chat_from_dict(c, account) for c in result.get("chats", [])]
 
 
 def search_contacts(query: str, account: Optional[str] = None) -> List[Contact]:
@@ -728,7 +744,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optiona
     if result is None:
         return []
 
-    return [_chat_from_dict(c) for c in result.get("chats", [])]
+    return [_chat_from_dict(c, account) for c in result.get("chats", [])]
 
 
 def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
@@ -776,7 +792,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional
     if not chat_data:
         return None
 
-    return _chat_from_dict(chat_data)
+    return _chat_from_dict(chat_data, account)
 
 
 def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] = None) -> Optional[Chat]:
@@ -795,7 +811,7 @@ def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] 
     if not chat_data:
         return None
 
-    return _chat_from_dict(chat_data)
+    return _chat_from_dict(chat_data, account)
 
 def send_message(
     recipient: str,

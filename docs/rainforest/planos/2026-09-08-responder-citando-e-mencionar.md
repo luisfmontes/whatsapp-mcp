@@ -194,7 +194,7 @@ mais confirmação visual no celular de que a reação está no balão certo.
 
 ### 7. Superfície de leitura: REST e servidor MCP [tipo: implementar]
 atende: D13
-arquivos: `whatsapp-bridge/main.go`, `whatsapp-bridge/main_test.go`, `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/main.py`, `whatsapp-mcp-server/test_reply_mentions.py`, `whatsapp-mcp-server/test_display_name.py`, `whatsapp-mcp-server/test_public_dict.py`
+arquivos: `whatsapp-bridge/main.go`, `whatsapp-bridge/main_test.go`, `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/main.py`, `whatsapp-mcp-server/test_reply_mentions.py`, `whatsapp-mcp-server/test_display_name.py`, `whatsapp-mcp-server/test_public_dict.py`, `whatsapp-mcp-server/test_api_errors.py`
 depende de: 3, 4, 5
 paralela: nao
 
@@ -477,3 +477,50 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   recusa, com o nome que a ponte mostrou escrito no texto — provado por
   `TestRefReenviaComONomeQueAPonteMostrou`, que não existia (o caminho feliz da
   D6 não tinha bateria nenhuma até aqui).
+
+- **2026-09-11 (rodada 6) — o nome do chat também passa pela régua, e é a
+  última superfície fora do carve-out.** `chats.name` cai no telefone quando o
+  contato não tem nome: a ponte faz `name = sender` e depois `name = jid.User`,
+  que são a parte de usuário do JID. Medido no store real em 2026-09-11:
+  **1.658 de 2.162 chats 1:1 com o nome exatamente igual ao número**. Era o
+  campo imediatamente à esquerda do `From:` que a rodada 5 acabara de limpar, na
+  mesma linha impressa. Entra porque o README **deste diff** afirma, em texto
+  novo, que toda superfície de leitura responde por nome — alegação escrita
+  aqui, e falsa enquanto este campo saísse cru.
+  **Custo aceito:** conversa 1:1 com quem não está na agenda passa a aparecer
+  como `Chat: (contato sem nome)`. O `chat_jid` continua nas respostas
+  estruturadas, então endereçar continua possível; o que se perde é distinguir
+  duas conversas sem nome na saída em texto.
+  `pronto quando:` `format_message` com `show_chat_info=True`, remetente e nome
+  de chat ambos em forma de telefone, não imprime nenhuma sequência de 8+
+  dígitos — provado por `test_scrub_mentions.NomeDoChatTest` e pela asserção de
+  linha inteira em `LinhaFromTest`.
+
+- **2026-09-11 (rodada 6) — `last_sender_name` resolvia contra a conta errada.**
+  `_chat_from_dict` não recebia `account`, então `get_sender_name` caía em
+  `accounts.resolve_account(None)` — a conta **primária** — enquanto a lista de
+  chats vinha da conta pedida. Dois resultados errados: nome perdido (a ponte
+  pedida conhece, a primária não) e rótulo da conta errada atravessando a
+  fronteira que o cache de nomes existe para manter. Defeito introduzido pela
+  rodada 5, fechado com `account` repassado nos quatro chamadores.
+
+- **2026-09-11 (rodada 6) — `whatsapp-mcp-server/test_api_errors.py` entra em
+  `arquivos:` da tarefa 7.** A rodada 5 alterou o arquivo e descreveu a
+  alteração em prosa, mas não o acrescentou à lista — creep pela mesma régua que
+  cobrou `test_display_name.py` e `test_public_dict.py` na rodada 2.
+
+- **2026-09-11 (rodada 6) — duas correções no caminho de menção, vindas de
+  observação.** (i) Dois homônimos desambiguados por `ref` na mesma mensagem
+  casavam as duas âncoras na mesma pessoa, e a segunda menção morria sem uso:
+  a varredura passa a fazer duas passadas, preferindo candidato ainda não usado.
+  (ii) A defesa contra mencionar por número era acidental — "número não casa
+  nome" — e bastava o `push_name` de alguém **ser** o próprio telefone (medido:
+  1 em 2.547 remetentes do store real) para a borda abrir; `matchMentionName`
+  ganha guarda explícita de dígitos. Restrição dura merece guarda escrita, não
+  guarda por coincidência.
+
+- **2026-09-11 (rodada 6) — recusa de menção em 1:1 não endereçado por telefone
+  sai 400, não 500.** A checagem subiu de `chatParticipants` para
+  `resolveMentions`, que sabe devolver status. O README documenta 400 para toda
+  recusa de menção, e a ponte não errou: o pedido é que não cabe naquela
+  conversa.

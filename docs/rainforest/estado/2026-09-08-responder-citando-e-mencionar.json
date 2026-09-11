@@ -72,8 +72,8 @@
       "corpo da mensagem passa a exibir @Nome no lugar de @numero na leitura"
     ],
     "pr": 19,
-    "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m unittest test_scrub_mentions test_public_dict test_display_name test_reply_mentions test_transcribe) ; (cd whatsapp-mcp-server && python -m pytest test_api_errors.py -q) ; python scripts/check-personal-data.py",
-    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.279s (exit 0); Ran 65 tests OK; 8 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m pytest -q) ; python scripts/check-personal-data.py",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.469s (exit 0); 157 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -98,7 +98,7 @@
       {
         "tarefa": 5,
         "resultado": "vermelho",
-        "fixture": "TestNomeCompartilhadoNaoLigaSemDesambiguacao"
+        "fixture": "TestMencaoPorNumeroRecusaExplicitamente"
       },
       {
         "tarefa": 6,
@@ -108,7 +108,7 @@
       {
         "tarefa": 7,
         "resultado": "vermelho",
-        "fixture": "test_scrub_mentions.LinhaFromTest.test_nome_que_nao_resolve_vira_marcador_e_nao_o_numero"
+        "fixture": "test_scrub_mentions.NomeDoChatTest.test_nome_de_chat_com_forma_de_telefone_vira_marcador"
       },
       {
         "tarefa": 8,
@@ -131,7 +131,7 @@
         "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
       }
     ],
-    "rodada": 6,
+    "rodada": 7,
     "achados_da_revisao_fechados": [
       1,
       2,
@@ -160,18 +160,23 @@
     "bloqueantes_rodada5_fechados": [
       1,
       2
-    ]
+    ],
+    "bloqueantes_rodada6_fechados": [
+      1,
+      2
+    ],
+    "creep_rodada6_fechado": true
   },
   "revisar": {
     "status": "reprovado",
     "snapshot": {
-      "head": "543a7fe9fb634001af86c411cc409c2fb2b5eed3",
+      "head": "d439bba2f85f61109bc4b4787cf9c04e3f7a45d3",
       "caminhos_sujos": []
     },
     "em_voo": [
       {
         "agente": "revisor",
-        "tarefa": "revisao independente da rodada 5, diff 22dbfc2...543a7fe (PR 19)",
+        "tarefa": "revisao independente da rodada 6, diff 22dbfc2...d439bba (PR 19)",
         "desde": "2026-09-11"
       }
     ],
@@ -179,8 +184,8 @@
     "achados": 9,
     "bloqueiam": 2,
     "lista": [
-      "a linha From de list_messages caia no identificador cru quando o nome nao resolvia - 130 de 665 remetentes, 2152 mensagens, 100% com forma de telefone no store real",
-      "Chat.last_sender saia cru: em chat de grupo o jid e @g.us e nao carrega numero, entao era o unico lugar por onde o telefone de um terceiro saia em list_chats - 31 de 141 grupos"
+      "chat_name e Chat.name saiam crus: chats.name cai no telefone quando o contato nao tem nome - 1658 de 2162 chats 1:1 do store real. E o README deste diff afirma que toda superficie de leitura responde por nome",
+      "last_sender_name resolvia contra a conta primaria, nao contra a conta de quem pediu a lista - nome perdido e rotulo da conta errada atravessando a fronteira"
     ],
     "observacoes": [
       "docstring de send_message promete campo candidates que o dict de retorno nao tem",
@@ -192,11 +197,10 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 6,
-    "creep": 0,
+    "tentativas": 7,
+    "creep": 1,
     "creep_lista": [
-      "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",
-      "docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md"
+      "whatsapp-mcp-server/test_api_errors.py sem arquivos: de tarefa nenhuma"
     ],
     "fechados_nesta_rodada": [
       2
