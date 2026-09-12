@@ -235,6 +235,26 @@ class NomeComDigitosMasDeVerdadeTest(unittest.TestCase):
         self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
 
 
+class LinhaDeMidiaSemEnderecoTest(unittest.TestCase):
+    """Verificacao do criterio 7, rodada contra as pontes reais em 2026-09-12:
+    a linha de midia era o unico lugar onde a prosa ainda imprimia digitos —
+    `Chat JID:`, que em 1:1 E o telefone e em grupo e um identificador de 18
+    digitos. O `Message ID` fica: e opaco, e e o que download_media precisa
+    junto do chat_jid que quem chama ja tem.
+    """
+
+    def test_linha_de_midia_nao_imprime_endereco(self):
+        jid_grupo = "120363" + "9" * 12 + "@g.us"
+        msg = _msg(media_type="image", chat_jid=jid_grupo)
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            saida = whatsapp.format_message(msg)
+        self.assertNotIn("Chat JID", saida)
+        self.assertNotIn(jid_grupo, saida)
+        self.assertEqual(re.findall(r"\d{8,}", saida), [])
+        # o id opaco continua la, senao quem le nao consegue baixar
+        self.assertIn(msg.id, saida)
+
+
 class TelefonePontuadoDentroDoNomeTest(unittest.TestCase):
     """Achado 4 da rodada 9: a regua da rodada 8 exigia a corrida CONTIGUA, e
     "Zap Fulano +55 62 98888-7777" — a forma canonica de rotulo de agenda

@@ -3140,6 +3140,176 @@ func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
 	}
 }
 
+// TestLeituraResolveNomePelaTabelaSenders cobre o que a verificacao do criterio
+// 7 achou rodando contra as duas pontes reais: a leitura respondia
+// "(contato sem nome)" para a MESMA pessoa que /api/group_info acabara de
+// resolver pelo nome. Causa: getSenderName so consultava `chats`, que guarda o
+// nome de uma CONVERSA; os nomes de PARTICIPANTE moram em `senders`, a tabela
+// que a resolucao de mencao passou dez rodadas aprendendo a ler.
+//
+// As chaves sao varias porque `messages.sender` e gravado como a parte de
+// usuario do JID, sem servidor, e a linha pode estar sob a forma PN ou a @lid.
+func TestLeituraResolveNomePelaTabelaSenders(t *testing.T) {
+	store := setupPollStore(t)
+	db := store.db
+	usuario := "55" + "62" + "9" + "0000008"
+	pn := usuario + "@s.whatsapp.net"
+
+	t.Run("parte_de_usuario_crua_acha_a_linha_PN", func(t *testing.T) {
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			pn, "Aninha", "Ana Paula Souza", "Ana", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		resp, err := getSenderName(db, usuario, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != "Ana Paula Souza" {
+			t.Fatalf("Name = %q, want o nome mais especifico da tabela senders", resp.Name)
+		}
+	})
+
+	t.Run("linha_so_por_lid_tambem_e_lida", func(t *testing.T) {
+		outro := "1122334499"
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			outro+"@lid", "", "Bruno Lima", "Bruno", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		resp, err := getSenderName(db, outro, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != "Bruno Lima" {
+			t.Fatalf("Name = %q, want o nome da linha @lid", resp.Name)
+		}
+	})
+
+	t.Run("sufixo_de_dispositivo_nao_atrapalha", func(t *testing.T) {
+		resp, err := getSenderName(db, usuario+":8@s.whatsapp.net", nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != "Ana Paula Souza" {
+			t.Fatalf("Name = %q", resp.Name)
+		}
+	})
+
+	t.Run("nome_com_cara_de_telefone_nao_e_nome", func(t *testing.T) {
+		soNumero := "55" + "62" + "9" + "00000099"
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			soNumero+"@s.whatsapp.net", soNumero, "", "", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		resp, err := getSenderName(db, soNumero, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		// Devolve o proprio identificador: e como quem le sabe que NAO houve
+		// nome, e e ai que o marcador neutro entra do lado do servidor MCP.
+		if resp.Name != soNumero {
+			t.Fatalf("Name = %q, want o proprio identificador — push_name que E um telefone nao e nome", resp.Name)
+		}
+	})
+
+	t.Run("chats_com_cara_de_telefone_nao_vence_a_tabela_senders", func(t *testing.T) {
+		// Conversa 1:1 sem nome salvo guarda o PROPRIO NUMERO em chats.name. A
+		// primeira consulta acertava ali e a busca terminava, entao a leitura
+		// respondia (contato sem nome) para quem tinha nome gravado uma tabela
+		// ao lado. Achado da verificacao do criterio 7 contra as pontes reais.
+		u := "55" + "62" + "9" + "0000011"
+		jid := u + "@s.whatsapp.net"
+		if err := store.StoreChat(jid, u, time.Now()); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			jid, "", "Diana Rocha", "Diana", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		resp, err := getSenderName(db, jid, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != "Diana Rocha" {
+			t.Fatalf("Name = %q, want o nome da tabela senders — chats.name com cara de telefone nao e nome", resp.Name)
+		}
+	})
+
+	t.Run("user_part_de_duas_pessoas_nao_escolhe_uma", func(t *testing.T) {
+		// Duas linhas distintas com o MESMO user part, uma sob a forma PN e
+		// outra sob a @lid: sao duas pessoas. Escolher seria imprimir o nome de
+		// uma no lugar da outra, entao nao se escolhe.
+		ambiguo := "7788990011"
+		for _, jid := range []string{ambiguo + "@s.whatsapp.net", ambiguo + "@lid"} {
+			if _, err := db.Exec(
+				"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+				jid, "", "Nome De "+jid[:4], "Nome", "",
+			); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+
+		resp, err := getSenderName(db, ambiguo, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != ambiguo {
+			t.Fatalf("Name = %q, want o proprio identificador — dois JIDs com o mesmo user part sao duas pessoas", resp.Name)
+		}
+	})
+
+	t.Run("com_o_mapa_da_lib_a_outra_forma_e_alcancada", func(t *testing.T) {
+		// Endereco completo cuja linha esta sob a OUTRA forma. Quem sabe a
+		// traducao e o mapa da lib, nunca uma troca de servidor na mao.
+		pnOutro := types.JID{User: "55" + "62" + "9" + "0000010", Server: types.DefaultUserServer}
+		lidOutro := types.JID{User: "6655443322", Server: types.HiddenUserServer}
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			lidOutro.String(), "", "Carla Mendes", "Carla", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		semMapa, err := getSenderName(db, pnOutro.String(), nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if semMapa.Name == "Carla Mendes" {
+			t.Fatalf("sem mapa nao havia como traduzir, e veio %q", semMapa.Name)
+		}
+
+		comMapa, err := getSenderName(db, pnOutro.String(), mapaFixo{pn: pnOutro, lid: lidOutro})
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if comMapa.Name != "Carla Mendes" {
+			t.Fatalf("Name = %q, want o nome da linha sob a outra forma", comMapa.Name)
+		}
+	})
+
+	t.Run("sem_linha_nenhuma_devolve_o_proprio_identificador", func(t *testing.T) {
+		desconhecido := "55" + "62" + "9" + "00000077"
+		resp, err := getSenderName(db, desconhecido, nil)
+		if err != nil {
+			t.Fatalf("getSenderName: %v", err)
+		}
+		if resp.Name != desconhecido {
+			t.Fatalf("Name = %q", resp.Name)
+		}
+	})
+}
+
 // TestListaDeParticipantesDeCadaLado cobre os achados 1 e 2 da rodada 10. O
 // achado 2 e um buraco de bateria: reverter a correcao da rodada 9 dentro do
 // laco de chatParticipants — voltar a descartar quem nao tem telefone —

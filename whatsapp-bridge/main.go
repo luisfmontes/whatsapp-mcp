@@ -5357,14 +5357,36 @@ type SenderNameResponse struct {
 	Name string `json:"name"`
 }
 
-func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
+func getSenderName(db *sql.DB, senderJID string, lids mapaDeLID) (SenderNameResponse, error) {
 	var name sql.NullString
 	err := db.QueryRow("SELECT name FROM chats WHERE jid = ? LIMIT 1", senderJID).Scan(&name)
 	if err != nil && err != sql.ErrNoRows {
 		return SenderNameResponse{}, err
 	}
-	if err == nil && name.Valid && name.String != "" {
+	// `chats.name` com cara de telefone NAO e nome, e nao pode vencer a tabela
+	// `senders`, que e onde o nome de verdade esta. Era o que acontecia: uma
+	// conversa 1:1 sem nome salvo guarda o proprio numero em `chats.name`,
+	// essa primeira consulta acertava, e a busca terminava ali — a leitura
+	// respondia "(contato sem nome)" para quem tinha nome gravado uma tabela ao
+	// lado (verificacao do criterio 7, medido em 2026-09-12 contra as pontes
+	// reais). A regua e a mesma da D3, a mesma que rotuloDoParticipante usa.
+	if err == nil && nomeUsavel(name.String) {
 		return SenderNameResponse{Name: name.String}, nil
+	}
+
+	// A tabela `senders` e onde moram os nomes de PARTICIPANTE, e esta busca
+	// nunca a consultava: so `chats`, que tem o nome de uma CONVERSA. Em grupo
+	// isso significava que a leitura respondia "(contato sem nome)" para a
+	// mesma pessoa que /api/group_info acabara de resolver pelo nome — as duas
+	// superficies liam tabelas diferentes. Achado da verificacao do criterio 7,
+	// medido em 2026-09-12 contra as duas pontes reais.
+	//
+	// As chaves sao varias porque `messages.sender` e gravado como a parte de
+	// usuario do JID, sem servidor, e a linha de `senders` pode estar sob a
+	// forma PN ou sob a @lid — a mesma razao do `outrasChaves` da resolucao de
+	// mencao (rodadas 9 e 10).
+	if nome := nomeEmSenders(db, senderJID, lids); nome != "" {
+		return SenderNameResponse{Name: nome}, nil
 	}
 
 	phonePart := senderJID
@@ -5375,11 +5397,89 @@ func getSenderName(db *sql.DB, senderJID string) (SenderNameResponse, error) {
 	if err != nil && err != sql.ErrNoRows {
 		return SenderNameResponse{}, err
 	}
-	if err == nil && name.Valid && name.String != "" {
+	if err == nil && nomeUsavel(name.String) {
 		return SenderNameResponse{Name: name.String}, nil
 	}
 
 	return SenderNameResponse{Name: senderJID}, nil
+}
+
+// nomeUsavel e a regua da D3 num lugar so: nome e o que NAO tem cara de
+// telefone. Vazio, ou oito digitos ou mais, nao serve — e devolver o proprio
+// identificador e como quem le sabe que nao houve nome.
+func nomeUsavel(n string) bool {
+	return n != "" && len(digitosDe(n)) < 8
+}
+
+// nomeEmSenders devolve o nome mais especifico que a tabela `senders` conhece
+// para este remetente, pela mesma regua da D3: campo com cara de telefone nao e
+// nome, e nesse caso devolve-se vazio para quem chama cair no marcador neutro.
+func nomeEmSenders(db *sql.DB, senderJID string, lids mapaDeLID) string {
+	semDisp := semDispositivo(senderJID)
+	chaves := []string{senderJID, semDisp}
+	if strings.Contains(semDisp, "@") {
+		// Endereco completo: a OUTRA forma vem do mapa da propria lib, que e
+		// autoritativo. Trocar o servidor na mao seria heuristica, e uma
+		// heuristica errada aqui atribui o nome de uma pessoa a outra.
+		if jid, err := types.ParseJID(semDisp); err == nil {
+			chaves = append(chaves, outrasFormasDoJID(lids, jid)...)
+		}
+	} else {
+		// Parte de usuario crua, que e como `messages.sender` e gravado. E
+		// ambigua por natureza: pode ser um telefone ou o user part de um
+		// @lid. As duas formas entram, mas se AS DUAS tiverem linha em
+		// `senders` sao dois JIDs distintos com o mesmo user part — escolher
+		// ali seria atribuir o nome de uma pessoa a outra, entao nao se
+		// escolhe: devolve-se vazio e quem le cai no marcador neutro.
+		u := strings.SplitN(semDisp, ":", 2)[0]
+		pn := types.JID{User: u, Server: types.DefaultUserServer}
+		lid := types.JID{User: u, Server: types.HiddenUserServer}
+		if linhasEmSenders(db, pn.String(), lid.String()) > 1 {
+			return ""
+		}
+		chaves = append(chaves, pn.String(), lid.String())
+		chaves = append(chaves, outrasFormasDoJID(lids, pn)...)
+	}
+	var p mentionParticipant
+	vistas := make(map[string]bool, len(chaves))
+	for _, chave := range chaves {
+		if chave == "" || vistas[chave] {
+			continue
+		}
+		vistas[chave] = true
+		var pushName, fullName, firstName, businessName sql.NullString
+		err := db.QueryRow(
+			"SELECT push_name, full_name, first_name, business_name FROM senders WHERE jid = ?", chave,
+		).Scan(&pushName, &fullName, &firstName, &businessName)
+		if err != nil {
+			continue
+		}
+		for _, campo := range []struct {
+			destino *string
+			veio    sql.NullString
+		}{
+			{&p.pushName, pushName}, {&p.fullName, fullName},
+			{&p.firstName, firstName}, {&p.businessName, businessName},
+		} {
+			if *campo.destino == "" {
+				*campo.destino = campo.veio.String
+			}
+		}
+	}
+	return rotuloDoParticipante(p, "")
+}
+
+// linhasEmSenders conta quantos destes JIDs tem linha em `senders`. Serve a uma
+// pergunta so: "este user part pertence a mais de uma pessoa?".
+func linhasEmSenders(db *sql.DB, jids ...string) int {
+	n := 0
+	for _, jid := range jids {
+		var existe int
+		if err := db.QueryRow("SELECT 1 FROM senders WHERE jid = ? LIMIT 1", jid).Scan(&existe); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
@@ -5995,7 +6095,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				writeJSONError(w, http.StatusBadRequest, "sender_jid is required")
 				return
 			}
-			resp, err := getSenderName(readDB, req.SenderJID)
+			resp, err := getSenderName(readDB, req.SenderJID, mapaDeLIDDoCliente(client))
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return

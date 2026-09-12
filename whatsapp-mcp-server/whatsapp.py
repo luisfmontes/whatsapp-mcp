@@ -545,7 +545,13 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
 
     content_prefix = ""
     if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
+        # Sem o `Chat JID`: em conversa 1:1 ele E o telefone, e em grupo é um
+        # identificador de 18 dígitos — as duas coisas que a D3 proíbe numa
+        # superfície de leitura, e o único lugar onde a prosa ainda imprimia
+        # dígitos (verificação do critério 7, 2026-09-12). O `Message ID` fica:
+        # é opaco, e é o que `download_media` precisa junto do `chat_jid` que
+        # quem chama já tem — foi ele que pediu a listagem deste chat.
+        content_prefix = f"[{message.media_type} - Message ID: {message.id}] "
 
     try:
         # `get_sender_name` devolve o PROPRIO identificador quando nao acha

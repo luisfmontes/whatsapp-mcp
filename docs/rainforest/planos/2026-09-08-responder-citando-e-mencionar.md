@@ -798,3 +798,35 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   spelling" — que vale para o `@` que ninguém pediu, não para o que foi pedido.
   `pronto quando:` a recusa nomeia o participante que venceu a posição —
   `TestRecusaDizQuemComeuAAncora`.
+
+- **2026-09-12 (verificação do critério 7) — a promessa central falhava na
+  superfície de prosa, e só a verificação contra as pontes reais mostrou.** Com
+  as duas pontes no ar rodando o binário novo, `list_messages` no grupo de teste
+  respondia `From: (contato sem nome)` para a **mesma pessoa** que
+  `/api/group_info` acabara de resolver pelo nome. Três causas, em camadas, cada
+  uma medida antes de consertar:
+  1. `getSenderName` só consultava a tabela `chats`, que guarda o nome de uma
+     **conversa**. Os nomes de **participante** moram em `senders` — a tabela que
+     a resolução de menção passou dez rodadas aprendendo a ler. As duas
+     superfícies liam tabelas diferentes. Entra `nomeEmSenders`.
+  2. `chats.name` **vencia** `senders`. Uma conversa 1:1 sem nome salvo guarda o
+     próprio número ali, a primeira consulta acertava e a busca terminava. Agora
+     um `chats.name` com cara de telefone não é nome: a régua da D3 virou
+     `nomeUsavel` e vale nas duas consultas de `chats`.
+  3. As chaves de busca. `messages.sender` é gravado como a parte de usuário sem
+     servidor, e a linha pode estar sob a forma PN ou a `@lid`. A tradução entre
+     as duas vem do mapa da própria lib (`mapaDeLID`, o mesmo da rodada 10) —
+     nunca de trocar o servidor na mão, que seria heurística, e heurística errada
+     aqui imprime o nome de uma pessoa no lugar de outra. Quando só existe a
+     parte de usuário crua, ela é ambígua por natureza: se **as duas** formas
+     tiverem linha em `senders`, são dois JIDs distintos com o mesmo user part, e
+     não se escolhe — devolve-se vazio e quem lê cai no marcador.
+  A linha de mídia também imprimia `Chat JID:`, que em 1:1 **é** o telefone e em
+  grupo é um identificador de 18 dígitos — era o único lugar onde a prosa ainda
+  imprimia dígitos. Saiu; o `Message ID`, que é opaco, fica.
+  `pronto quando:` `list_messages` contra a ponte real imprime a linha de
+  citação com nome e id, a menção por nome, e `grep -E '[0-9]{8,}'` não casa.
+  **Observado em 2026-09-12**, com `From:`, `↳ reply to`, `@ mentions:` e o corpo
+  todos resolvendo para o nome — provado também por
+  `TestLeituraResolveNomePelaTabelaSenders` e
+  `test_scrub_mentions.LinhaDeMidiaSemEnderecoTest`.
