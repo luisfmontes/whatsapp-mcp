@@ -1,0 +1,95 @@
+{
+  "slug": "2026-09-12-evidencia-de-ci-para-o-pr-14",
+  "titulo": "Evidencia de CI verde para o PR 14 no upstream",
+  "criado_em": "2026-09-12",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+    "aprovado_por": "Luis, autorizacao previa: faz o fluxo todo no recomendado sem precisar de mim",
+    "em": "2026-09-12"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+    "tarefas": 4,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-09-12"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-12",
+    "tarefas_feitas": [
+      1,
+      2
+    ],
+    "branches": [
+      "ci/pr14-evidencia",
+      "ci/pr14-falsificacao"
+    ],
+    "nota": "tarefas 1 e 2 executadas na janela principal, sem despacho: sao orquestracao de branch e CI remota (push + leitura de run), nao edicao paralela de codigo, e cada uma ficou muito abaixo do limiar de 3.000 tokens da regra 10. Runs em voo, aguardando conclusao real antes de qualquer afirmacao de verde.",
+    "em": "2026-09-12",
+    "tarefas": 5,
+    "tarefas_ok": 5,
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "n/a",
+        "motivo": "arquivo de configuracao de CI, sem comportamento de produto a inverter; a inversao que valida o que a tarefa montou e a da tarefa 2, no codigo sob teste"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "return \"/\" + parts[1]",
+        "para": "recorte da query com strings.SplitN(parts[1], \"?\", 2)[0]",
+        "bateria": "workflow pr14-evidencia na CI do fork, branch ci/pr14-falsificacao, SHA 8088b9b",
+        "resultado": "vermelho",
+        "fixture": "TestExtractDirectPathFromURL — '--- FAIL' em bridge (ubuntu-latest), (macos-latest) e (windows-latest), com o build compilando nas tres",
+        "nota": "bateria remota de proposito: a arvore do PR so tem o driver SQLite com CGO e nao compila nesta maquina, entao vermelho local seria vermelho de build"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "n/a",
+        "motivo": "documento e comentario nao tem ramo a inverter; a falsificacao e a coerencia com o gh, conferida no pronto quando (SHA, run e lista de jobs relidos)"
+      },
+      {
+        "tarefa": 4,
+        "arquivo": "docs/rainforest/pedidos/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+        "de": "titulo de secao '## O que foi pedido'",
+        "para": "o mesmo titulo seguido de valor com forma de telefone AUSENTE do baseline",
+        "bateria": "python scripts/check-personal-data.py",
+        "resultado": "vermelho",
+        "fixture": "check-personal-data.py, padrao 'telefone' — a saida nomeou o identificador E o caminho do arquivo",
+        "nota": "conferir-mutacao.cjs: baseline VERDE (exit 0) -> mutacao VERMELHA (exit 1), fonte restaurado. A primeira tentativa voltou verde porque o valor escolhido ja constava do baseline — verde correto, mutacao errada"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "n/a",
+        "motivo": "a branch de base e a arvore de upstream/main SEM alteracao nenhuma mais o workflow ja falsificado pela tarefa 2 — a ausencia de mutacao e o proprio experimento, e inverter algo destruiria o que ela mede"
+      }
+    ],
+    "runs": {
+      "evidencia": "branch ci/pr14-evidencia, SHA e092361",
+      "base": "branch ci/pr14-base, SHA 3b68feb (= upstream/main + o mesmo workflow)",
+      "falsificacao": "branch ci/pr14-falsificacao, SHA 8088b9b (apagada depois de lido o log)",
+      "como_reencontrar": "gh run list --repo luisfmontes/whatsapp-mcp --commit <sha> --json databaseId,conclusion,url",
+      "por_que_sem_id": "id de run tem 11 digitos e casa a forma de telefone do gate-publicacao-destino, que nao tem allowlist; o SHA e ancora melhor e passa pela isencao de hex"
+    },
+    "comentario": "comentario no PR 14 do upstream, publicado em 2026-09-12T12:08:18Z — gh pr view 14 --repo rodrigopg/whatsapp-mcp --json comments",
+    "comando": "gh run view <run da evidencia> --repo luisfmontes/whatsapp-mcp --json jobs --jq '.jobs[] | .name + \"|\" + .conclusion' | sort  (e o mesmo no run da base)",
+    "saida": "PR: bridge macos/ubuntu/windows success | gofmt success | mcp server macos/ubuntu success | mcp server windows failure ;; BASE: identica job a job, inclusive o mesmo failure em mcp server (windows-latest), com as mesmas duas linhas FAILED de test_db_path.py::TestResolveMessagesDb e o mesmo '2 failed, 16 passed'"
+  },
+  "revisar": {
+    "status": "pendente"
+  },
+  "verificar": {
+    "status": "pendente"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
