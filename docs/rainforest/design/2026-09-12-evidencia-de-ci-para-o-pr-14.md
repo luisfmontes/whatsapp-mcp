@@ -50,8 +50,9 @@ Windows compila com `CGO_ENABLED=0`, que naquela árvore não compila.
   mídia não deve virar um PR de infraestrutura no meio da revisão.
 
 - **D4 — O workflow de validação é derivado do `build.yml` do fork, com os
-  cortes que aquela árvore exigir, cada um medido — e a lista completa mora
-  aqui.** São cinco, e o número não era previsível na mesa: o design dizia
+  cortes que aquela árvore exigir, cada um medido, e a lista completa desses
+  cortes mora aqui.** O diff inteiro dos dois YAML é outra coisa, e está
+  delimitado mais abaixo. São cinco cortes, e o número não era previsível na mesa: o design dizia
   "dois", a execução achou o terceiro rodando, e a segunda rodada da revisão
   achou o quarto e o quinto lendo o arquivo publicado contra o original.
 
@@ -71,9 +72,22 @@ Windows compila com `CGO_ENABLED=0`, que naquela árvore não compila.
   cortesia para quem abrir só o arquivo. Porquê dos cortes em geral: um vermelho
   causado por arquivo ausente, por build tag que aquela árvore não tem ou por
   ferramenta que ela não usa não diz nada sobre o PR — e diria a coisa errada
-  para quem lê. Porquê: um vermelho
-  causado por arquivo ausente ou por build tag que aquela árvore não tem não diz
-  nada sobre o PR — e diria a coisa errada para quem lê.
+  para quem lê.
+
+  **O que a tabela cobre, exatamente:** os cortes feitos porque **aquela árvore
+  não suporta** o que o `build.yml` faz. Ela não é o diff dos dois YAML. Há mais
+  duas diferenças, e as duas são consequência de outras decisões já tomadas
+  aqui, não cortes de compatibilidade:
+  - o gatilho é `push: branches: ['ci/pr14-**']` em vez de `['**']` mais
+    `pull_request` — decorre da D3: este workflow existe para rodar nas branches
+    de validação e em mais nada;
+  - a matriz do job `bridge` deixou de ser `include:` com par `os`/`cgo` e virou
+    lista simples de `os` com `CGO_ENABLED: '1'` fixo, e o passo do detector de
+    corrida perdeu o `if: matrix.cgo == '1'` — decorre mecanicamente do corte 2:
+    com CGO ligado nas três plataformas, aquele `if` seria sempre verdadeiro.
+  Quem quiser o diff inteiro, e não a lista de cortes, roda
+  `diff <(git show origin/main:.github/workflows/build.yml) <(git show origin/ci/pr14-evidencia:.github/workflows/pr14-evidencia.yml)`
+  — e é isso que a terceira rodada da revisão fez para achar estas duas.
 
 - **D5 — Verde só conta depois de a bateria ter provado que sabe ficar
   vermelha.** Antes de postar, uma branch descartável com um erro deliberado no

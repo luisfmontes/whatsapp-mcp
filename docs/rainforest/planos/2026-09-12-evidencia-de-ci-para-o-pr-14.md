@@ -185,3 +185,24 @@ pronto quando: o único job vermelho do run da branch de validação é vermelho
   Também nesta rodada: `plano.tarefas` no `estado.json` era `4` (o valor de
   quando o plano fechou, antes de a tarefa 5 nascer) ao lado de
   `executar.tarefas: 5`. Corrigido para `5`, com o motivo no campo `nota`.
+- **2026-09-12 (rodada 3 da revisão) — dois achados menores, os dois de texto,
+  os dois fechados.** A rodada foi despachada com escopo estreito de propósito:
+  só julgar se a tabela de cinco cortes da D4 resiste à comparação dos dois YAML
+  inteiros. Resistiu — o revisor rodou cada medição citada, conferiu cada célula
+  da coluna "Comentado no YAML?" contra as linhas reais do arquivo, e não achou
+  sexto corte nem corte declarado que não exista. Os dois achados:
+  1. A D4 tinha **frase duplicada**: quando a rodada 2 inseriu o "porquê" novo
+     (que cobre os cinco cortes), o antigo (que cobria só dois) ficou colado em
+     seguida. Resíduo de edição, apagado.
+  2. A abertura dizia "a lista completa mora aqui", e ao pé da letra isso
+     prometia o diff dos dois YAML, não a lista de cortes. Há mais duas
+     diferenças — o gatilho `push: branches: ['ci/pr14-**']` e a matriz do
+     `bridge` com `CGO_ENABLED` fixo (que também tirou o `if: matrix.cgo == '1'`
+     do detector de corrida) — e as duas são **consequência** de decisões já
+     tomadas (D3 e o corte 2), não cortes de compatibilidade. A D4 passou a
+     delimitar o que a tabela cobre, a listar essas duas, e a dar o comando do
+     diff inteiro para quem quiser conferir sem acreditar.
+  O revisor registrou também, por iniciativa própria, que o run de cabeça está
+  vermelho hoje e que isso é exatamente o que a tarefa 5 documenta — e que
+  "tabela completa" não implica "tudo verde". Está certo, e é a distinção que
+  esta entrega existe para não deixar borrada.
