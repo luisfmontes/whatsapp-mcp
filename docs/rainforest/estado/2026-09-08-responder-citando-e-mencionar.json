@@ -25,7 +25,7 @@
     "catraca_mutacao": "2026-09-08",
     "tarefas_ok": 11,
     "tarefas": 11,
-    "em": "2026-09-11",
+    "em": "2026-09-12",
     "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN.",
     "mutacao_conferida": [
       {
@@ -73,7 +73,7 @@
     ],
     "pr": 19,
     "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m pytest -q) ; python scripts/check-personal-data.py",
-    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.163s (exit 0); 161 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.087s (exit 0); 170 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
     "mutacao": [
       {
         "tarefa": 1,
@@ -98,17 +98,17 @@
       {
         "tarefa": 5,
         "resultado": "vermelho",
-        "fixture": "TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro"
+        "fixture": "TestSeparadorNaoAbreOPrefixo"
       },
       {
         "tarefa": 6,
         "resultado": "vermelho",
-        "fixture": "TestActionSenderJIDGrupo/terceiro_em_grupo_usa_participante"
+        "fixture": "TestParticipanteDoGrupoGuardaOLID"
       },
       {
         "tarefa": 7,
         "resultado": "vermelho",
-        "fixture": "test_scrub_mentions.AvisoDeFalhaNaSuperficieEstruturadaTest.test_falha_aparece_como_campo"
+        "fixture": "test_scrub_mentions.LeituraDeMencaoComPrefixoTest"
       },
       {
         "tarefa": 8,
@@ -131,7 +131,7 @@
         "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
       }
     ],
-    "rodada": 8,
+    "rodada": 9,
     "achados_da_revisao_fechados": [
       1,
       2,
@@ -166,23 +166,36 @@
       2
     ],
     "creep_rodada6_fechado": true,
-    "bloqueante_rodada7_fechado": true
+    "bloqueante_rodada7_fechado": true,
+    "correcoes_rodada_8": [
+      "regua de nome era normalizada na resolucao e byte a byte no texto: o nome longo do outro participante deixava de proteger o prefixo quando a agenda tinha caixa ou acento diferentes, e saia mensagem ENVIADA com a pessoa errada grifada",
+      "contagem de donos de um nome passou a mesma regua",
+      "candidato nao pedido que vence a posicao agora e copiado do texto do autor, nao do nome da agenda",
+      "rotulosDistintos: dois candidatos nunca voltam com o mesmo rotulo na pergunta da D6",
+      "telefone embutido num nome com letras vira marcador (corrida de dez digitos; custo medido: zero nome real nos 5.331 dos dois stores)"
+    ],
+    "correcoes_rodada_9": [
+      "separador de nome (espaco duplo, NBSP, quebra de linha, hifen) derrubava a protecao de prefixo e ENVIAVA a pessoa errada grifada",
+      "participante sem telefone sumia da lista e deixava de proteger o prefixo e de contar na ambiguidade da D6",
+      "chave alternativa vinha de gp.JID (forma PN) e a linha @lid nunca era alcancada; agora outrasChaves com gp.LID, via participanteDoGrupo",
+      "phoneUser passou a ser lido de verdade",
+      "telefone pontuado dentro de nome com letras vira marcador",
+      "leitura de mencao passou a trocar do numero mais longo para o mais curto",
+      "scrub subiu de oito para dez digitos e parou de morder @ que ninguem pediu",
+      "message_to_public_dict perdeu a chave sender"
+    ],
+    "pendente_decisao_do_usuario": "chat_jid em conversa 1:1 e o telefone, e aparece em list_chats (Chat.jid), em get_message_context (chat_jid) e na linha de midia de list_messages (Chat JID:). get_group_info devolve telefone, JID e LID de todo participante - pre-existente e fora do plano."
   },
   "revisar": {
-    "status": "reprovado",
+    "status": "ok",
     "snapshot": {
-      "head": "60ec2a1a7a2d7aaf5634dc2f7f3d10f98788c39d",
-      "caminhos_sujos": []
+      "head": "fb43da8d928f928f7434c35eb2ee1f1a6b7d1f59",
+      "caminhos_sujos": [
+        "docs/rainforest/estado/2026-09-08-responder-citando-e-mencionar.json"
+      ]
     },
-    "em_voo": [
-      {
-        "agente": "revisor",
-        "tarefa": "revisao independente da rodada 7, diff 22dbfc2...60ec2a1 (PR 19)",
-        "desde": "2026-09-11"
-      }
-    ],
-    "em": "2026-09-11",
-    "achados": 6,
+    "em": "2026-09-12",
+    "achados": 0,
     "bloqueiam": 1,
     "lista": [
       "regressao da rodada 6: a preferencia por candidato nao usado valia entre comprimentos diferentes, entao @Luis Montes caia num Luis de OUTRA pessoa - numero do B onde o autor escreveu o nome do A, sem recusa"
@@ -197,7 +210,6 @@
       "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
       "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
     ],
-    "tentativas": 8,
     "creep": 0,
     "creep_lista": [
       "whatsapp-mcp-server/test_api_errors.py sem arquivos: de tarefa nenhuma"
@@ -207,12 +219,123 @@
     ],
     "pendente": "bloqueante 1 depende de decisao do usuario sobre reescrever a branch e force-push no PR 19",
     "head_com_correcoes": "0506eeb",
-    "pendente_com_o_usuario": "abrir chamado no Support do GitHub para remover os objetos orfaos - decisao dele, medida e apresentada em 2026-09-11"
+    "pendente_com_o_usuario": "abrir chamado no Support do GitHub para remover os objetos orfaos - decisao dele, medida e apresentada em 2026-09-11",
+    "base": "22dbfc2",
+    "head": "fb43da8",
+    "rodadas": 10,
+    "veredito_final": "rodada 10 aprovada com ressalvas: 0 bloqueantes, 4 achados, 0 creep - os quatro fechados em b0a3b5d",
+    "evidencia_do_revisor": "fuzz de 50.000 casos em applyMentions com invariante forte: zero violacoes; o que quebrou foram so recusas",
+    "lacunas_declaradas_pelo_revisor": [
+      "nao observou uma mencao renderizada no WhatsApp real",
+      "nao mediu a janela em que resolveToPN grava @lid por falta de mapeamento"
+    ]
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "criterios": 12,
+    "verificados_sem_ponte": [
+      {
+        "tarefa": 1,
+        "resultado": "ok com ressalva",
+        "saida": "copia do store real (129.430 linhas): antes e depois de ensureMessagesSchema, mesma contagem e as 5 colunas presentes. A metade \"antes, sem as colunas\" e irreproduzivel hoje: o store vivo foi migrado em 2026-09-08 e a medicao original esta no plano."
+      },
+      {
+        "tarefa": 9,
+        "resultado": "ok",
+        "saida": "send_message(recipient,message,account,quoted_message_id,mentions); send_file(recipient,media_path,account,quoted_message_id) - sem mentions, como o README afirma; nenhum parametro citado no README falta na assinatura e nenhum parametro novo falta no README. O texto da ambiguidade descreve recusa + lista de ref + reenvio por ref."
+      },
+      {
+        "tarefa": 10,
+        "resultado": "parcial",
+        "saida": "PR 19: baseRefName=main, state=OPEN, nenhum check em FAILURE; 6 checks ainda IN_PROGRESS no momento da leitura - falta reler."
+      },
+      {
+        "tarefa": 11,
+        "resultado": "ok",
+        "saida": "gh issue view 18 state=OPEN; grep de identificador no corpo devolveu 0"
+      },
+      {
+        "tarefa": 12,
+        "resultado": "ok",
+        "saida": "as duas metades observadas: com um @g.us e um @lid plantados num arquivo rastreado, exit=1 nomeando README.md e os dois identificadores; arvore limpa, exit=0 (24 identificadores no baseline)"
+      }
+    ],
+    "bloqueio": "as tarefas 2,3,4,5,6,7,8 exigem as duas pontes rodando o binario NOVO. Medido: os dois processos whatsapp-bridge.exe rodam desde 2026-09-09 06:53, com binario de 2026-09-09 00:05 - anterior a quase toda a entrega e as dez rodadas de revisao. Reinicia-las e mexer no ambiente do usuario (regra 15), entao esta com ele.",
+    "em": "2026-09-12",
+    "ok": [
+      {
+        "t": 2,
+        "saida": "as duas pontes: success=true, 2 participantes, grupo Teste citacao MCP, e ZERO corrida de 8+ digitos na resposta - o conserto do group_info valendo em producao"
+      },
+      {
+        "t": 3,
+        "saida": "store de quem recebeu: quoted_message_id, quoted_sender e quoted_content os tres preenchidos (1,1,1) para a mensagem marcada desta rodada"
+      },
+      {
+        "t": 4,
+        "saida": "quoted_message_id inexistente: HTTP 404 e a contagem de linhas do chat igual antes e depois (7 -> 7); corpo da recusa sem corrida de digitos"
+      },
+      {
+        "t": 5,
+        "saida": "(a) nome ambiguo real: 400 com 2 candidatos, rotulos DISTINTOS e sem corrida de digitos; (b) reenvio por ref: 200, e no store de quem recebeu mentions preenchida"
+      },
+      {
+        "t": 6,
+        "saida": "react com from_me:false em mensagem de terceiro: success=true"
+      },
+      {
+        "t": 9,
+        "saida": "README bate com as assinaturas reais nos dois sentidos"
+      },
+      {
+        "t": 11,
+        "saida": "Issue 18 OPEN, zero identificadores no corpo"
+      },
+      {
+        "t": 12,
+        "saida": "as duas metades observadas: envenenado exit=1 nomeando os dois identificadores, limpo exit=0"
+      }
+    ],
+    "ok_com_ressalva": [
+      {
+        "t": 1,
+        "saida": "copia do store real (129.430 linhas): mesma contagem antes e depois, 5 colunas presentes. A metade antes-sem-colunas e irreproduzivel: o store vivo foi migrado em 2026-09-08"
+      }
+    ],
+    "reprovado": [
+      {
+        "t": 7,
+        "saida": "list_messages mostra a linha de citacao com id e trecho e NAO imprime telefone - o corpo com @numero sai como @alguem. Mas reprova em duas coisas: (1) a linha de midia imprime Chat JID: <group jid>, que e corrida de 8+ digitos - observacao 4 da rodada 10; (2) o remetente sai como (contato sem nome) mesmo com o group_info resolvendo o nome da MESMA pessoa. Causa medida: getSenderName (main.go:5360) so consulta a tabela chats; nunca consulta senders, que e onde os nomes de participante vivem e que fillSenderNames le com PN e LID. getSenderName e pre-existente (zero ocorrencias no diff), mas a tarefa 7 do plano reivindica main.go e promete que toda superficie de leitura responde com nome"
+      }
+    ],
+    "pendente": [
+      {
+        "t": 8,
+        "saida": "confirmacao visual do Luis no celular: balao de citacao com autor e trecho, mencao grifada, reacao no balao certo. As quatro mensagens foram enviadas de verdade nesta verificacao"
+      },
+      {
+        "t": 10,
+        "saida": "PR 19: base main, OPEN, nenhum check em FAILURE, mas 6 ainda IN_PROGRESS - falta reler"
+      }
+    ],
+    "ambiente": "as duas pontes foram paradas, recompiladas e reiniciadas quatro vezes durante a verificacao, com autorizacao explicita do Luis",
+    "comando": "verificacao dos 12 criterios contra as duas pontes reais (3005 e 3006) com o binario de 17f74f9, mais gh pr view 19, gh issue view 18 e scripts/check-personal-data.py",
+    "saida": "12 de 12 ok, sendo o criterio 1 ok com ressalva (a metade antes-sem-colunas e irreproduzivel: o store vivo foi migrado em 2026-09-08). Destaques: c2 group_info das duas contas com 2 participantes e ZERO corrida de 8+ digitos; c4 id inexistente = 404 e contagem de linhas igual antes e depois; c5 nome ambiguo = 400 com 2 candidatos de rotulos distintos e refs opacos, e o reenvio por ref = 200 com mentions gravada em quem recebeu; c7 list_messages com linha de citacao por nome, mencao por nome e grep [0-9]{8,} sem casar nada, depois de tres consertos medidos (senders fora da busca, chats.name vencendo senders, chaves PN/@lid) mais a saida do Chat JID da linha de midia; c8 captura de tela do Luis com o balao de citacao mostrando autor e trecho, a mencao GRIFADA por nome e a reacao no balao certo; c10 PR 19 com 16 checks SUCCESS e zero pendente; c12 as duas metades do guard observadas.",
+    "head": "17f74f9",
+    "correcao_minha": "eu disse que quatro mensagens foram enviadas; foram DUAS - as outras duas tentativas eram recusas (404 e 400), que por definicao nao produzem mensagem, e a reacao nao e mensagem. O Luis corrigiu pela captura de tela."
   },
   "fechar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "gh pr merge 19 --merge ; gh pr view 19 --json state,mergeCommit ; git worktree remove ; git worktree list",
+    "saida": "PR 19 MERGED em 2026-09-12T11:32:17Z, merge commit 96ee574 na main. Worktrees dos dois revisores removidos e suas branches apagadas, mais uma branch orfa ja contida na main. Sobraram tres worktrees que NAO sao deste trabalho ou tem commit fora da main: feat/t9-docs (32fd710) e feat/t7-leitura (9da5798), cujos commits nunca foram mesclados porque o conteudo foi integrado a mao, e rebase-pr14, de outra frente.",
+    "pr": 19,
+    "merge_commit": "96ee574",
+    "pendencias_declaradas": [
+      "o guard de dado pessoal roda no push, nunca no pre-commit; fechar isso pede um hook de pre-commit, nao feito",
+      "chat_jid em 1:1 e o telefone e aparece em list_chats, get_message_context e na linha de midia - decisao do Luis de deixar e registrar",
+      "os commits originais dos agentes de t7 e t9 seguem em worktree, fora da main; o conteudo deles esta na main via integracao manual"
+    ],
+    "ambiente": "gh repo set-default luisfmontes/whatsapp-mcp gravado no .git/config desta clone, com autorizacao do Luis: sem isso o gh resolvia para o upstream e o gate de fechamento de Issue nao conseguia ler a descricao do PR",
+    "em": "2026-09-12"
   }
 }
