@@ -1,0 +1,122 @@
+name: pr14 evidence
+
+# Why this file exists, and why it is not the fork's build.yml verbatim.
+#
+# rodrigopg/whatsapp-mcp#14 was approved on 2026-08-26 with one condition:
+# "assim que verde, mesclam" -- merge as soon as it is green. That condition
+# cannot be evaluated there: `git ls-tree -r upstream/main -- .github` is empty,
+# the upstream repository has no CI at all, and `gh pr view 14 --json
+# statusCheckRollup` returns []. So the evidence has to come from the fork.
+#
+# This branch (ci/pr14-evidencia) is the head of pr/fix-media-and-reliability
+# plus THIS FILE and nothing else -- GitHub Actions resolves a workflow from the
+# ref it runs on, and the PR branch carries no workflow, so there was no way to
+# produce a run without adding one. The PR branch itself is deliberately left
+# untouched: it is under review and mergeable, and pushing to it would reopen a
+# review the maintainer has already read.
+#
+# Two deltas from the fork's build.yml, both measured against THIS tree, not
+# assumed:
+#
+#   1. No `personal-data` job. It runs `python scripts/check-personal-data.py`,
+#      and `git ls-tree -r <this ref> -- scripts` is empty: the script does not
+#      exist here. Keeping the job would paint the run red for a missing file,
+#      which says nothing about the PR.
+#
+#   2. Windows builds with CGO_ENABLED=1, not 0. `git grep -E
+#      'go-sqlite3|modernc'` on this tree finds only mattn/go-sqlite3, imported
+#      with no build tag -- the pure-Go driver split is not in this tree, so
+#      CGO off cannot compile here. That, too, would be a red about the tree's
+#      age and not about the PR.
+#
+# Everything else is the fork's workflow: build, vet, test on three platforms,
+# the race detector where CGO allows it, and gofmt.
+
+on:
+  push:
+    branches: ['ci/pr14-**']
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    name: bridge (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platforms: knowing whether a failure is
+      # platform-specific is the whole point.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: whatsapp-bridge
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # The race detector needs CGO, which every job here has. It is what checks
+      # the shared state between the watchdog goroutine, the whatsmeow event
+      # callback and /api/status -- detection is probabilistic, so -count=3 buys
+      # a few more interleavings.
+      - name: test with race detector
+        run: go test -race -count=3 ./...
+
+  gofmt:
+    # Linux only: the Windows runner checks out with CRLF, which gofmt reports as
+    # unformatted for every file, so running this on all three would be noise.
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: whatsapp-bridge/go.sum
+      - name: gofmt -l
+        working-directory: whatsapp-bridge
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+  mcp-server:
+    name: mcp server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: whatsapp-mcp-server
+    steps:
+      - uses: actions/checkout@v7
+
+      # uv comes in via pipx (preinstalled on all three runner images) rather
+      # than a third-party setup action, so this workflow depends on nothing
+      # outside actions/* -- one less thing for a reviewer to have to trust.
+      - name: install uv
+        run: pipx install uv
+
+      # uv reads .python-version and fetches the interpreter itself.
+      - name: sync
+        run: uv sync
+
+      - name: pytest
+        run: uv run python -m pytest -q
