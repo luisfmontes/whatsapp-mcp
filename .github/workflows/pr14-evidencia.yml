@@ -118,5 +118,11 @@ jobs:
       - name: sync
         run: uv sync
 
+      # Third measured delta from the fork's build.yml, found by running it:
+      # this tree ships test_db_path.py and test_transcribe.py but declares no
+      # pytest anywhere -- pyproject.toml has only httpx, mcp[cli] and requests,
+      # so `uv run python -m pytest` fails with "No module named pytest" on all
+      # three platforms. `--with pytest` supplies it in an ephemeral overlay
+      # without touching pyproject.toml or uv.lock, which are the PR's files.
       - name: pytest
-        run: uv run python -m pytest -q
+        run: uv run --with pytest python -m pytest -q
