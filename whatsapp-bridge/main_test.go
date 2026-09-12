@@ -3139,6 +3139,175 @@ func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
 	}
 }
 
+// TestSeparadorNaoAbreOPrefixo cobre o achado 1 da rodada 9. A protecao de
+// prefixo so vale se o nome longo do outro participante CASAR no texto, e a
+// regua da rodada 8 dobrava caixa e acento — e mais nada. Bastava o autor
+// separar as duas partes do nome de um jeito diferente do que a agenda guarda
+// (espaco duplo, espaco inquebravel de teclado de celular, quebra de linha,
+// hifen) para o nome longo nao casar, o curto vencer a posicao e a mensagem
+// sair ENVIADA com a pessoa errada grifada.
+func TestSeparadorNaoAbreOPrefixo(t *testing.T) {
+	participants := []mentionParticipant{
+		{jid: "ana@s.whatsapp.net", phoneUser: "ana", firstName: "Ana"},
+		{jid: "ap@s.whatsapp.net", phoneUser: "ap", fullName: "Ana Paula"},
+	}
+
+	for _, caso := range []struct {
+		nome  string
+		texto string
+	}{
+		{"espaco_simples", "bom dia @Ana Paula"},
+		{"espaco_duplo", "bom dia @Ana  Paula"},
+		{"espaco_inquebravel", "bom dia @Ana\u00a0Paula"},
+		{"espaco_fino_inquebravel", "bom dia @Ana\u202fPaula"},
+		{"quebra_de_linha", "bom dia @Ana\nPaula"},
+		{"hifen", "bom dia @Ana-Paula"},
+	} {
+		t.Run(caso.nome, func(t *testing.T) {
+			resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+				participants, []string{"Ana"}, "g@g.us")
+			if errMsg != "" {
+				t.Fatalf("resolucao: %v", errMsg)
+			}
+
+			texto, jids, ancora, status := applyMentions(caso.texto, resolved, outros)
+
+			if ancora == "" || status != http.StatusBadRequest {
+				t.Fatalf("ENVIADO: %q -> %q (jids=%v) — a Ana grifada onde o autor nomeou a Ana Paula",
+					caso.texto, texto, jids)
+			}
+			if texto != caso.texto {
+				t.Fatalf("texto = %q — nada pode ser reescrito numa recusa", texto)
+			}
+		})
+	}
+
+	t.Run("separador_diferente_na_propria_ancora_ainda_grifa", func(t *testing.T) {
+		// O outro lado da mesma regua: quem pede "Ana Paula" e escreve
+		// "@Ana  Paula" pediu a Ana Paula.
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana Paula"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, jids, ancora, status := applyMentions("bom dia @Ana  Paula", resolved, outros)
+
+		if ancora != "" || status != 0 {
+			t.Fatalf("ancora=%q status=%d texto=%q, want envio", ancora, status, texto)
+		}
+		if texto != "bom dia @ap" {
+			t.Fatalf("texto = %q", texto)
+		}
+		if len(jids) != 1 || jids[0] != "ap@s.whatsapp.net" {
+			t.Fatalf("jids = %v", jids)
+		}
+	})
+}
+
+// TestParticipanteSemTelefoneContinuaContando cobre o achado 2 da rodada 9.
+// Quem o grupo devolve sem telefone nao pode ser mencionado — mas some da lista
+// era errado duas vezes: o nome dele ainda precisa proteger o prefixo de um
+// nome mais curto, e ainda precisa contar na ambiguidade da D6. Sumindo, as
+// duas viravam mencao silenciosa da pessoa errada.
+func TestParticipanteSemTelefoneContinuaContando(t *testing.T) {
+	t.Run("o_nome_dele_ainda_protege_o_prefixo", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "ana@s.whatsapp.net", phoneUser: "ana", firstName: "Ana"},
+			{jid: "so-lid@lid", fullName: "Ana Paula"}, // sem phoneUser
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, _, ancora, status := applyMentions("@Ana Paula, cuidado com o prazo", resolved, outros)
+
+		if ancora == "" || status != http.StatusBadRequest {
+			t.Fatalf("ENVIADO: texto = %q — a Ana grifada onde o autor nomeou a Ana Paula", texto)
+		}
+	})
+
+	t.Run("ele_ainda_conta_na_ambiguidade_da_D6", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "ana@s.whatsapp.net", phoneUser: "ana", firstName: "Ana", pushName: "Ana da Loja"},
+			{jid: "so-lid@lid", firstName: "Ana", pushName: "Ana do Predio"}, // sem phoneUser
+		}
+
+		resolved, _, candidates, errMsg, status := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+
+		if len(candidates) != 2 || errMsg == "" || status != http.StatusBadRequest {
+			t.Fatalf("resolved=%v candidates=%v errMsg=%q — a D6 tem de perguntar, nao escolher",
+				resolved, candidates, errMsg)
+		}
+	})
+
+	t.Run("mencionar_so_ele_recusa_sem_dizer_numero", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "so-lid@lid", firstName: "Ana"},
+		}
+
+		resolved, _, _, errMsg, status := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+
+		if errMsg == "" || status != http.StatusBadRequest || resolved != nil {
+			t.Fatalf("resolved=%v errMsg=%q status=%d, want recusa", resolved, errMsg, status)
+		}
+		if strings.Contains(errMsg, "lid") || len(digitosDe(errMsg)) >= 8 {
+			t.Fatalf("a recusa %q carrega endereco — a D3 nao admite", errMsg)
+		}
+	})
+}
+
+// TestParticipanteDoGrupoGuardaOLID cobre o achado 3 da rodada 9. A chave
+// alternativa vinha de gp.JID, que a documentacao do whatsmeow define como
+// "always equals either the LID or phone number" — ou seja, a forma PN sempre
+// que o grupo e enderecado por telefone. A busca consultava a MESMA linha duas
+// vezes, e a linha @lid (587 dos 2.518 nomes no store real) nunca era lida.
+//
+// O teste passa pela conversao que a producao usa, nao por um participante
+// montado a mao: montar a mao prova que a busca le o campo, nao que a producao
+// o preenche.
+func TestParticipanteDoGrupoGuardaOLID(t *testing.T) {
+	pn := types.JID{User: "participante-b", Server: types.DefaultUserServer}
+	lid := types.JID{User: "9988776655", Server: types.HiddenUserServer}
+
+	t.Run("grupo_enderecado_por_telefone_ainda_guarda_o_lid", func(t *testing.T) {
+		// gp.JID == gp.PhoneNumber: exatamente o caso em que a chave antiga
+		// virava copia do jid.
+		p := participanteDoGrupo(types.GroupParticipant{JID: pn, PhoneNumber: pn, LID: lid})
+
+		if p.jid != pn.String() || p.phoneUser != pn.User {
+			t.Fatalf("jid=%q phoneUser=%q", p.jid, p.phoneUser)
+		}
+		achou := false
+		for _, c := range p.outrasChaves {
+			if c == lid.String() {
+				achou = true
+			}
+			if c == p.jid {
+				t.Fatalf("outrasChaves repete o proprio jid: %v", p.outrasChaves)
+			}
+		}
+		if !achou {
+			t.Fatalf("outrasChaves = %v, want o LID entre elas", p.outrasChaves)
+		}
+	})
+
+	t.Run("sem_telefone_entra_na_lista_sem_poder_ser_mencionado", func(t *testing.T) {
+		p := participanteDoGrupo(types.GroupParticipant{JID: lid, LID: lid})
+
+		if p.jid != lid.String() {
+			t.Fatalf("jid = %q, want a pessoa presente mesmo sem telefone", p.jid)
+		}
+		if p.phoneUser != "" {
+			t.Fatalf("phoneUser = %q, want vazio — nao ha numero com que menciona-la", p.phoneUser)
+		}
+	})
+}
+
 // TestPerguntaDaD6ESempreRespondivel: a D6 para de enviar justamente para
 // perguntar "qual dos dois?". Dois candidatos com o MESMO rotulo devolvem o
 // usuario ao escuro — a rodada 7 tratou o caso do campo que casou, e sobrou o
@@ -3253,7 +3422,7 @@ func TestMesmaReguaDeNomeNosDoisLados(t *testing.T) {
 		if ancora != "" || status != 0 {
 			t.Fatalf("ancora=%q status=%d, want envio", ancora, status)
 		}
-		if texto != "oi @ana, tudo bem?" {
+		if texto != "oi @ana-user, tudo bem?" {
 			t.Fatalf("texto = %q", texto)
 		}
 		if len(jids) != 1 || jids[0] != "ana@s.whatsapp.net" {
@@ -3281,7 +3450,7 @@ func TestMesmaReguaDeNomeNosDoisLados(t *testing.T) {
 		if ancora != "" || status != 0 {
 			t.Fatalf("ancora=%q status=%d, want envio", ancora, status)
 		}
-		if texto != "@Ana Paula e @ana, vejam" {
+		if texto != "@Ana Paula e @ana-user, vejam" {
 			t.Fatalf("texto = %q — a grafia do autor tem de sobreviver intacta", texto)
 		}
 	})
@@ -3610,13 +3779,42 @@ func TestFillSenderNamesPorLID(t *testing.T) {
 	store := &MessageStore{db: db}
 
 	t.Run("sem_linha_PN_cai_no_lid", func(t *testing.T) {
-		p := mentionParticipant{jid: "participante-b@s.whatsapp.net", altJID: lid, phoneUser: "participante-b"}
+		p := mentionParticipant{jid: "participante-b@s.whatsapp.net", outrasChaves: []string{lid}, phoneUser: "participante-b"}
 		store.fillSenderNames(&p)
 		if p.firstName != "Ana Paula" || p.fullName != "Ana Paula Souza" {
 			t.Fatalf("firstName=%q fullName=%q, want the names found under the @lid row", p.firstName, p.fullName)
 		}
 		if len(matchMentionName([]mentionParticipant{p}, "Ana Paula")) != 1 {
 			t.Fatalf("want the participant matchable by name once the @lid row is read")
+		}
+	})
+
+	t.Run("campo_que_falta_na_linha_PN_vem_da_linha_lid", func(t *testing.T) {
+		// Achado 2 da rodada 9: a busca parava na primeira linha que tivesse
+		// QUALQUER nome. Linha PN so com push_name e linha @lid com o nome
+		// completo: o nome longo se perdia e deixava de proteger o prefixo.
+		const pnCurto = "participante-d@s.whatsapp.net"
+		const lidLongo = "participante-d@lid"
+		for _, ins := range [][]any{
+			{pnCurto, "AnaP", "", "", ""},
+			{lidLongo, "", "Ana Paula", "Ana", ""},
+		} {
+			if _, err := db.Exec(
+				"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+				ins...,
+			); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+
+		p := mentionParticipant{jid: pnCurto, outrasChaves: []string{lidLongo}, phoneUser: "participante-d"}
+		store.fillSenderNames(&p)
+
+		if p.pushName != "AnaP" {
+			t.Fatalf("pushName = %q, want o da linha PN", p.pushName)
+		}
+		if p.fullName != "Ana Paula" {
+			t.Fatalf("fullName = %q, want o da linha @lid — sem ele o prefixo fica desprotegido", p.fullName)
 		}
 	})
 
@@ -3628,7 +3826,7 @@ func TestFillSenderNamesPorLID(t *testing.T) {
 		); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		p := mentionParticipant{jid: pn, altJID: lid, phoneUser: "participante-c"}
+		p := mentionParticipant{jid: pn, outrasChaves: []string{lid}, phoneUser: "participante-c"}
 		store.fillSenderNames(&p)
 		if p.fullName != "Nome Pela Forma PN" {
 			t.Fatalf("fullName = %q, want the PN row to win", p.fullName)

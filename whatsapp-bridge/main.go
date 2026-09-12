@@ -867,9 +867,20 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 // in that case is refused rather than sent, because WhatsApp will not highlight an
 // @lid and the text would carry a stranger-looking identifier (achado da rodada 5).
 type mentionParticipant struct {
-	jid          string
-	altJID       string // the same person's @lid form, when the group gave us one
-	phoneUser    string // JID user part — what "@" is followed by in the substituted text
+	jid string
+	// outrasChaves sao as OUTRAS formas de endereco da mesma pessoa (@lid, e a
+	// forma que o grupo devolveu), porque a tabela senders pode ter a linha sob
+	// qualquer uma delas. Era um campo so, preenchido com gp.JID — que e a
+	// forma PN sempre que o grupo e endereçado por telefone, ou seja, igual ao
+	// jid: a busca consultava a MESMA linha duas vezes e a linha @lid nunca era
+	// alcancada (achado 3 da rodada 9). gp.LID existe e e quem resolve.
+	outrasChaves []string
+	// phoneUser e o numero com que "@" e escrito no texto (D4). VAZIO significa
+	// que esta pessoa nao pode ser mencionada — o grupo nao devolveu telefone
+	// para ela. Ela continua na lista mesmo assim: o nome dela ainda precisa
+	// proteger o prefixo de um nome mais curto, e ainda precisa contar na
+	// ambiguidade da D6 (achado 2 da rodada 9).
+	phoneUser    string
 	pushName     string
 	fullName     string
 	firstName    string
@@ -880,9 +891,13 @@ type mentionParticipant struct {
 // either a resolvedMention (single match) or a MentionCandidateResponse
 // (ambiguous match, D6) — never a phone number or JID in the latter.
 type mentionMatch struct {
-	jid    string
-	name   string
-	origem string // "agenda" (full_name/first_name) | "whatsapp" (push_name) | "negocio" (business_name)
+	jid string
+	// phoneUser vazio: casou por nome, mas nao da para mencionar — o grupo nao
+	// devolveu telefone para esta pessoa. Vale para a pergunta da D6, nao para
+	// o envio.
+	phoneUser string
+	name      string
+	origem    string // "agenda" (full_name/first_name) | "whatsapp" (push_name) | "negocio" (business_name)
 }
 
 // resolvedMention is one mention ready to apply to the outbound text (D4):
@@ -920,10 +935,12 @@ type MentionCandidateResponse struct {
 // mention the other one. Silently mentioning the wrong person is exactly
 // what D6 exists to prevent.
 func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
-	for _, key := range []string{p.jid, p.altJID} {
-		if key == "" {
+	vistas := make(map[string]bool, 3)
+	for _, key := range append([]string{p.jid}, p.outrasChaves...) {
+		if key == "" || vistas[key] {
 			continue
 		}
+		vistas[key] = true
 		var pushName, fullName, firstName, businessName sql.NullString
 		err := store.db.QueryRow(
 			"SELECT push_name, full_name, first_name, business_name FROM senders WHERE jid = ?", key,
@@ -931,12 +948,21 @@ func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
 		if err != nil {
 			continue
 		}
-		p.pushName = pushName.String
-		p.fullName = fullName.String
-		p.firstName = firstName.String
-		p.businessName = businessName.String
-		if p.pushName != "" || p.fullName != "" || p.firstName != "" || p.businessName != "" {
-			return
+		// Junta campo a campo em vez de parar na primeira linha que tenha
+		// QUALQUER nome. A linha PN pode ter so push_name e a linha @lid o
+		// full_name; parando na primeira, o nome longo se perdia e deixava de
+		// proteger o prefixo — e ai saia a pessoa errada grifada, sem recusa
+		// (achado 2 da rodada 9).
+		for _, campo := range []struct {
+			destino *string
+			veio    sql.NullString
+		}{
+			{&p.pushName, pushName}, {&p.fullName, fullName},
+			{&p.firstName, firstName}, {&p.businessName, businessName},
+		} {
+			if *campo.destino == "" {
+				*campo.destino = campo.veio.String
+			}
 		}
 	}
 }
@@ -946,8 +972,14 @@ func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
 // senders table (push_name/full_name/first_name/business_name) — never from
 // GetGroupInfo's DisplayName, measured empty for every participant in this
 // environment (its JID comes back @lid, not a phone number, so the name has
-// to be looked up separately). A participant with no resolvable phone number
-// is skipped: there's no number to mention them with.
+// to be looked up separately).
+//
+// A participant with no resolvable phone number comes back with an empty
+// phoneUser — present, but not mentionable. Skipping them outright is what the
+// first version did, and it was wrong twice over (achado 2 da rodada 9): the
+// name still has to protect the prefix of a shorter name, and it still has to
+// count in D6's ambiguity. Dropping it turned both into a silent mention of
+// the wrong person.
 func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID) ([]mentionParticipant, error) {
 	if chatJID.Server != types.GroupServer {
 		p := mentionParticipant{jid: chatJID.String(), phoneUser: chatJID.User}
@@ -960,14 +992,33 @@ func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chat
 	}
 	participants := make([]mentionParticipant, 0, len(groupInfo.Participants))
 	for _, gp := range groupInfo.Participants {
-		if gp.PhoneNumber.IsEmpty() {
-			continue
-		}
-		p := mentionParticipant{jid: gp.PhoneNumber.String(), altJID: gp.JID.String(), phoneUser: gp.PhoneNumber.User}
+		p := participanteDoGrupo(gp)
 		messageStore.fillSenderNames(&p)
 		participants = append(participants, p)
 	}
 	return participants, nil
+}
+
+// participanteDoGrupo traduz o que GetGroupInfo devolve para o participante que
+// a resolucao de mencao usa. Esta fora do laco de proposito: e AQUI que morava
+// o achado 3 da rodada 9 — a chave alternativa vinha de gp.JID, que e a forma
+// PN sempre que o grupo e endereçado por telefone, ou seja igual ao jid, e a
+// linha @lid da tabela senders nunca era alcancada. Um teste que monta o
+// participante na mao prova que a busca LE o campo; so um teste que passa por
+// esta funcao prova que a producao o PREENCHE.
+func participanteDoGrupo(gp types.GroupParticipant) mentionParticipant {
+	p := mentionParticipant{jid: gp.PhoneNumber.String(), phoneUser: gp.PhoneNumber.User}
+	if gp.PhoneNumber.IsEmpty() {
+		// Sem telefone nao da para mencionar, mas a pessoa continua na lista:
+		// o nome dela protege o prefixo e conta na ambiguidade da D6.
+		p = mentionParticipant{jid: gp.JID.String()}
+	}
+	for _, chave := range []types.JID{gp.LID, gp.JID} {
+		if !chave.IsEmpty() && chave.String() != p.jid {
+			p.outrasChaves = append(p.outrasChaves, chave.String())
+		}
+	}
+	return p
 }
 
 // digitosDe devolve so os digitos de s — o teste de "isto tem cara de
@@ -1058,7 +1109,7 @@ func rotulosDistintos(participants []mentionParticipant, matches []mentionMatch)
 // same requested name through different fields (e.g. two whose first_name is
 // "Rodrigo").
 func matchMentionName(participants []mentionParticipant, name string) []mentionMatch {
-	target := stripAccents(strings.TrimSpace(name))
+	target := nomeNormalizado(name)
 	if target == "" {
 		return nil
 	}
@@ -1073,14 +1124,14 @@ func matchMentionName(participants []mentionParticipant, name string) []mentionM
 	var matches []mentionMatch
 	for _, p := range participants {
 		switch {
-		case p.fullName != "" && stripAccents(p.fullName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.fullName), origem: "agenda"})
-		case p.firstName != "" && stripAccents(p.firstName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.firstName), origem: "agenda"})
-		case p.pushName != "" && stripAccents(p.pushName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.pushName), origem: "whatsapp"})
-		case p.businessName != "" && stripAccents(p.businessName) == target:
-			matches = append(matches, mentionMatch{jid: p.jid, name: rotuloDoParticipante(p, p.businessName), origem: "negocio"})
+		case p.fullName != "" && nomeNormalizado(p.fullName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, phoneUser: p.phoneUser, name: rotuloDoParticipante(p, p.fullName), origem: "agenda"})
+		case p.firstName != "" && nomeNormalizado(p.firstName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, phoneUser: p.phoneUser, name: rotuloDoParticipante(p, p.firstName), origem: "agenda"})
+		case p.pushName != "" && nomeNormalizado(p.pushName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, phoneUser: p.phoneUser, name: rotuloDoParticipante(p, p.pushName), origem: "whatsapp"})
+		case p.businessName != "" && nomeNormalizado(p.businessName) == target:
+			matches = append(matches, mentionMatch{jid: p.jid, phoneUser: p.phoneUser, name: rotuloDoParticipante(p, p.businessName), origem: "negocio"})
 		}
 	}
 	return matches
@@ -1182,13 +1233,21 @@ func randomHexID(n int) string {
 // list, comparing without the device suffix — a participant list and a stored
 // JID do not always carry the same addressing.
 func isChatParticipant(participants []mentionParticipant, jid string) bool {
+	_, ok := participantePorJID(participants, jid)
+	return ok
+}
+
+// participantePorJID acha quem, nesta conversa, e o dono deste JID — e devolve
+// o participante inteiro, nao um sim/nao: quem resolve uma mencao precisa do
+// phoneUser dele, que e a unica fonte do numero escrito no texto.
+func participantePorJID(participants []mentionParticipant, jid string) (mentionParticipant, bool) {
 	alvo := semDispositivo(jid)
 	for _, p := range participants {
 		if semDispositivo(p.jid) == alvo {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return mentionParticipant{}, false
 }
 
 // semDispositivo drops the ":<device>" part of an addressed JID.
@@ -1246,13 +1305,14 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 			// participant list is the authority on who can be mentioned here
 			// (D6), and membership can change between the refusal and the
 			// resend.
-			if !isChatParticipant(participants, jid) {
+			p, ok := participantePorJID(participants, jid)
+			if !ok {
 				return nil, nil, nil, fmt.Sprintf("mention ref %q is not a participant of this chat — redo the mention by name", refID), http.StatusBadRequest
 			}
-			phoneUser := jid
-			if idx := strings.Index(jid, "@"); idx >= 0 {
-				phoneUser = jid[:idx]
+			if p.phoneUser == "" {
+				return nil, nil, nil, fmt.Sprintf("%q is in this chat but has no phone number the bridge can mention them with — nothing was sent", name), http.StatusBadRequest
 			}
+			phoneUser := p.phoneUser
 			resolved = append(resolved, resolvedMention{name: name, phoneUser: phoneUser, jid: jid, viaRef: true})
 			continue
 		}
@@ -1270,11 +1330,10 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 			}
 			return nil, nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest
 		}
-		phoneUser := matches[0].jid
-		if idx := strings.Index(phoneUser, "@"); idx >= 0 {
-			phoneUser = matches[0].jid[:idx]
+		if matches[0].phoneUser == "" {
+			return nil, nil, nil, fmt.Sprintf("%q is in this chat but has no phone number the bridge can mention them with — nothing was sent", matches[0].name), http.StatusBadRequest
 		}
-		resolved = append(resolved, resolvedMention{name: raw, phoneUser: phoneUser, jid: matches[0].jid})
+		resolved = append(resolved, resolvedMention{name: raw, phoneUser: matches[0].phoneUser, jid: matches[0].jid})
 	}
 	return resolved, nomesDeParticipantes(participants), nil, "", 0
 }
@@ -1340,6 +1399,16 @@ func textoNormalizado(s string) (string, []int, []int) {
 	}
 	for o, r := range s {
 		paraNormalizado[o] = b.Len()
+		if ehSeparadorDeNome(r) {
+			// Corrida de separadores vale por UM espaco. O primeiro da corrida
+			// e quem carrega a posicao original; os demais nao emitem byte, e
+			// e por isso que o recorte continua exato.
+			if b.Len() == 0 || b.String()[b.Len()-1] != ' ' {
+				b.WriteByte(' ')
+				paraOriginal = append(paraOriginal, o)
+			}
+			continue
+		}
 		for _, d := range norm.NFD.String(string(r)) {
 			if unicode.Is(unicode.Mn, d) {
 				continue
@@ -1404,7 +1473,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 	}
 	cands := make([]candidato, 0, len(resolved)+len(outrosNomes))
 	for i, r := range resolved {
-		if n := stripAccents(r.name); n != "" {
+		if n := nomeNormalizado(r.name); n != "" {
 			cands = append(cands, candidato{nome: r.name, norm: n, idx: i})
 		}
 	}
@@ -1427,7 +1496,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 		// no maximo se paga uma recusa — que e a falha segura.
 		donos := 0
 		for _, outro := range outrosNomes {
-			if stripAccents(outro.nome) == stripAccents(n.nome) && outro.jid != n.jid {
+			if nomeNormalizado(outro.nome) == nomeNormalizado(n.nome) && outro.jid != n.jid {
 				donos++
 			}
 		}
@@ -1442,7 +1511,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			idx = i
 			break
 		}
-		norma := stripAccents(n.nome)
+		norma := nomeNormalizado(n.nome)
 		if norma == "" {
 			continue
 		}
@@ -4246,16 +4315,40 @@ func extractDirectPathFromURL(url string) string {
 // decomposition, drop Mn category), matching Python's _strip_accents exactly
 // so LIKE-based search behaves the same regardless of accents/case.
 func stripAccents(s string) string {
-	t := norm.NFD.String(s)
-	var b strings.Builder
-	b.Grow(len(t))
-	for _, r := range t {
-		if unicode.Is(unicode.Mn, r) {
-			continue
-		}
-		b.WriteRune(r)
+	normalizado, _, _ := textoNormalizado(s)
+	return normalizado
+}
+
+// nomeNormalizado e a regua de nome inteira: sem espaco nas pontas, sem acento,
+// sem caixa, e com todo separador reduzido a um espaco. E a UNICA regua — quem
+// casa nome, aqui ou na varredura do texto, chama esta funcao.
+func nomeNormalizado(s string) string {
+	return stripAccents(strings.TrimSpace(s))
+}
+
+// ehSeparadorDeNome diz se o rune separa duas partes de um nome em vez de fazer
+// parte dele. Todo espaco entra (inclusive o inquebravel U+00A0 e o fino
+// U+202F, que saem de teclado de celular e de colagem), e tambem o hifen e o
+// sublinhado.
+//
+// A classe e generosa DE PROPOSITO, e a direcao importa: o candidato longo que
+// protege o prefixo so protege se casar. Nao casar significa substituir o nome
+// curto e ENVIAR com a pessoa errada grifada; casar de mais significa, no pior
+// caso, deixar o texto intacto e pagar uma recusa. Falha segura de um lado so
+// (achado 1 da rodada 9: "@Ana  Paula" com espaco duplo, NBSP, quebra de linha
+// ou hifen enviava a Ana grifada onde o autor nomeou a Ana Paula).
+//
+// O ponto final fica de fora: ele tambem encerra frase, e "@Ana. Paula vem?"
+// viraria recusa num texto em que o autor quis mesmo a Ana.
+func ehSeparadorDeNome(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
 	}
-	return strings.ToLower(b.String())
+	switch r {
+	case '-', '\u2010', '\u2011', '\u2013', '\u2014', '_':
+		return true
+	}
+	return false
 }
 
 // APIMessage is the wire shape for a message row (Message is already taken by

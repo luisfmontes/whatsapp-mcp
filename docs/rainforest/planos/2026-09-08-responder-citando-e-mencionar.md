@@ -610,3 +610,85 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `pronto quando:` um nome com letras e um telefone dentro vira marcador, e o
   nome com oito dígitos continua passando — provado por
   `test_scrub_mentions.TelefoneEmbutidoNoNomeTest`.
+
+- **2026-09-12 (rodada 9) — a régua da rodada 8 dobrava caixa e acento, e mais
+  nada: bastava separar o nome de outro jeito para a proteção de prefixo cair.**
+  Com `Ana` e `Ana Paula` na conversa e `mentions: ["Ana"]`, o autor escrevendo
+  `@Ana  Paula` (espaço duplo), `@Ana<NBSP>Paula` (teclado de celular),
+  `@Ana\nPaula` ou `@Ana-Paula` fazia o nome longo **não casar** — e saía a Ana
+  grifada onde o autor nomeou a Ana Paula, **enviado**, sem recusa. Entra
+  `ehSeparadorDeNome`: toda corrida de separador (espaço de qualquer tipo, hífen,
+  travessão, sublinhado) vale por um espaço, dos dois lados. A classe é generosa
+  de propósito, porque a direção do erro é assimétrica: não casar ENVIA a pessoa
+  errada; casar demais no máximo deixa o texto intacto e paga uma recusa. O ponto
+  final ficou de fora — ele também encerra frase.
+  Decorrência: `stripAccents` passou a ser um invólucro de `textoNormalizado`, e
+  `nomeNormalizado` é a única régua de nome do arquivo. As duas pontas não têm
+  mais como divergir, que foi o bloqueante da rodada 8.
+  `pronto quando:` com o nome do outro escrito com qualquer um desses
+  separadores, a ponte recusa 400 e não reescreve nada — provado por
+  `TestSeparadorNaoAbreOPrefixo`.
+
+- **2026-09-12 (rodada 9) — participante sem telefone sumia da lista, e sumir
+  era errado duas vezes.** `chatParticipants` pulava quem o grupo devolve sem
+  `PhoneNumber`. Não dá para mencionar essa pessoa — mas o nome dela ainda
+  precisa proteger o prefixo de um nome mais curto, e ainda precisa contar na
+  ambiguidade da D6. Sumindo, as duas viravam menção silenciosa da pessoa errada.
+  Agora ela entra com `phoneUser` vazio: presente, não mencionável; pedir por
+  nome recusa 400 sem dizer endereço nenhum.
+  Na mesma linha, `fillSenderNames` parava na primeira chave que devolvesse
+  **qualquer** nome — linha PN só com `push_name` e linha `@lid` com o nome
+  completo faziam o nome longo se perder. Passou a juntar campo a campo.
+  `pronto quando:` o nome de quem não tem telefone ainda recusa a substituição
+  do nome curto, e ainda faz a D6 perguntar — provado por
+  `TestParticipanteSemTelefoneContinuaContando`; e a linha `@lid` completa o que
+  falta na linha PN — `TestFillSenderNamesPorLID/campo_que_falta_na_linha_PN_vem_da_linha_lid`.
+
+- **2026-09-12 (rodada 9) — a chave alternativa de busca era `gp.JID`, que é a
+  forma PN, e a linha `@lid` nunca era alcançada.** A documentação do whatsmeow
+  define `GroupParticipant.JID` como "always equals either the LID or phone
+  number": num grupo endereçado por telefone ela é igual ao `jid`, e o laço de
+  duas chaves consultava a **mesma linha duas vezes**. `gp.LID` existe e é quem
+  resolve. O campo virou `outrasChaves []string` (LID e JID, sem repetir o jid),
+  e a conversão saiu do laço para `participanteDoGrupo` — um teste que monta o
+  participante à mão prova que a busca **lê** o campo, só um que passa pela
+  conversão prova que a produção o **preenche**.
+  `pronto quando:` `participanteDoGrupo` de um grupo endereçado por telefone traz
+  o LID entre as chaves — provado por `TestParticipanteDoGrupoGuardaOLID`.
+
+- **2026-09-12 (rodada 9) — `phoneUser` era escrito e nunca lido.** A resolução
+  re-derivava o número do JID por conta própria. Agora `mentionMatch` carrega o
+  `phoneUser` do participante e é ele quem vai para o texto — que é o que torna
+  "sem telefone" representável.
+
+- **2026-09-12 (rodada 9) — telefone pontuado dentro de nome com letras escapava.**
+  A régua da rodada 8 exigia a corrida **contígua** de dez dígitos, e
+  `"Zap Fulano +55 62 98888-7777"` — a forma canônica de rótulo de agenda
+  brasileira — passava inteira. A corrida passou a admitir a pontuação com que se
+  escreve telefone entre os dígitos. Medido de novo contra os dois stores:
+  dos 5.331 nomes, **nenhum** nome legítimo é marcado a mais. Custo: zero.
+  `pronto quando:` `"Joao Pedreiro +55 62 98888-7777"` vira marcador e
+  `"Turma 2026 - 2027"` continua nome — `TelefonePontuadoDentroDoNomeTest`.
+
+- **2026-09-12 (rodada 9) — a leitura trocava `@número` por nome na ordem da
+  lista, e com um número sendo prefixo de outro mostrava a pessoa errada.**
+  Mesmo defeito de prefixo do lado Go, na superfície de leitura: saía o nome de
+  um com o resto do número do outro colado — e o resto escapava do scrub. Passou
+  a percorrer do número mais longo para o mais curto.
+  `pronto quando:` `LeituraDeMencaoComPrefixoTest`.
+
+- **2026-09-12 (rodada 9) — o scrub mordia `@` que ninguém pediu.** `@20260912`
+  numa mensagem virava `@(contato sem nome)`: a D5 vale na leitura também. A
+  peneira subiu de oito para dez dígitos, a mesma régua do resto — um número
+  mencionável é um telefone inteiro.
+  `pronto quando:` `ArrobaQueNinguemPediuTest`.
+
+- **2026-09-12 (rodada 9) — `message_to_public_dict` guardava `sender` cru, que é
+  o telefone.** O raciocínio anterior era que `sender` e `chat_jid` eram
+  "endereços que já existiam"; para `sender` isso é falso — **nenhuma** tool o
+  aceita de entrada (responder usa `chat_jid`, citar usa `quoted_message_id`,
+  mencionar usa nome). Ele só carregava o telefone de terceiro para dentro de uma
+  resposta de API que **este trabalho criou**. Saiu. Quem quer saber quem falou
+  lê `sender_name`.
+  `pronto quando:` o dicionário não tem a chave `sender` —
+  `SuperficieEstruturadaNaoCarregaORemetenteCruTest`.

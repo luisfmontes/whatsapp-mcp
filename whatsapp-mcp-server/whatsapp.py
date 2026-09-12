@@ -335,7 +335,11 @@ def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) ->
     return name, None
 
 
-_TELEFONE_EMBUTIDO = re.compile(r"\d{10,}")
+# Dez dígitos ou mais que só se separam pela pontuação com que se escreve
+# telefone — espaço, hífen, parênteses, "+". A corrida não precisa ser contígua:
+# "+55 62 98888-7777" é telefone tanto quanto "5562988887777", e a régua da
+# rodada 8 só via o segundo (achado 4 da rodada 9).
+_TELEFONE_EMBUTIDO = re.compile(r"\d(?:[\s\-+()./]*\d){9,}")
 
 
 def _tem_forma_de_telefone(nome: str) -> bool:
@@ -347,14 +351,14 @@ def _tem_forma_de_telefone(nome: str) -> bool:
     máximo a pontuação que se usa para escrevê-los.
     """
     if _TELEFONE_EMBUTIDO.search(nome):
-        # Telefone EMBUTIDO num nome com letras — "Zap <treze dígitos>" — passava
-        # inteiro pela régua abaixo, que só olha a string toda (observação da
-        # rodada 8). A corrida aqui é de DEZ dígitos, não oito: oito é o tamanho
-        # de um número local sem DDD, e "Turma 2026 - Projeto 12345678" é nome de
-        # verdade (rodada 7); com DDD são dez, com DDI treze. Medido nos dois
-        # stores reais: dos 5.331 nomes gravados, NENHUM nome legítimo carrega
-        # corrida de dez dígitos fora de uma string que já é toda telefone.
-        # Custo medido da regra: zero nome real.
+        # Telefone EMBUTIDO num nome com letras — "Zap Fulano +55 62 98888-7777",
+        # que é a forma canônica de rótulo de agenda brasileira — passava inteiro
+        # pela régua abaixo, que só olha a string toda. São DEZ dígitos, não oito:
+        # oito é o tamanho de um número local sem DDD, e "Turma 2026 - Projeto
+        # 12345678" é nome de verdade (rodada 7); com DDD são dez, com DDI treze.
+        # Medido nos dois stores reais, as duas vezes: dos 5.331 nomes gravados,
+        # NENHUM nome legítimo é marcado por esta régua e escapava da anterior.
+        # Custo medido: zero nome real.
         return True
     if len(re.sub(r"\D", "", nome)) < 8:
         return False
@@ -410,7 +414,12 @@ def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
 # "@" followed by a long digit run is a mention by construction: WhatsApp
 # requires the literal "@<number>" in the body for the highlight to render, so
 # nothing else produces that shape in a message body.
-_MENTION_NUMERO = re.compile(r"@\d{8,}")
+#
+# Dez dígitos, não oito, e pela mesma régua do resto: um número mencionável é um
+# telefone inteiro (DDI+DDD+número), e com oito a peneira mordia "@" que ninguém
+# pediu — "@20260912", uma data, virava "@(contato sem nome)" na leitura, contra
+# a D5 (observação 5 da rodada 9).
+_MENTION_NUMERO = re.compile(r"@\d{10,}")
 
 
 def _scrub_mention_numbers(text: str) -> str:
@@ -437,7 +446,12 @@ def _mentions_by_name(text: str, mentions: List[str], account: Optional[str] = N
     """
     if not text or not mentions:
         return text
-    for jid in mentions:
+    # Do mais longo para o mais curto, pelo mesmo motivo que a ponte ordena os
+    # candidatos assim: com um número sendo prefixo de outro, trocar o curto
+    # primeiro come o prefixo do longo e a leitura mostra o nome de uma pessoa
+    # com o resto do número de outra colado — e o resto ainda escapa do scrub,
+    # que só reconhece corrida longa (observação 1 da rodada 9).
+    for jid in sorted(mentions, key=lambda j: -len((_strip_device_suffix(j) or "").split("@", 1)[0])):
         user = (_strip_device_suffix(jid) or "").split("@", 1)[0]
         if not user:
             continue
@@ -473,9 +487,17 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
     dataclass directly, and it is the very tool the `send_message` docstring
     points at to find a `quoted_message_id`.
 
-    `sender` and `chat_jid` stay as they are: they are addressing handles that
-    already existed and that callers use to reply. What this function fixes is
-    what THIS work introduced.
+    `sender` saiu da resposta (achado 5 da rodada 9). O raciocínio anterior era
+    que ele e `chat_jid` eram "endereços que já existiam e que quem chama usa
+    para responder" — e para `sender` isso é falso: nenhuma tool o aceita de
+    entrada (responder usa `chat_jid`, citar usa `quoted_message_id`, mencionar
+    usa nome), então ele só carregava o telefone de terceiro para dentro de uma
+    resposta de API que ESTE trabalho criou. Quem quer saber quem falou lê
+    `sender_name`.
+
+    `chat_jid` fica: é o endereço com que se responde, e sem ele a conversa não
+    é endereçável. Em 1:1 ele é o telefone, e isso é uma ponta solta declarada,
+    não uma decisão silenciosa.
 
     The second review round found the same leak one field over: `quoted_content`
     is the BODY of the quoted message, and a body that mentions someone carries
@@ -495,7 +517,6 @@ def message_to_public_dict(message: Message, account: Optional[str] = None) -> D
     return {
         "id": message.id,
         "timestamp": message.timestamp.isoformat() if message.timestamp else None,
-        "sender": message.sender,
         "sender_name": sender_name,
         **({"sender_name_error": falha_do_nome} if falha_do_nome else {}),
         "chat_jid": message.chat_jid,

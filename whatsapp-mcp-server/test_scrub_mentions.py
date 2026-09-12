@@ -13,6 +13,7 @@ mensagem está vazia — linha gravada antes de a coluna existir, por exemplo.
 
 import re
 import unittest
+import whatsapp
 from datetime import datetime
 from unittest import mock
 
@@ -232,6 +233,84 @@ class NomeComDigitosMasDeVerdadeTest(unittest.TestCase):
         with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
             d = message_to_public_dict(_msg(chat_name=formatado))
         self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
+
+
+class TelefonePontuadoDentroDoNomeTest(unittest.TestCase):
+    """Achado 4 da rodada 9: a regua da rodada 8 exigia a corrida CONTIGUA, e
+    "Zap Fulano +55 62 98888-7777" — a forma canonica de rotulo de agenda
+    brasileira — passava inteira. Telefone com separador e telefone.
+    """
+
+    def _com_separador(self):
+        local = FALSO[4:]
+        return "+" + DDI_DDD[:2] + " " + DDI_DDD[2:] + " " + local[:4] + "-" + local[4:]
+
+    def test_nome_com_telefone_pontuado_dentro_vira_marcador(self):
+        nome = "Joao Pedreiro " + self._com_separador()
+        with mock.patch("whatsapp.get_sender_name", return_value=nome):
+            d = message_to_public_dict(_msg())
+        self.assertEqual(d["sender_name"], UNNAMED_CONTACT)
+
+    def test_linha_de_leitura_nao_imprime_esse_nome(self):
+        nome = "Zap " + self._com_separador()
+        with mock.patch("whatsapp.get_sender_name", return_value=nome):
+            saida = whatsapp.format_message(_msg())
+        self.assertNotIn(FALSO[4:9], saida)
+
+    def test_data_de_quatro_digitos_com_hifen_continua_sendo_nome(self):
+        # A regua pede DEZ digitos; "Turma 2026 - 2027" tem oito.
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name="Turma 2026 - 2027"))
+        self.assertEqual(d["chat_name"], "Turma 2026 - 2027")
+
+
+class LeituraDeMencaoComPrefixoTest(unittest.TestCase):
+    """Observacao 1 da rodada 9: a leitura trocava `@numero` por nome na ordem
+    da lista. Com um numero sendo prefixo de outro, saia o nome de uma pessoa
+    com o resto do numero de outra colado — e o resto escapa do scrub.
+    """
+
+    def test_numero_mais_longo_vence_a_posicao(self):
+        curto = FALSO[:10] + "@s." + "whatsapp" + ".net"
+        longo = FALSO[:11] + "@s." + "whatsapp" + ".net"
+        nomes = {curto: "Ana", longo: "Bruno"}
+
+        with mock.patch("whatsapp._display_name", side_effect=lambda j, a=None: nomes[j]):
+            saida = whatsapp._mentions_by_name("oi @" + FALSO[:11] + ", tudo bem?", [curto, longo])
+
+        self.assertEqual(saida, "oi @Bruno, tudo bem?")
+
+
+class ArrobaQueNinguemPediuTest(unittest.TestCase):
+    """Observacao 5 da rodada 9: o scrub mordia `@` de codigo e de data. A D5
+    vale na leitura tambem — `@` que nao e mencao passa intacto.
+    """
+
+    def test_data_com_arroba_sobrevive(self):
+        self.assertEqual(
+            whatsapp._scrub_mention_numbers("pedido @20260912 hoje"),
+            "pedido @20260912 hoje",
+        )
+
+    def test_telefone_mencionado_continua_virando_marcador(self):
+        self.assertEqual(
+            whatsapp._scrub_mention_numbers("oi @" + FALSO + " tudo bem"),
+            "oi @" + UNNAMED_CONTACT + " tudo bem",
+        )
+
+
+class SuperficieEstruturadaNaoCarregaORemetenteCruTest(unittest.TestCase):
+    """Achado 5 da rodada 9: `message_to_public_dict` — forma de API criada por
+    este trabalho — guardava `sender` cru, que e o telefone. Nenhuma tool o
+    aceita de entrada: responder usa `chat_jid`, citar usa `quoted_message_id`,
+    mencionar usa nome. Quem quer saber quem falou le `sender_name`.
+    """
+
+    def test_sem_chave_sender(self):
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg())
+        self.assertNotIn("sender", d)
+        self.assertEqual(d["sender_name"], "Fulana")
 
 
 class TelefoneEmbutidoNoNomeTest(unittest.TestCase):
