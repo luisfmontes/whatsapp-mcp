@@ -692,3 +692,32 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   lê `sender_name`.
   `pronto quando:` o dicionário não tem a chave `sender` —
   `SuperficieEstruturadaNaoCarregaORemetenteCruTest`.
+
+- **2026-09-12 (rodada 9, decisão do Luís) — `chat_jid` em conversa 1:1 é o
+  telefone, e fica.** Ele aparece em `list_chats` (`Chat.jid`), em
+  `get_message_context` (`chat_jid`) e na linha de mídia de `list_messages`
+  (`Chat JID:`). É a chave de endereçamento de todas as tools que escrevem
+  (`send_message`, `send_file`, `download_media`): trocá-lo por um identificador
+  opaco significa tabela de tradução na ponte e mexer em toda a superfície —
+  trabalho maior que esta entrega inteira. Perguntado ao Luís em 2026-09-12 com
+  as três saídas na mão; ele escolheu deixar e registrar.
+  **Ponta solta declarada, não decisão silenciosa:** em 1:1, quem lê a resposta
+  dessas três tools vê o telefone do outro lado.
+
+- **2026-09-12 (rodada 9, decisão do Luís) — `get_group_info` devolvia telefone,
+  JID e LID de TODO participante; passa a devolver nome e um `ref` opaco.**
+  Num grupo de 40 pessoas eram 40 telefones numa resposta de API. É código
+  pré-existente (nenhuma linha dele estava no diff), então consertar aqui cresce
+  o escopo — perguntado ao Luís, que escolheu consertar nesta entrega.
+  A saída por participante virou `{name, is_admin, is_super_admin, ref}`. O nome
+  é o mais específico conhecido, pela mesma régua da D3 (nome com cara de
+  telefone vira `(contato sem nome)`) e passando por `rotulosDistintos`, para
+  dois membros nunca voltarem sob o mesmo rótulo. O `ref` é o **mesmo** mecanismo
+  opaco da pergunta da D6 — preso ao grupo que o emitiu, 10 minutos de validade —
+  e `/api/group_participants` passou a aceitá-lo como `"ref:<token>"`. A resposta
+  do próprio `update_group_participants` também trocou `jid` por `ref`.
+  Adicionar alguém que ainda não está no grupo continua exigindo número: não há
+  outro jeito de endereçar quem a conversa não conhece.
+  `pronto quando:` `/api/group_info` não devolve dígito de telefone nenhum, e um
+  `ref` lido dali remove a pessoa certa pelo `/api/group_participants` — provado
+  por `TestGrupoDescritoPorNome` e `TestRefDeGrupoApontaAPessoa`.

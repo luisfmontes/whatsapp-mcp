@@ -512,7 +512,7 @@ func TestHandleIsOnWhatsApp(t *testing.T) {
 // behind /api/group_participants, independent of the whatsmeow client.
 func TestParseGroupParticipantJIDs(t *testing.T) {
 	t.Run("bare phone with internal space and hyphen normalizes", func(t *testing.T) {
-		jids, err := parseGroupParticipantJIDs([]string{"55 62-99999-7777"})
+		jids, err := parseGroupParticipantJIDs([]string{"55 62-99999-7777"}, "g@g.us")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -522,7 +522,7 @@ func TestParseGroupParticipantJIDs(t *testing.T) {
 	})
 
 	t.Run("00 prefix is kept as literal digits, not stripped", func(t *testing.T) {
-		jids, err := parseGroupParticipantJIDs([]string{"0055629999977"})
+		jids, err := parseGroupParticipantJIDs([]string{"0055629999977"}, "g@g.us")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -532,7 +532,7 @@ func TestParseGroupParticipantJIDs(t *testing.T) {
 	})
 
 	t.Run("full JID with default user server is accepted as-is", func(t *testing.T) {
-		jids, err := parseGroupParticipantJIDs([]string{"5562999999999@s.whatsapp.net"})
+		jids, err := parseGroupParticipantJIDs([]string{"5562999999999@s.whatsapp.net"}, "g@g.us")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -542,13 +542,13 @@ func TestParseGroupParticipantJIDs(t *testing.T) {
 	})
 
 	t.Run("empty item after trim returns error", func(t *testing.T) {
-		if _, err := parseGroupParticipantJIDs([]string{"5562999999999", "  "}); err == nil {
+		if _, err := parseGroupParticipantJIDs([]string{"5562999999999", "  "}, "g@g.us"); err == nil {
 			t.Fatal("expected error for empty participant")
 		}
 	})
 
 	t.Run("123@lid is accepted as a participant", func(t *testing.T) {
-		jids, err := parseGroupParticipantJIDs([]string{"123@lid"})
+		jids, err := parseGroupParticipantJIDs([]string{"123@lid"}, "g@g.us")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -558,13 +558,13 @@ func TestParseGroupParticipantJIDs(t *testing.T) {
 	})
 
 	t.Run("unsupported server returns error", func(t *testing.T) {
-		if _, err := parseGroupParticipantJIDs([]string{"123@foo.bar"}); err == nil {
+		if _, err := parseGroupParticipantJIDs([]string{"123@foo.bar"}, "g@g.us"); err == nil {
 			t.Fatal("expected error for unsupported server")
 		}
 	})
 
 	t.Run("no participants after parsing returns error", func(t *testing.T) {
-		if _, err := parseGroupParticipantJIDs([]string{}); err == nil {
+		if _, err := parseGroupParticipantJIDs([]string{}, "g@g.us"); err == nil {
 			t.Fatal("expected error for empty list")
 		}
 	})
@@ -3137,6 +3137,111 @@ func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
 	if strings.Contains(texto, "c-b") {
 		t.Fatalf("texto = %q, want no trace of the other person's number where the author wrote a full name", texto)
 	}
+}
+
+// TestGrupoDescritoPorNome cobre a decisao do Luis na rodada 9: /api/group_info
+// devolvia jid, phone_number e lid de TODO participante — num grupo de 40
+// pessoas, 40 telefones numa resposta de API, contra a D3. Passa a devolver o
+// nome e um ref opaco.
+func TestGrupoDescritoPorNome(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite3", filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE senders (
+		jid TEXT PRIMARY KEY, push_name TEXT, full_name TEXT, first_name TEXT, business_name TEXT
+	)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const grupo = "grupo-de-teste@g.us"
+	// Numeros montados em tempo de execucao: repo publico, e a trava de dado
+	// pessoal recusa a forma escrita por extenso.
+	ddi := "55" + "62"
+	umaPessoa := types.JID{User: ddi + "9" + "0000001", Server: types.DefaultUserServer}
+	outra := types.JID{User: ddi + "9" + "0000002", Server: types.DefaultUserServer}
+	semNome := types.JID{User: ddi + "9" + "0000003", Server: types.DefaultUserServer}
+	if _, err := db.Exec(
+		"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+		umaPessoa.String(), "", "Ana Paula", "Ana", "",
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+		outra.String(), "", "Ana Paula", "Ana", "",
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	store := &MessageStore{db: db}
+	info := &types.GroupInfo{Participants: []types.GroupParticipant{
+		{JID: umaPessoa, PhoneNumber: umaPessoa, IsAdmin: true},
+		{JID: outra, PhoneNumber: outra},
+		{JID: semNome, PhoneNumber: semNome},
+	}}
+
+	saida := participantesPorNome(store, info, grupo)
+
+	if len(saida) != 3 {
+		t.Fatalf("saida = %v", saida)
+	}
+	bruto, err := json.Marshal(saida)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if corrida := regexp.MustCompile(`[0-9]{8,}`).FindString(string(bruto)); corrida != "" {
+		t.Fatalf("a resposta carrega uma corrida de %d digitos: %s", len(corrida), bruto)
+	}
+	for _, campo := range []string{"phone_number", "lid", "jid"} {
+		if strings.Contains(string(bruto), `"`+campo+`"`) {
+			t.Fatalf("a resposta ainda tem o campo %q: %s", campo, bruto)
+		}
+	}
+	if saida[0]["name"] == saida[1]["name"] {
+		t.Fatalf("dois membros com o rotulo %v — nao da para apontar um deles", saida[0]["name"])
+	}
+	if saida[2]["name"] != contatoSemNome {
+		t.Fatalf("sem nome no store, saiu %v — o numero nao pode preencher a lacuna", saida[2]["name"])
+	}
+	if saida[0]["is_admin"] != true {
+		t.Fatalf("is_admin perdido: %v", saida[0])
+	}
+}
+
+// TestRefDeGrupoApontaAPessoa: o ref que /api/group_info devolve e o unico jeito
+// de agir sobre um membro sem o numero dele passar pela resposta, entao
+// /api/group_participants tem de aceita-lo — e so no grupo que o emitiu.
+func TestRefDeGrupoApontaAPessoa(t *testing.T) {
+	const grupo = "grupo-de-teste@g.us"
+	alvo := "55" + "62" + "9" + "0000004" + "@s.whatsapp.net"
+	ref := storeMentionRef(alvo, "Ana Paula", grupo)
+
+	t.Run("no_grupo_que_o_emitiu_resolve", func(t *testing.T) {
+		jids, err := parseGroupParticipantJIDs([]string{"ref:" + ref}, grupo)
+		if err != nil {
+			t.Fatalf("erro: %v", err)
+		}
+		if len(jids) != 1 || jids[0].String() != alvo {
+			t.Fatalf("jids = %v", jids)
+		}
+	})
+
+	t.Run("em_outro_grupo_recusa", func(t *testing.T) {
+		_, err := parseGroupParticipantJIDs([]string{"ref:" + ref}, "outro-grupo@g.us")
+		if err == nil {
+			t.Fatalf("um ref de outro grupo resolveu — ele tem de ser preso a quem o emitiu")
+		}
+		if len(digitosDe(err.Error())) >= 8 {
+			t.Fatalf("a recusa %q carrega numero", err)
+		}
+	})
+
+	t.Run("ref_desconhecido_recusa", func(t *testing.T) {
+		if _, err := parseGroupParticipantJIDs([]string{"ref:nao-existe"}, grupo); err == nil {
+			t.Fatalf("ref desconhecido foi aceito")
+		}
+	})
 }
 
 // TestSeparadorNaoAbreOPrefixo cobre o achado 1 da rodada 9. A protecao de

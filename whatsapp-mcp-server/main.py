@@ -447,6 +447,12 @@ def get_group_info(jid: str, account: Optional[str] = None) -> Dict[str, Any]:
          "is_locked" (only admins can edit group info),
          "is_announce" (only admins can send messages)}
 
+    Each participant is {"name", "is_admin", "is_super_admin", "ref"} — a name
+    and an opaque ref, never a phone number, JID or LID (D3). Pass the ref as
+    "ref:<token>" to update_group_participants to act on that person; it is
+    tied to this group and expires after 10 minutes, so read the group again
+    if it lapses.
+
     Note: This is the way to read back what update_group_settings wrote.
     get_group_invite_info cannot be used for that — the invite-link response
     carries no locked/announce data, so it always reports both as false.
@@ -563,8 +569,11 @@ def update_group_participants(
 
     Args:
         group_jid: The JID of the group (must end with @g.us)
-        participants: List of phone numbers or JIDs to modify. International format recommended
-            (e.g., 5562123456789 or 5562123456789@s.whatsapp.net)
+        participants: Who to act on. For someone already in the group, use the
+            "ref:<token>" from get_group_info — that is how you point at a member
+            without their number passing through the answer. For someone not in
+            the group yet (action="add"), a phone number or JID, international
+            format recommended (e.g., 5562123456789)
         action: The action to perform: "add" (invite), "remove" (remove from group),
             "promote" (make admin), or "demote" (remove admin). Requires you to be a
             group admin for most actions.
@@ -574,7 +583,7 @@ def update_group_participants(
         {
             "success": bool (call accepted by WhatsApp, not all participants applied),
             "message": str (summary),
-            "participants": [ {"jid": str, "is_admin": bool, "error": int, "add_request"?: bool}, ... ]
+            "participants": [ {"ref": str, "is_admin": bool, "error": int, "add_request"?: bool}, ... ]
         }
 
     Note: Each participant in the response has error code 0 if applied, non-0 if rejected

@@ -2545,7 +2545,10 @@ type GroupParticipantsRequest struct {
 // GroupParticipantResult is the per-participant outcome of a group
 // participants update.
 type GroupParticipantResult struct {
-	JID        string `json:"jid"`
+	// Nem JID nem numero: o que volta e o ref opaco com que se aponta esta
+	// pessoa de novo, pela mesma razao que /api/group_info parou de devolver
+	// telefone de participante.
+	Ref        string `json:"ref"`
 	IsAdmin    bool   `json:"is_admin"`
 	Error      int    `json:"error"`
 	AddRequest bool   `json:"add_request,omitempty"`
@@ -2686,7 +2689,7 @@ var participantChangeByAction = map[string]whatsmeow.ParticipantChange{
 // and assigned DefaultUserServer; full JIDs must be DefaultUserServer or
 // HiddenUserServer (LID), since those are the only servers valid as group
 // participants. Empty items after trimming are a hard error, not skipped.
-func parseGroupParticipantJIDs(participants []string) ([]types.JID, error) {
+func parseGroupParticipantJIDs(participants []string, groupJID string) ([]types.JID, error) {
 	jids := make([]types.JID, 0, len(participants))
 	for _, p := range participants {
 		p = strings.TrimSpace(p)
@@ -2694,6 +2697,21 @@ func parseGroupParticipantJIDs(participants []string) ([]types.JID, error) {
 			return nil, fmt.Errorf("Invalid participant: empty string")
 		}
 		var jid types.JID
+		if refID, isRef := strings.CutPrefix(p, "ref:"); isRef {
+			// O ref opaco que /api/group_info devolve. E o unico jeito de
+			// apontar um membro sem que o numero dele passe pela resposta de
+			// API, e ele e preso ao grupo que o emitiu — como o da D6.
+			alvo, _, ok := resolveMentionRef(refID, groupJID)
+			if !ok {
+				return nil, fmt.Errorf("Participant ref %q expired or unknown for this group — read the group again", refID)
+			}
+			parsed, err := types.ParseJID(alvo)
+			if err != nil {
+				return nil, fmt.Errorf("Participant ref %q does not resolve to an addressable participant", refID)
+			}
+			jids = append(jids, parsed)
+			continue
+		}
 		if strings.Contains(p, "@") {
 			var err error
 			jid, err = types.ParseJID(p)
@@ -2713,6 +2731,48 @@ func parseGroupParticipantJIDs(participants []string) ([]types.JID, error) {
 	}
 	return jids, nil
 }
+
+// participantesPorNome descreve os membros de um grupo sem endereco nenhum: o
+// nome mais especifico que se conhece de cada um (pela mesma regua da D3, que
+// recusa nome com cara de telefone), se e admin, e um `ref` opaco com que
+// /api/group_participants aceita aponta-lo de volta.
+//
+// Os rotulos passam por rotulosDistintos pelo mesmo motivo da D6: dois membros
+// sob o mesmo nome deixam quem le sem como apontar um deles.
+func participantesPorNome(store *MessageStore, groupInfo *types.GroupInfo, groupJID string) []map[string]interface{} {
+	matches := make([]mentionMatch, 0, len(groupInfo.Participants))
+	pessoas := make([]mentionParticipant, 0, len(groupInfo.Participants))
+	for _, gp := range groupInfo.Participants {
+		p := participanteDoGrupo(gp)
+		store.fillSenderNames(&p)
+		pessoas = append(pessoas, p)
+		nome := rotuloDoParticipante(p, "")
+		if nome == "" {
+			nome = gp.DisplayName
+		}
+		if nome == "" || len(digitosDe(nome)) >= 8 {
+			nome = contatoSemNome
+		}
+		matches = append(matches, mentionMatch{jid: p.jid, name: nome})
+	}
+	rotulos := rotulosDistintos(pessoas, matches)
+
+	saida := make([]map[string]interface{}, 0, len(groupInfo.Participants))
+	for i, gp := range groupInfo.Participants {
+		saida = append(saida, map[string]interface{}{
+			"name":           rotulos[i],
+			"is_admin":       gp.IsAdmin,
+			"is_super_admin": gp.IsSuperAdmin,
+			"ref":            storeMentionRef(pessoas[i].jid, rotulos[i], groupJID),
+		})
+	}
+	return saida
+}
+
+// contatoSemNome e o marcador que a superficie de leitura ja usa quando o nome
+// nao resolve. Escrito igual dos dois lados de proposito: e o mesmo texto do
+// UNNAMED_CONTACT do servidor MCP.
+const contatoSemNome = "(contato sem nome)"
 
 // handleGroupParticipants returns the handler for POST /api/group_participants.
 func handleGroupParticipants(client *whatsmeow.Client) http.HandlerFunc {
@@ -2736,7 +2796,7 @@ func handleGroupParticipants(client *whatsmeow.Client) http.HandlerFunc {
 			http.Error(w, "Invalid action: must be one of add, remove, promote, demote", http.StatusBadRequest)
 			return
 		}
-		participantJIDs, err := parseGroupParticipantJIDs(req.Participants)
+		participantJIDs, err := parseGroupParticipantJIDs(req.Participants, groupJID.String())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -2757,7 +2817,7 @@ func handleGroupParticipants(client *whatsmeow.Client) http.HandlerFunc {
 		participants := make([]GroupParticipantResult, 0, len(results))
 		for _, p := range results {
 			participants = append(participants, GroupParticipantResult{
-				JID:        p.JID.String(),
+				Ref:        storeMentionRef(p.JID.String(), "", groupJID.String()),
 				IsAdmin:    p.IsAdmin,
 				Error:      p.Error,
 				AddRequest: p.AddRequest != nil,
@@ -3065,7 +3125,9 @@ func handleUserInfo(client *whatsmeow.Client) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Too many jids: max %d, got %d", maxUserInfoJIDs, len(req.JIDs)), http.StatusBadRequest)
 			return
 		}
-		jids, err := parseGroupParticipantJIDs(req.JIDs)
+		// Sem grupo no contexto: um ref de grupo NAO resolve aqui, e e assim
+		// que tem de ser — ele e preso a conversa que o emitiu.
+		jids, err := parseGroupParticipantJIDs(req.JIDs, "")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -5525,15 +5587,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 			return
 		}
-		participants := make([]map[string]string, 0, len(groupInfo.Participants))
-		for _, p := range groupInfo.Participants {
-			participants = append(participants, map[string]string{
-				"jid":          p.JID.String(),
-				"phone_number": p.PhoneNumber.User,
-				"lid":          p.LID.String(),
-				"display_name": p.DisplayName,
-			})
-		}
+		// D3 ate aqui: a resposta trazia jid, phone_number e lid de TODO
+		// participante — num grupo de 40 pessoas, 40 telefones numa resposta de
+		// API. O que quem le precisa e o NOME; o que quem ESCREVE precisa e de
+		// um jeito de apontar a pessoa, e isso e o mesmo `ref` opaco que a
+		// pergunta da D6 ja usa, aceito de volta por /api/group_participants.
+		participants := participantesPorNome(messageStore, groupInfo, jid.String())
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			// topic/is_locked/is_announce round out what /api/group_settings can
 			// write. GetGroupInfoFromLink is not a substitute for reading them back:
