@@ -160,3 +160,28 @@ pronto quando: o único job vermelho do run da branch de validação é vermelho
   O revisor registrou uma lacuna honesta: não encontrou o `ideias.jsonl` para
   conferir as ideias plantadas. Ele mora em `<home>/.rainforest/`, fora
   de qualquer repositório — o que explica a busca falhar e não afeta o veredito.
+- **2026-09-12 (rodada 2 da revisão) — o conserto da rodada 1 estava incompleto,
+  e o que faltava era o pior tipo de falta: uma afirmação de completude.** A
+  rodada 1 me fez corrigir a D4 de "dois cortes" para "três". Eu corrigi o
+  número e **mantive** a frase "cada corte fica comentado no arquivo, com o
+  motivo" — e a rodada 2 leu o workflow publicado contra o `build.yml` original
+  e achou um quarto desvio sem comentário nenhum: o job `mcp server` perdeu o
+  `actions/setup-go` pinado. (E um quinto, o `uv` por `pipx` em vez da action de
+  terceiro, que estava comentado no YAML mas não na decisão.)
+  Medido antes de consertar, para saber se era defeito ou corte legítimo: o
+  `setup-go` existe no `build.yml` por causa do `test_account_routing.py`, que
+  sobe processo real do bridge; `git ls-tree` mostra que esse arquivo **não
+  existe** na árvore do PR, e `git grep` por invocação de `go` no python dela não
+  casa nada — os `subprocess` que ela tem chamam `ffmpeg`. Então o corte estava
+  certo e a **declaração** estava errada. A D4 virou uma tabela com os cinco
+  cortes, a medição de cada um, e uma coluna dizendo qual está comentado no YAML
+  e qual não está.
+  O que não foi feito, e por que: **a branch `ci/pr14-evidencia` não foi tocada.**
+  Acertar o comentário do YAML moveria a cabeça dela, e o SHA `e092361` já está
+  citado num comentário público no PR do upstream junto com o run daquele SHA.
+  Trocar a cabeça para melhorar um comentário deixaria a evidência publicada
+  apontando para um SHA que não é mais a ponta — churn sem ganho de prova. A
+  fonte da lista de cortes passa a ser a D4; o YAML é cortesia.
+  Também nesta rodada: `plano.tarefas` no `estado.json` era `4` (o valor de
+  quando o plano fechou, antes de a tarefa 5 nascer) ao lado de
+  `executar.tarefas: 5`. Corrigido para `5`, com o motivo no campo `nota`.

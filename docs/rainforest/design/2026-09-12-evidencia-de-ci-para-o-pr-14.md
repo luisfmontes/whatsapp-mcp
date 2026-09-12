@@ -50,14 +50,28 @@ Windows compila com `CGO_ENABLED=0`, que naquela árvore não compila.
   mídia não deve virar um PR de infraestrutura no meio da revisão.
 
 - **D4 — O workflow de validação é derivado do `build.yml` do fork, com os
-  cortes que aquela árvore exigir, cada um medido.** Sai o job `personal-data`
-  (o `scripts/check-personal-data.py` não existe naquela árvore); o Windows
-  passa a compilar com `CGO_ENABLED=1` (naquela árvore o driver SQLite é só o
-  `mattn/go-sqlite3`, que exige CGO); e o `pytest` passa a ser fornecido por
-  `uv run --with pytest` (aquela árvore tem teste e não declara o runner — corte
-  achado rodando, não lendo, e registrado na emenda 1 do plano). Cada corte fica
-  comentado no arquivo, com o motivo. O número não era previsível na mesa: o
-  design dizia "dois" e a execução achou o terceiro. Porquê: um vermelho
+  cortes que aquela árvore exigir, cada um medido — e a lista completa mora
+  aqui.** São cinco, e o número não era previsível na mesa: o design dizia
+  "dois", a execução achou o terceiro rodando, e a segunda rodada da revisão
+  achou o quarto e o quinto lendo o arquivo publicado contra o original.
+
+  | # | Corte | Medição que o justifica | Comentado no YAML? |
+  |---|---|---|---|
+  | 1 | Sai o job `personal-data` | `git ls-tree -r <ref> -- scripts` vazio: o `check-personal-data.py` que ele chama não existe naquela árvore | sim |
+  | 2 | Windows com `CGO_ENABLED=1` | `git grep -E 'go-sqlite3\|modernc'` acha só o `mattn/go-sqlite3`, sem build tag — CGO desligado não compila ali | sim |
+  | 3 | `pytest` por `uv run --with pytest` | `pyproject.toml` declara só `httpx`, `mcp[cli]` e `requests`, e a árvore traz `test_db_path.py` e `test_transcribe.py`: os testes existem e nada declarado os roda | sim |
+  | 4 | Sai o `actions/setup-go` do job `mcp server` | o passo existe no `build.yml` por causa do `test_account_routing.py`, que sobe processo real do bridge — e `git ls-tree` mostra que esse arquivo **não existe** naquela árvore; `git grep` por invocação de `go` no python dela não casa nada | **não** |
+  | 5 | `uv` por `pipx install uv` em vez de `astral-sh/setup-uv` | tira a dependência de action de terceiro: o workflow passa a depender só de `actions/*` | sim |
+
+  Os cortes 4 e 5 não estavam nesta lista até 2026-09-12, e o 4 não tem
+  comentário no YAML. Isso importa e fica escrito: **a frase anterior desta
+  decisão afirmava que todo corte estava comentado no arquivo, e era falsa.**
+  Uma decisão que afirma completude sem tê-la é pior que uma decisão que lista
+  menos, porque quem lê para de conferir. A lista acima é a fonte; o YAML é
+  cortesia para quem abrir só o arquivo. Porquê dos cortes em geral: um vermelho
+  causado por arquivo ausente, por build tag que aquela árvore não tem ou por
+  ferramenta que ela não usa não diz nada sobre o PR — e diria a coisa errada
+  para quem lê. Porquê: um vermelho
   causado por arquivo ausente ou por build tag que aquela árvore não tem não diz
   nada sobre o PR — e diria a coisa errada para quem lê.
 

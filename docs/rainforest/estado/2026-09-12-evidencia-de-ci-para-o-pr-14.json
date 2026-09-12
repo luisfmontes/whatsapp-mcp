@@ -14,11 +14,12 @@
   "plano": {
     "status": "ok",
     "arquivo": "docs/rainforest/planos/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
-    "tarefas": 4,
+    "tarefas": 5,
     "paralelas": [
       1
     ],
-    "em": "2026-09-12"
+    "em": "2026-09-12",
+    "nota": "eram 4 quando o plano fechou; a tarefa 5 (medicao de base) nasceu durante o executar e esta registrada nas Emendas. O campo foi corrigido na rodada 2 da revisao, que pegou a divergencia entre plano.tarefas 4 e executar.tarefas 5 no mesmo arquivo"
   },
   "executar": {
     "status": "ok",
@@ -90,19 +91,20 @@
   "revisar": {
     "status": "parcial",
     "snapshot": {
-      "head": "bf53580d2a1d4f3ba88df524994f609cdf6f1adb",
+      "head": "7cd0b436a3e4170b7e62cffdc516b856bd4643a0",
       "caminhos_sujos": []
     },
     "base": "f20c286",
-    "head": "bf53580",
+    "head": "7cd0b43",
     "em_voo": [
       {
         "agente": "rainforest-mind:revisor",
-        "tarefa": "revisao da entrega de evidencia de CI para o PR 14, contra o diff real e contra os artefatos remotos (branches, runs, comentario)",
+        "tarefa": "rodada 2: julgar se os dois achados fecharam e se o conserto abriu algo novo",
         "desde": "2026-09-12"
       }
     ],
-    "em": "2026-09-12"
+    "em": "2026-09-12",
+    "rodada": 2
   },
   "verificar": {
     "status": "pendente"
