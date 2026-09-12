@@ -9,6 +9,7 @@ from whatsapp import (
     get_contact_chats as whatsapp_get_contact_chats,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
+    message_to_public_dict as whatsapp_message_to_public_dict,
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
@@ -190,13 +191,24 @@ def get_message_context(
         account: Optional account alias to use (defaults to primary account)
     """
     context = whatsapp_get_message_context(message_id, before, after, account=account)
-    return context
+    # Not the dataclass: it carries quoted_sender and the mention JIDs raw, and
+    # this tool is exactly where a caller comes looking for a quoted_message_id
+    # (see send_message's docstring). Returning it whole put a third party's
+    # phone number in the tool's answer — the one thing the read surface must
+    # never do. Caught by the independent review of 2026-09-09.
+    return {
+        "message": whatsapp_message_to_public_dict(context.message, account),
+        "before": [whatsapp_message_to_public_dict(m, account) for m in context.before],
+        "after": [whatsapp_message_to_public_dict(m, account) for m in context.after],
+    }
 
 @mcp.tool()
 def send_message(
     recipient: str,
     message: str,
-    account: Optional[str] = None
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -205,9 +217,28 @@ def send_message(
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
         account: Optional account alias to use (defaults to primary account)
+        quoted_message_id: Optional id of the message to reply to (quote). Get it from a
+                 message returned by list_messages or get_message_context (the "id" field,
+                 shown next to "[reply to ...]" for messages that are themselves replies).
+                 Quoting a message from a different chat, or an id the store doesn't have,
+                 is refused (nothing is sent) — same for a message whose author isn't known
+                 (older history recorded before this was tracked).
+        mentions: Optional list of PEOPLE'S NAMES to mention — never a phone number or JID.
+                 Each name is matched against that chat's participants only. For a mention to
+                 show up highlighted in the sent message, `message` must contain "@Name" for
+                 that same name — the bridge substitutes it with the right "@<number>" and
+                 marks it as a mention; any other "@..." in the text is left untouched. A name
+                 that matches nobody in the chat is refused (nothing is sent). A name that
+                 matches more than one participant is also refused, but the response carries
+                 a `candidates` list of {ref, name, ...} — no number or JID — describing each
+                 match; resend with `mentions: ["ref:<that token>"]` to pick one. A name whose
+                 "@Name" is absent from `message` is refused too: WhatsApp only highlights a
+                 mention the body actually writes.
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary with "success" and "message". On an ambiguous mention the refusal text
+        in "message" is the bridge's HTTP body, and the `candidates` list described above is
+        inside it — read the refs from there. There is no separate top-level key.
     """
     # Validate input
     if not recipient:
@@ -217,14 +248,25 @@ def send_message(
         }
 
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message, account=account)
+    success, status_message = whatsapp_send_message(
+        recipient,
+        message,
+        account=account,
+        quoted_message_id=quoted_message_id,
+        mentions=mentions,
+    )
     return {
         "success": success,
         "message": status_message
     }
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Dict[str, Any]:
+def send_file(
+    recipient: str,
+    media_path: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
     Args:
@@ -232,13 +274,25 @@ def send_file(recipient: str, media_path: str, account: Optional[str] = None) ->
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the media file to send (image, video, document)
         account: Optional account alias to use (defaults to primary account)
+        quoted_message_id: Optional id of the message to reply to (quote) — same contract as
+                 send_message's quoted_message_id.
+
+    There is no `mentions` here: a mention only renders if the message BODY writes
+    "@<number>", and this route sends media without a caption, so there is nowhere to
+    anchor one. To mention someone alongside a file, send the text with `send_message`
+    first and the file after.
 
     Returns:
         A dictionary containing success status and a status message
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, account=account)
+    success, status_message = whatsapp_send_file(
+        recipient,
+        media_path,
+        account=account,
+        quoted_message_id=quoted_message_id,
+    )
     return {
         "success": success,
         "message": status_message
@@ -385,13 +439,19 @@ def get_group_info(jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Get a WhatsApp group's name, topic, participant list and admin-only flags.
 
     Args:
-        jid: The group JID (e.g. 120363012345678901@g.us)
+        jid: The group JID (e.g. 120363xxxxxxxxxxxx@g.us)
         account: Optional account alias to use (defaults to primary account)
 
     Returns:
         {"success", "message", "name", "topic", "participants",
          "is_locked" (only admins can edit group info),
          "is_announce" (only admins can send messages)}
+
+    Each participant is {"name", "is_admin", "is_super_admin", "ref"} — a name
+    and an opaque ref, never a phone number, JID or LID (D3). Pass the ref as
+    "ref:<token>" to update_group_participants to act on that person; it is
+    tied to this group and expires after 10 minutes, so read the group again
+    if it lapses.
 
     Note: This is the way to read back what update_group_settings wrote.
     get_group_invite_info cannot be used for that — the invite-link response
@@ -509,8 +569,11 @@ def update_group_participants(
 
     Args:
         group_jid: The JID of the group (must end with @g.us)
-        participants: List of phone numbers or JIDs to modify. International format recommended
-            (e.g., 5562123456789 or 5562123456789@s.whatsapp.net)
+        participants: Who to act on. For someone already in the group, use the
+            "ref:<token>" from get_group_info — that is how you point at a member
+            without their number passing through the answer. For someone not in
+            the group yet (action="add"), a phone number or JID, international
+            format recommended (e.g., 5562123456789)
         action: The action to perform: "add" (invite), "remove" (remove from group),
             "promote" (make admin), or "demote" (remove admin). Requires you to be a
             group admin for most actions.
@@ -520,7 +583,7 @@ def update_group_participants(
         {
             "success": bool (call accepted by WhatsApp, not all participants applied),
             "message": str (summary),
-            "participants": [ {"jid": str, "is_admin": bool, "error": int, "add_request"?: bool}, ... ]
+            "participants": [ {"ref": str, "is_admin": bool, "error": int, "add_request"?: bool}, ... ]
         }
 
     Note: Each participant in the response has error code 0 if applied, non-0 if rejected

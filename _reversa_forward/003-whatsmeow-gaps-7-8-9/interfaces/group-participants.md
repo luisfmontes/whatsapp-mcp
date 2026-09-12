@@ -9,7 +9,7 @@ POST /api/group_participants
 Content-Type: application/json
 
 {
-  "group_jid": "120363021234567890@g.us",
+  "group_jid": "120363xxxxxxxxxxxx@g.us",
   "participants": ["556291788888", "5562988887777@s.whatsapp.net"],
   "action": "add"
 }

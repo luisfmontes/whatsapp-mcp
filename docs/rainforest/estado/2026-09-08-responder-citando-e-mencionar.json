@@ -1,0 +1,218 @@
+{
+  "slug": "2026-09-08-responder-citando-e-mencionar",
+  "titulo": "Responder citando mensagem e mencionar pessoas",
+  "criado_em": "2026-09-08",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "em": "2026-09-08"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-08-responder-citando-e-mencionar.md",
+    "tarefas": 11,
+    "paralelas": [
+      1,
+      2,
+      11
+    ],
+    "em": "2026-09-08"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-08",
+    "tarefas_ok": 11,
+    "tarefas": 11,
+    "em": "2026-09-11",
+    "achado_lid": "a lista de participantes do grupo volta com JID @lid (campo phone_number vem separado). O sender_jid que a tarefa 1 persiste vem de resolveToPN, ou seja PN. Casar participante com remetente nas tarefas 4/5/6 tem que atravessar LID<->PN.",
+    "mutacao_conferida": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "TestEnsureMessagesSchema/banco_legado_ganha_as_cinco_colunas"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "vermelho",
+        "fixture": "TestExtractContextInfo/extended_text_com_citacao"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "vermelho",
+        "fixture": "TestSendQuotedRecusa/id_inexistente_nao_envia"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "vermelho",
+        "fixture": "TestResolveMentionAmbigua/dois_candidatos_recusa_e_devolve_refs"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "TestActionSenderJIDGrupo/terceiro_em_grupo_usa_participante"
+      },
+      {
+        "tarefa": 7,
+        "resultado": "vermelho",
+        "fixture": "test_reply_mentions.FormatMessageCitacaoTest.test_format_message_mostra_citacao_por_nome"
+      }
+    ],
+    "nota_t9": "o README entregue descrevia formato de saida inexistente em 3 pontos e afirmava uso unico do ref, que e falso; corrigido pela integracao no commit 9c2673e",
+    "tarefa_8": "fechada: grupo e conversa particular, os dois validados contra as pontes reais, com prova lida no store da ponte receptora. O usuario conferiu o balao no grupo em 2026-09-09 e aprovou.",
+    "achados_t8": [
+      "a linha de leitura imprime o JID cru quando o nome nao resolve - o quoted_sender vem com sufixo de dispositivo (:8) e nao casa com a tabela senders. Numero aparece na saida, o que contraria a D3",
+      "mensagem enviada por mim nao grava o proprio contexto: no store de quem enviou, a resposta nao aparece como resposta"
+    ],
+    "correcoes_pos_t8": [
+      "citar em 1:1 era recusado sempre - heuristica de autor desconhecido agora so vale em @g.us",
+      "envio nao gravava o proprio contexto nem o proprio sender_jid",
+      "JID cru impresso na leitura quando o nome nao resolve - normaliza o sufixo de dispositivo e cai em marcador neutro",
+      "corpo da mensagem passa a exibir @Nome no lugar de @numero na leitura"
+    ],
+    "pr": 19,
+    "comando": "gofmt -l whatsapp-bridge/ ; go vet -C whatsapp-bridge ./... ; go test -C whatsapp-bridge -count=1 -shuffle=on ./... ; (cd whatsapp-mcp-server && python -m pytest -q) ; python scripts/check-personal-data.py",
+    "saida": "gofmt e go vet sem saida; ok whatsapp-client 1.163s (exit 0); 161 passed; Personal-data guard: ok (24 known identifiers, all in the baseline)",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "TestEnsureMessagesSchema/banco_legado_ganha_as_cinco_colunas"
+      },
+      {
+        "tarefa": 2,
+        "resultado": "n/a",
+        "motivo": "configuracao de ambiente (grupo de teste entre as duas contas); nao ha ramo de codigo a inverter"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "vermelho",
+        "fixture": "TestExtractContextInfo/extended_text_com_citacao"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "vermelho",
+        "fixture": "TestSendQuotedRecusa/id_inexistente_nao_envia"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "vermelho",
+        "fixture": "TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "TestActionSenderJIDGrupo/terceiro_em_grupo_usa_participante"
+      },
+      {
+        "tarefa": 7,
+        "resultado": "vermelho",
+        "fixture": "test_scrub_mentions.AvisoDeFalhaNaSuperficieEstruturadaTest.test_falha_aparece_como_campo"
+      },
+      {
+        "tarefa": 8,
+        "resultado": "n/a",
+        "motivo": "validacao contra as pontes reais; a falsificacao e a leitura no store da ponte receptora, vazia se o ContextInfo nao viajar"
+      },
+      {
+        "tarefa": 9,
+        "resultado": "n/a",
+        "motivo": "documento nao tem comportamento a inverter; a falsificacao foi comparar o texto com a interface real"
+      },
+      {
+        "tarefa": 10,
+        "resultado": "n/a",
+        "motivo": "entrega do PR 19; nao introduz comportamento"
+      },
+      {
+        "tarefa": 11,
+        "resultado": "n/a",
+        "motivo": "registro externo (Issue 18) e papelada do fluxo; nao ha comportamento a inverter"
+      }
+    ],
+    "rodada": 8,
+    "achados_da_revisao_fechados": [
+      1,
+      2,
+      3
+    ],
+    "grupo_de_teste": "REMOVIDO em 2026-09-09: o JID real do grupo de teste estava aqui, e este arquivo e versionado num repo publico — o proprio plano proibia (\"nenhum JID entra em teste, doc, mensagem de erro ou resposta de API\"; tarefa 2: \"nunca em arquivo versionado\"). O grupo e o unico grupo entre as contas pessoal e trabalho do proprio usuario; quem precisar dele descobre por list_chats, nao por este arquivo.",
+    "bloqueantes_rodada2_fechados": [
+      1,
+      2,
+      3
+    ],
+    "bloqueantes_rodada3_fechados": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "reescrita_de_historico": {
+      "quando": "2026-09-11",
+      "como": "git filter-branch --tree-filter sobre origin/main..HEAD, push com --force-with-lease",
+      "backup_local": "backup/citacao-antes-da-reescrita",
+      "limite": "objetos orfaos podem seguir alcancaveis por SHA no GitHub ate o GC da rede de forks"
+    },
+    "bloqueante_1_da_rodada_4": "aceito pelo usuario em 2026-09-11: JID de grupo e opaco, nao carrega telefone e nao da acesso ao grupo; apagar o fork custaria 19 PRs e a Issue 18 e nao tiraria o objeto do repositorio pai",
+    "bloqueante_2_da_rodada_4": "fechado: nomes de participante viajam com o JID, e nome da propria pessoa pedida ancora a mencao",
+    "bloqueantes_rodada5_fechados": [
+      1,
+      2
+    ],
+    "bloqueantes_rodada6_fechados": [
+      1,
+      2
+    ],
+    "creep_rodada6_fechado": true,
+    "bloqueante_rodada7_fechado": true
+  },
+  "revisar": {
+    "status": "reprovado",
+    "snapshot": {
+      "head": "60ec2a1a7a2d7aaf5634dc2f7f3d10f98788c39d",
+      "caminhos_sujos": []
+    },
+    "em_voo": [
+      {
+        "agente": "revisor",
+        "tarefa": "revisao independente da rodada 7, diff 22dbfc2...60ec2a1 (PR 19)",
+        "desde": "2026-09-11"
+      }
+    ],
+    "em": "2026-09-11",
+    "achados": 6,
+    "bloqueiam": 1,
+    "lista": [
+      "regressao da rodada 6: a preferencia por candidato nao usado valia entre comprimentos diferentes, entao @Luis Montes caia num Luis de OUTRA pessoa - numero do B onde o autor escreveu o nome do A, sem recusa"
+    ],
+    "observacoes": [
+      "docstring de send_message promete campo candidates que o dict de retorno nao tem",
+      "README descreve get_message_context imprimindo a linha de citacao; ele devolve dict desde af34dd5",
+      "README nao menciona o escopo por chat do ref",
+      "mencao por nome e cega para remetente conhecido so por LID: 637 de 2518 linhas de senders na conta pessoal tem chave @lid, e o detector de ambiguidade da D6 conta menos candidatos do que existem",
+      "_display_name nao barra nome que E um telefone formatado",
+      "TestResolveMentionAmbigua/ref_expirado_recusa passa por dois motivos: sem chatJID no fixture, a trava de chat recusa mesmo sem a de TTL",
+      "main_test.go zera mentionRefs.byRef entre testes: flake latente com -shuffle=on",
+      "list_chats/get_chat com include_last_message nao passam pela higiene da D3"
+    ],
+    "tentativas": 8,
+    "creep": 0,
+    "creep_lista": [
+      "whatsapp-mcp-server/test_api_errors.py sem arquivos: de tarefa nenhuma"
+    ],
+    "fechados_nesta_rodada": [
+      2
+    ],
+    "pendente": "bloqueante 1 depende de decisao do usuario sobre reescrever a branch e force-push no PR 19",
+    "head_com_correcoes": "0506eeb",
+    "pendente_com_o_usuario": "abrir chamado no Support do GitHub para remover os objetos orfaos - decisao dele, medida e apresentada em 2026-09-11"
+  },
+  "verificar": {
+    "status": "pendente"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}

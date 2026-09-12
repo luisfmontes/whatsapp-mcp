@@ -429,6 +429,57 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 
 ---
 
+## Quoting messages and mentioning people
+
+`send_message` supports two new optional parameters for richer conversation threading; `send_file` supports the first of them.
+
+`send_file` has no `mentions`: WhatsApp only highlights a mention when the message **body** writes `@<number>`, and this route sends media without a caption. To mention someone alongside a file, send the text with `send_message` first and the file after.
+
+### Quoting a message
+
+Pass `quoted_message_id` (the `id` field from `list_messages` or `get_message_context`) to reply to a message. The message you quote must:
+- Exist in the same chat as the recipient (quoting from chat A while sending to chat B is refused)
+- Have a known author — messages stored before the bridge started recording the author's full JID are refused
+
+Nothing is sent when a quote is refused. The API returns:
+- **HTTP 404** if the message ID doesn't exist in the store for that chat — a quote whose message lives in a different chat lands here too, since the lookup is scoped by chat
+- **HTTP 400** if the message's author is unknown (`quoted message's author is unknown for that part of the history (recorded before this was tracked) — messages from now on keep it`)
+
+`list_messages` and `get_last_interaction` show a quoted message as an indented line under the message itself:
+
+```
+    ↳ reply to <Author Name> [<quoted message id>]: "<first 80 chars of the quoted text>"
+```
+
+Names, never phone numbers or JIDs. The preview is truncated at 80 characters with an ellipsis.
+
+Every reading surface answers with **names** — the bridge resolves them from the `senders` table (under either the phone or the `@lid` form of the address, translated through the library's own map), and a `chats.name` that is itself a phone number does not count as a name. The media line of `list_messages` carries the opaque `Message ID` and no longer the chat address. A sender whose name cannot be resolved comes back as `(contato sem nome)`, never as the number — including the `From:` line of `list_messages` and `get_last_interaction`, and `list_chats`' `last_sender_name` (which replaced the raw `last_sender`). When the name lookup fails with an unexpected error, the reason is printed beside the marker rather than swallowed; in `get_message_context` it comes back as a `sender_name_error` key, present only when there was a failure.
+
+`get_message_context` returns structured data rather than that line: each message carries `quoted_message_id`, `quoted_sender_name`, `quoted_content` and `mentions` (names). Same rule — no JIDs, no numbers: there is no `sender` field, because nothing takes one as input (you reply with `chat_jid`, quote with `quoted_message_id` and mention by name) — who spoke is `sender_name`. A `@<number>` left inside a message body that could not be resolved to a name is blanked out on the way to you.
+
+### Mentioning people by name
+
+Pass `mentions` — a list of **people's names** (never phone numbers or JIDs) — and include `@Name` in your message text for each person you want to highlight. The bridge resolves each name against the chat's participants:
+- **Exact match**: `@Name` is replaced with `@<number>` and marked as a mention
+- **No match**: request refused with HTTP 400, message not sent
+- `get_group_info` describes members by **name** plus an opaque `ref`, never a phone number, JID or LID — a 40-person group used to answer with 40 phone numbers. To act on a member, hand that `ref` back to `update_group_participants` as `"ref:<token>"`; it is tied to the group that minted it and lasts 10 minutes. Adding someone who is not in the group yet still takes a number, because there is nothing else to address them by.
+- **In the chat but not mentionable**: a group member the server returns without a phone number cannot be mentioned — the request is refused, and the refusal names them without any address. They still count: their name protects a shorter name from being rewritten at the same position, and they still make an ambiguous name ambiguous.
+- **Multiple matches** (e.g., two "Alice" contacts in a group): request returns HTTP 400 with a `candidates` list carrying opaque `ref` tokens and the matched names — **no phone numbers or JIDs in the list**. Two candidates never come back under the same label: when the most specific name they have is identical, another name they go by is appended (and, failing that, the position — `1 de 2`), so the question is always answerable. Resend with `mentions: ["ref:<that-token>"]` to pick a specific match.
+
+A `ref` is valid for 10 minutes, in the process that issued it, **and only in the chat where the ambiguity happened**. Sending a ref minted in one conversation to a different one is refused — a token is not a way to reach someone who is not in the chat you are writing to. After the 10 minutes — or if the bridge restarts, since the refs live in memory — the resend is refused and you mention by name again.
+
+Two more refusals, both before anything is sent:
+- A name you asked to mention whose `@Name` is nowhere in the message text. WhatsApp only highlights what the body writes, so a mention with no anchor would notify someone with nothing on screen to explain it.
+- When two requested names overlap (`Ana` and `Ana Paula` in the same message), the longer one wins at each position, so `@Ana Paula` never gets rewritten as `@<Ana> Paula`. Matching ignores case, accents and how the parts of a name are separated, on **both** sides — the address book may hold `ANA PAULA` or `José Antônio` while the author types `Ana&nbsp;Paula`, `Ana  Paula`, `Ana-Paula` or `Jose Antonio`, and the longer name still wins. Whatever the author wrote is what stays in the text for an `@` nobody asked for; inside a name you did ask for, the separator is normalised along with the rest, so `@Ana<newline>Paula` for `mentions: ["Ana Paula"]` becomes a single `@<number>`. When a longer name belonging to someone else wins the position and leaves your mention with nowhere to anchor, the refusal says whose name won, so the reason is never a mystery.
+
+Mentions on messages you receive show up the same way quotes do, as an indented line under the message, by name:
+
+```
+    @ mentions: Alice, Bob
+```
+
+---
+
 ## Troubleshooting
 
 - **QR code not displaying**: terminal QR not working? Check `/tmp/whatsapp-qr.png` (macOS opens it automatically).

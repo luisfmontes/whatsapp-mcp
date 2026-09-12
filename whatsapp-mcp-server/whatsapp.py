@@ -1,7 +1,8 @@
 import logging
+import re
 import unicodedata
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
 from urllib.parse import urlparse, urlunparse
 import os
@@ -199,6 +200,10 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    quoted_message_id: Optional[str] = None
+    quoted_sender: Optional[str] = None
+    quoted_content: Optional[str] = None
+    mentions: List[str] = field(default_factory=list)
 
 @dataclass
 class Chat:
@@ -206,7 +211,12 @@ class Chat:
     name: Optional[str]
     last_message_time: Optional[datetime]
     last_message: Optional[str] = None
-    last_sender: Optional[str] = None
+    # Nome, nunca o identificador: em chat de GRUPO o `jid` acima e @g.us e nao
+    # carrega numero nenhum, entao este campo era o unico lugar por onde o
+    # telefone de um terceiro saia em `list_chats`. Medido em 2026-09-11: 31 de
+    # 141 grupos do store real. Renomeado de `last_sender` de proposito — um
+    # campo que muda de significado calado e pior que um campo que some.
+    last_sender_name: Optional[str] = None
     last_is_from_me: Optional[bool] = None
 
     @property
@@ -237,16 +247,25 @@ def _message_from_dict(d: dict) -> Message:
         chat_jid=d.get("chat_jid"),
         id=d.get("id"),
         media_type=d.get("media_type"),
+        quoted_message_id=d.get("quoted_message_id"),
+        quoted_sender=d.get("quoted_sender"),
+        quoted_content=d.get("quoted_content"),
+        mentions=d.get("mentions") or [],
     )
 
 
-def _chat_from_dict(d: dict) -> Chat:
+def _chat_from_dict(d: dict, account: Optional[str] = None) -> Chat:
     return Chat(
         jid=d.get("jid"),
-        name=d.get("name"),
+        name=_nome_visivel(d.get("name")),
         last_message_time=_parse_ts(d.get("last_message_time")),
-        last_message=d.get("last_message"),
-        last_sender=d.get("last_sender"),
+        # `last_message` é o corpo cru de `messages.content`, e um corpo que
+        # menciona alguém carrega "@<número>" por protocolo. `list_chats` é a
+        # tool mais usada do servidor: sem esta limpeza, basta a última
+        # mensagem do chat ser uma menção para o número do mencionado sair
+        # daqui. A D3 não distingue por qual tool o número escapa.
+        last_message=_scrub_mention_numbers(d.get("last_message")),
+        last_sender_name=_display_name(d.get("last_sender"), account) if d.get("last_sender") else None,
         last_is_from_me=d.get("last_is_from_me"),
     )
 
@@ -273,29 +292,306 @@ def get_sender_name(sender_jid: str, account: Optional[str] = None) -> str:
     _sender_name_cache[cache_key] = name
     return name
 
+UNNAMED_CONTACT = "(contato sem nome)"
+
+
+def _strip_device_suffix(jid: Optional[str]) -> Optional[str]:
+    """Drop the device part of an addressed JID: `<user>:<device>@server` ->
+    `<user>@server`.
+
+    A ContextInfo arrives from the wire addressed to a specific device, so the
+    quoted sender reads as `...:8@s.whatsapp.net`. The senders table is keyed
+    without that suffix, so the lookup misses and the raw JID would be printed
+    — which is how a phone number reached the output that D3 says must never
+    carry one.
+    """
+    if not jid or "@" not in jid:
+        return jid
+    user, _, server = jid.partition("@")
+    user = user.split(":", 1)[0]
+    return f"{user}@{server}"
+
+
+def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """`_display_name`, mais o motivo quando a busca do nome levantou exceção.
+
+    Quem chama decide o que fazer com o motivo. `format_message` o imprime ao
+    lado do marcador, porque existe decisão anterior (PR #12) de que exceção
+    inesperada saindo de `get_sender_name` não pode sumir calada — o que some
+    agora é o identificador, não o aviso.
+    """
+    if not jid:
+        return UNNAMED_CONTACT, None
+    normalized = _strip_device_suffix(jid)
+    try:
+        name = get_sender_name(normalized, account)
+    except Exception as e:
+        return UNNAMED_CONTACT, str(e)
+    user_part = (normalized or "").split("@", 1)[0]
+    if not name or name in (normalized, jid, user_part):
+        return UNNAMED_CONTACT, None
+    if _tem_forma_de_telefone(name):
+        return UNNAMED_CONTACT, None
+    return name, None
+
+
+# Dez dígitos ou mais que só se separam pela pontuação com que se escreve
+# telefone — espaço, hífen, parênteses, "+". A corrida não precisa ser contígua:
+# "+55 62 98888-7777" é telefone tanto quanto "5562988887777", e a régua da
+# rodada 8 só via o segundo (achado 4 da rodada 9).
+_TELEFONE_EMBUTIDO = re.compile(r"\d(?:[\s\-+()./]*\d){9,}")
+
+
+def _tem_forma_de_telefone(nome: str) -> bool:
+    """`nome` é um número escrito por extenso, e não o nome de alguém?
+
+    Contar dígitos sozinho é grosseiro demais: um grupo chamado "Turma 2026 —
+    Projeto 12345678" tem oito dígitos e é um nome de verdade (observação 3 da
+    rodada 7). O que caracteriza um telefone é ser FEITO de dígitos, com no
+    máximo a pontuação que se usa para escrevê-los.
+    """
+    if _TELEFONE_EMBUTIDO.search(nome):
+        # Telefone EMBUTIDO num nome com letras — "Zap Fulano +55 62 98888-7777",
+        # que é a forma canônica de rótulo de agenda brasileira — passava inteiro
+        # pela régua abaixo, que só olha a string toda. São DEZ dígitos, não oito:
+        # oito é o tamanho de um número local sem DDD, e "Turma 2026 - Projeto
+        # 12345678" é nome de verdade (rodada 7); com DDD são dez, com DDI treze.
+        # Medido nos dois stores reais, as duas vezes: dos 5.331 nomes gravados,
+        # NENHUM nome legítimo é marcado por esta régua e escapava da anterior.
+        # Custo medido: zero nome real.
+        return True
+    if len(re.sub(r"\D", "", nome)) < 8:
+        return False
+    return re.fullmatch(r"[\d\s\-+()./]+", nome) is not None
+
+
+def _nome_visivel(nome: Optional[str]) -> Optional[str]:
+    """Nome que veio pronto (de `chats.name`), filtrado pela mesma régua da D3.
+
+    Diferente de `_display_name`, aqui não há JID para consultar: a ponte já
+    resolveu, e quando não conseguiu resolveu para o próprio número —
+    `main.go` cai em `name = sender` e depois em `name = jid.User`, que são a
+    parte de usuário do JID. O que este filtro faz é não repetir esse número
+    na superfície de leitura.
+    """
+    if not nome:
+        return nome
+    if _tem_forma_de_telefone(nome):
+        return UNNAMED_CONTACT
+    return nome
+
+
+def _display_name(jid: Optional[str], account: Optional[str] = None) -> str:
+    """Name of a JID for human-facing output, never a number (D3).
+
+    Falls back to a neutral marker instead of the JID: an unresolved name is a
+    gap in the contact list, and printing the number to fill it is exactly what
+    the decision forbids.
+    """
+    if not jid:
+        return UNNAMED_CONTACT
+    normalized = _strip_device_suffix(jid)
+    try:
+        name = get_sender_name(normalized, account)
+    except Exception:
+        return UNNAMED_CONTACT
+    # get_sender_name echoes the JID back when it cannot resolve a name — and
+    # the bridge answers with the bare user part in the same situation, which
+    # for a phone JID is the phone number itself. Both mean "no name", and
+    # neither may be printed.
+    user_part = (normalized or "").split("@", 1)[0]
+    if not name or name in (normalized, jid, user_part):
+        return UNNAMED_CONTACT
+    # `name.isdigit()` alone misses the common case: a push_name or contact
+    # label that IS a phone number, just typed with punctuation — country
+    # code, spaces, a dash. Printing it satisfies the letter of "we printed a
+    # name" and breaks D3 anyway, so judge the digits, not the formatting.
+    if _tem_forma_de_telefone(name):
+        return UNNAMED_CONTACT
+    return name
+
+
+# "@" followed by a long digit run is a mention by construction: WhatsApp
+# requires the literal "@<number>" in the body for the highlight to render, so
+# nothing else produces that shape in a message body.
+#
+# Dez dígitos, não oito, e pela mesma régua do resto: um número mencionável é um
+# telefone inteiro (DDI+DDD+número), e com oito a peneira mordia "@" que ninguém
+# pediu — "@20260912", uma data, virava "@(contato sem nome)" na leitura, contra
+# a D5 (observação 5 da rodada 9).
+_MENTION_NUMERO = re.compile(r"@\d{10,}")
+
+
+def _scrub_mention_numbers(text: str) -> str:
+    """Blank out any `@<number>` a name lookup could not turn into a name.
+
+    `_mentions_by_name` only rewrites the numbers whose JID is in THIS
+    message's `mentions` list. Two cases fall outside it and were leaking
+    numbers into the reading surface: a quoted message's body (the `mentions`
+    column of the quoted message is never read on the quote path) and any row
+    written before the `mentions` column existed.
+    """
+    if not text:
+        return text
+    return _MENTION_NUMERO.sub("@" + UNNAMED_CONTACT, text)
+
+
+def _mentions_by_name(text: str, mentions: List[str], account: Optional[str] = None) -> str:
+    """Rewrite `@<number>` back to `@<Name>` in a message body.
+
+    WhatsApp requires the literal `@<number>` inside the text for a mention to
+    render, so the number is in the body by protocol — nothing can take it out
+    of what was sent. What the READING surface shows is our choice, and D3 says
+    it shows names.
+    """
+    if not text or not mentions:
+        return text
+    # Do mais longo para o mais curto, pelo mesmo motivo que a ponte ordena os
+    # candidatos assim: com um número sendo prefixo de outro, trocar o curto
+    # primeiro come o prefixo do longo e a leitura mostra o nome de uma pessoa
+    # com o resto do número de outra colado — e o resto ainda escapa do scrub,
+    # que só reconhece corrida longa (observação 1 da rodada 9).
+    for jid in sorted(mentions, key=lambda j: -len((_strip_device_suffix(j) or "").split("@", 1)[0])):
+        user = (_strip_device_suffix(jid) or "").split("@", 1)[0]
+        if not user:
+            continue
+        nome = _display_name(jid, account)
+        if nome == UNNAMED_CONTACT:
+            # Still better than the number: the reader learns someone was
+            # mentioned without learning who, which is the same trade the
+            # quoted-author line already makes.
+            nome = "alguém"
+        text = text.replace("@" + user, "@" + nome)
+    return text
+
+
+def _truncate_preview(text: str, limit: int = 80) -> str:
+    """Truncate a quoted-message preview to `limit` chars, appending an
+    ellipsis when it was actually cut. Empty/None input yields "".
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def message_to_public_dict(message: Message, account: Optional[str] = None) -> Dict[str, Any]:
+    """Shape of a message for a tool that returns STRUCTURED data.
+
+    `format_message` is the prose surface and already resolves names; a tool
+    that hands back the object itself bypasses it entirely, and the citation
+    and mention fields would go out as raw JIDs — which for a phone JID is the
+    phone number, in a public repo, of a third party (D3/D13). Found by the
+    independent review of 2026-09-09: `get_message_context` returned the
+    dataclass directly, and it is the very tool the `send_message` docstring
+    points at to find a `quoted_message_id`.
+
+    `sender` saiu da resposta (achado 5 da rodada 9). O raciocínio anterior era
+    que ele e `chat_jid` eram "endereços que já existiam e que quem chama usa
+    para responder" — e para `sender` isso é falso: nenhuma tool o aceita de
+    entrada (responder usa `chat_jid`, citar usa `quoted_message_id`, mencionar
+    usa nome), então ele só carregava o telefone de terceiro para dentro de uma
+    resposta de API que ESTE trabalho criou. Quem quer saber quem falou lê
+    `sender_name`.
+
+    `chat_jid` fica: é o endereço com que se responde, e sem ele a conversa não
+    é endereçável. Em 1:1 ele é o telefone, e isso é uma ponta solta declarada,
+    não uma decisão silenciosa.
+
+    The second review round found the same leak one field over: `quoted_content`
+    is the BODY of the quoted message, and a body that mentions someone carries
+    `@<number>` by protocol — so quoting a message that mentioned a third party
+    put that third party's number in the answer. Bodies go out through
+    `_scrub_mention_numbers`, here and in `format_message`.
+    """
+    # Mesma decisão do PR #12 que `format_message` já respeita: falha
+    # inesperada na busca do nome não some calada. A superfície estruturada
+    # engolia o aviso que a de prosa dá (observação 2 da rodada 7). A chave
+    # `sender_name_error` só existe quando houve falha.
+    if message.is_from_me:
+        sender_name, falha_do_nome = "Me", None
+    else:
+        sender_name, falha_do_nome = _display_name_ou_falha(message.sender, account)
+
+    return {
+        "id": message.id,
+        "timestamp": message.timestamp.isoformat() if message.timestamp else None,
+        "sender_name": sender_name,
+        **({"sender_name_error": falha_do_nome} if falha_do_nome else {}),
+        "chat_jid": message.chat_jid,
+        "chat_name": _nome_visivel(message.chat_name),
+        "content": _scrub_mention_numbers(
+            _mentions_by_name(message.content, message.mentions, account)
+        ),
+        "is_from_me": message.is_from_me,
+        "media_type": message.media_type,
+        "quoted_message_id": message.quoted_message_id,
+        "quoted_sender_name": _display_name(message.quoted_sender, account) if message.quoted_message_id else None,
+        "quoted_content": _scrub_mention_numbers(message.quoted_content),
+        "mentions": [_display_name(j, account) for j in (message.mentions or [])],
+    }
+
+
 def format_message(message: Message, show_chat_info: bool = True, account: Optional[str] = None) -> str:
     """Format a single message with consistent formatting."""
     output = ""
     ts_str = f"{message.timestamp:%Y-%m-%d %H:%M:%S}" if message.timestamp else "unknown time"
 
     if show_chat_info and message.chat_name:
-        output += f"[{ts_str}] Chat: {message.chat_name} "
+        output += f"[{ts_str}] Chat: {_nome_visivel(message.chat_name)} "
     else:
         output += f"[{ts_str}] "
 
     content_prefix = ""
     if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
+        # Sem o `Chat JID`: em conversa 1:1 ele E o telefone, e em grupo é um
+        # identificador de 18 dígitos — as duas coisas que a D3 proíbe numa
+        # superfície de leitura, e o único lugar onde a prosa ainda imprimia
+        # dígitos (verificação do critério 7, 2026-09-12). O `Message ID` fica:
+        # é opaco, e é o que `download_media` precisa junto do `chat_jid` que
+        # quem chama já tem — foi ele que pediu a listagem deste chat.
+        content_prefix = f"[{message.media_type} - Message ID: {message.id}] "
 
     try:
-        sender_name = get_sender_name(message.sender, account) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        # `get_sender_name` devolve o PROPRIO identificador quando nao acha
+        # nome — e `messages.sender` e gravado como a parte de usuario do JID,
+        # ou seja, o telefone puro. Medido no store real em 2026-09-11: 130 de
+        # 665 remetentes sem nome resolvivel, 2.152 mensagens, 100% delas com
+        # forma de telefone. Duas linhas abaixo, a citacao e as mencoes ja
+        # saiam por `_display_name`; esta ficou para tras, e a mesma mensagem
+        # respondia "(contato sem nome)" em `get_message_context` e o numero em
+        # `list_messages`.
+        if message.is_from_me:
+            sender_name, falha_do_nome = "Me", None
+        else:
+            sender_name, falha_do_nome = _display_name_ou_falha(message.sender, account)
+        if falha_do_nome:
+            sender_name = f"{sender_name} [name lookup failed: {falha_do_nome}]"
+        corpo = _scrub_mention_numbers(
+            _mentions_by_name(message.content, message.mentions, account)
+        )
+        output += f"From: {sender_name}: {content_prefix}{corpo}\n"
     except Exception as e:
         # Surface the failure instead of silently dropping the rest of the
         # line (the mistake this entry exists to fix elsewhere) - same
         # pattern get_message_context already uses for a failed fetch.
         logger.warning("Error formatting message %s: %s", message.id, e)
         output += f"[Error formatting message: {e}]\n"
+
+    # D13: show what this message replies to and who it mentions, by NAME
+    # (D3) never by number/JID. A name-resolution failure must not sink the
+    # rest of the line, and it must not fall back to the identifier either:
+    # _display_name absorbs the failure and answers with a neutral marker.
+    if message.quoted_message_id:
+        quoted_name = _display_name(message.quoted_sender, account)
+        preview = _truncate_preview(_scrub_mention_numbers(message.quoted_content))
+        output += f'    ↳ reply to {quoted_name} [{message.quoted_message_id}]: "{preview}"\n'
+
+    if message.mentions:
+        names = [_display_name(jid, account) for jid in message.mentions]
+        output += f"    @ mentions: {', '.join(names)}\n"
+
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True, account: Optional[str] = None) -> str:
@@ -464,7 +760,7 @@ def list_chats(
     if result is None:
         return []
 
-    return [_chat_from_dict(c) for c in result.get("chats", [])]
+    return [_chat_from_dict(c, account) for c in result.get("chats", [])]
 
 
 def search_contacts(query: str, account: Optional[str] = None) -> List[Contact]:
@@ -511,7 +807,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Optiona
     if result is None:
         return []
 
-    return [_chat_from_dict(c) for c in result.get("chats", [])]
+    return [_chat_from_dict(c, account) for c in result.get("chats", [])]
 
 
 def get_last_interaction(jid: str, account: Optional[str] = None) -> str:
@@ -559,7 +855,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True, account: Optional
     if not chat_data:
         return None
 
-    return _chat_from_dict(chat_data)
+    return _chat_from_dict(chat_data, account)
 
 
 def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] = None) -> Optional[Chat]:
@@ -578,9 +874,15 @@ def get_direct_chat_by_contact(sender_phone_number: str, account: Optional[str] 
     if not chat_data:
         return None
 
-    return _chat_from_dict(chat_data)
+    return _chat_from_dict(chat_data, account)
 
-def send_message(recipient: str, message: str, account: Optional[str] = None) -> Tuple[bool, str]:
+def send_message(
+    recipient: str,
+    message: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
     _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
@@ -593,6 +895,10 @@ def send_message(recipient: str, message: str, account: Optional[str] = None) ->
             "recipient": recipient,
             "message": message,
         }
+        if quoted_message_id:
+            payload["quoted_message_id"] = quoted_message_id
+        if mentions:
+            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload, headers=_auth_headers())
 
@@ -610,7 +916,22 @@ def send_message(recipient: str, message: str, account: Optional[str] = None) ->
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_file(recipient: str, media_path: str, account: Optional[str] = None) -> Tuple[bool, str]:
+def send_file(
+    recipient: str,
+    media_path: str,
+    account: Optional[str] = None,
+    quoted_message_id: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Envia midia. NAO aceita `mentions`, e a ausencia e deliberada.
+
+    O WhatsApp so grifa uma mencao se o CORPO da mensagem escrever
+    "@<numero>", e envio de midia por esta rota nao carrega legenda: a ponte
+    usa `message` como legenda, e aqui nao ha `message`. Um `mentions` aqui
+    notificaria a pessoa com nada na tela explicando — e, desde a rodada 2 da
+    revisao, seria recusado pela ponte em 100% das chamadas, por falta de
+    ancora. Achado da rodada 3: o parametro existia, era documentado, e nao
+    podia dar certo em chamada nenhuma.
+    """
     _require_account(account)
     base_url = accounts.resolve_account(account)
     try:
@@ -629,6 +950,8 @@ def send_file(recipient: str, media_path: str, account: Optional[str] = None) ->
             "recipient": recipient,
             "media_path": media_path
         }
+        if quoted_message_id:
+            payload["quoted_message_id"] = quoted_message_id
 
         response = requests.post(url, json=payload, headers=_auth_headers())
 
