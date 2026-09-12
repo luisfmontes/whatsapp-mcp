@@ -335,6 +335,9 @@ def _display_name_ou_falha(jid: Optional[str], account: Optional[str] = None) ->
     return name, None
 
 
+_TELEFONE_EMBUTIDO = re.compile(r"\d{10,}")
+
+
 def _tem_forma_de_telefone(nome: str) -> bool:
     """`nome` é um número escrito por extenso, e não o nome de alguém?
 
@@ -343,6 +346,16 @@ def _tem_forma_de_telefone(nome: str) -> bool:
     rodada 7). O que caracteriza um telefone é ser FEITO de dígitos, com no
     máximo a pontuação que se usa para escrevê-los.
     """
+    if _TELEFONE_EMBUTIDO.search(nome):
+        # Telefone EMBUTIDO num nome com letras — "Zap <treze dígitos>" — passava
+        # inteiro pela régua abaixo, que só olha a string toda (observação da
+        # rodada 8). A corrida aqui é de DEZ dígitos, não oito: oito é o tamanho
+        # de um número local sem DDD, e "Turma 2026 - Projeto 12345678" é nome de
+        # verdade (rodada 7); com DDD são dez, com DDI treze. Medido nos dois
+        # stores reais: dos 5.331 nomes gravados, NENHUM nome legítimo carrega
+        # corrida de dez dígitos fora de uma string que já é toda telefone.
+        # Custo medido da regra: zero nome real.
+        return True
     if len(re.sub(r"\D", "", nome)) < 8:
         return False
     return re.fullmatch(r"[\d\s\-+()./]+", nome) is not None

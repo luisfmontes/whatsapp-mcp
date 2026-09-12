@@ -561,3 +561,52 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   de prosa já dizia.** `format_message` imprime `[name lookup failed: ...]` ao
   lado do marcador (decisão do PR #12) e `message_to_public_dict` engolia a
   exceção calada. Ganha `sender_name_error`, que só existe quando houve falha.
+
+- **2026-09-12 (rodada 8) — a régua de nome era normalizada na resolução e byte
+  a byte no texto, e a assimetria reabria o defeito das rodadas 3/4/5.**
+  `matchMentionName` casa por `stripAccents` (NFD + `ToLower`); a varredura de
+  `applyMentions` usava `strings.HasPrefix` cru. Consequência: o candidato longo
+  que existe **só** para proteger o prefixo — o nome do outro participante —
+  deixava de casar quando a agenda guardava caixa ou acento diferentes do que o
+  autor escreveu. Com `Ana` (P1) e `ANA PAULA` (P2), `mentions: ["Ana"]` e o
+  texto `"bom dia @Ana Paula"`, saía `"bom dia @<número da Ana> Paula"` com
+  status 0: **mensagem enviada, pessoa errada grifada**, sem recusa nenhuma.
+  Medido antes do conserto com os testes que o revisor deixou prontos.
+  O conserto não é de uma linha: normalizar muda o comprimento em bytes, então
+  entrou `textoNormalizado`, que devolve o texto sob a mesma régua **e** as duas
+  traduções de posição entre normalizado e original. O casamento anda no
+  normalizado; o recorte continua exato no original. A contagem de donos de um
+  nome (`donos`) também é comparação de nome e passou à mesma régua — sem isso
+  `Ana Paula` na agenda de um e `ANA PAULA` no push_name do outro não contavam
+  como o mesmo nome, e a D6 era contornada.
+  Decorrência: o candidato não pedido que vence a posição passa a ser copiado do
+  **texto do autor**, não do nome da agenda — com casamento normalizado os dois
+  podem diferir, e reescrever a grafia de quem escreveu seria mexer no texto sem
+  ter sido pedido.
+  `pronto quando:` com o nome do outro participante gravado em caixa ou acento
+  diferentes do texto, a ponte recusa 400 e não escreve número nenhum — provado
+  por `TestMesmaReguaDeNomeNosDoisLados`; e as duas traduções de posição não
+  saem de fase — `TestTextoNormalizadoTraduzPosicao`.
+
+- **2026-09-12 (rodada 8) — dois candidatos podiam voltar com o mesmo rótulo, e
+  a pergunta da D6 voltava a ser inrespondível.** A rodada 7 trocou "o campo que
+  casou" pelo nome mais específico conhecido, e sobrou o caso de dois homônimos
+  de **nome completo** com `push_name` diferente: os dois saíam como `Ana Paula`.
+  `rotulosDistintos` junta o outro nome que a pessoa tem e o homônimo não; não
+  havendo nenhum, entra a ordem (`1 de 2`). Nunca o número (D3).
+  `pronto quando:` dois participantes com o mesmo `full_name` devolvem
+  candidatos de rótulo diferente, ambos sem dígito de telefone — provado por
+  `TestPerguntaDaD6ESempreRespondivel`.
+
+- **2026-09-12 (rodada 8) — telefone embutido num nome com letras escapava da
+  régua.** `_tem_forma_de_telefone` só olhava a string **inteira**, então
+  `"Zap <treze dígitos>"` passava intacto e o número saía na leitura — o que a
+  D3 proíbe. Entra uma segunda condição: uma corrida de **dez** dígitos em
+  qualquer lugar do nome. Dez, e não oito, porque oito é o tamanho de um número
+  local sem DDD e `"Turma 2026 - Projeto 12345678"` é nome de verdade — a
+  decisão da rodada 7 continua de pé. Medido nos dois stores reais: dos 5.331
+  nomes gravados, **nenhum** nome legítimo carrega corrida de dez dígitos fora
+  de uma string que já é toda telefone. Custo da régua: zero nome real.
+  `pronto quando:` um nome com letras e um telefone dentro vira marcador, e o
+  nome com oito dígitos continua passando — provado por
+  `test_scrub_mentions.TelefoneEmbutidoNoNomeTest`.

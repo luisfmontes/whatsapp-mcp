@@ -234,6 +234,26 @@ class NomeComDigitosMasDeVerdadeTest(unittest.TestCase):
         self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
 
 
+class TelefoneEmbutidoNoNomeTest(unittest.TestCase):
+    """Observacao da rodada 8: a regua da rodada 7 so olhava a string INTEIRA,
+    entao um nome com letras e um telefone dentro passava inteiro — o numero
+    saia na leitura, que e exatamente o que a D3 proibe.
+    """
+
+    def test_nome_com_telefone_dentro_vira_marcador(self):
+        embutido = "Zap " + DDI_DDD + FALSO[4:]
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name=embutido))
+        self.assertEqual(d["chat_name"], UNNAMED_CONTACT)
+
+    def test_nome_legitimo_com_oito_digitos_continua_passando(self):
+        # A regua embutida e de DEZ digitos, nao oito: oito e numero local sem
+        # DDD, e este nome e de verdade (decisao da rodada 7, que continua de pe).
+        with mock.patch("whatsapp.get_sender_name", return_value="Fulana"):
+            d = message_to_public_dict(_msg(chat_name="Turma 2026 - Projeto 12345678"))
+        self.assertEqual(d["chat_name"], "Turma 2026 - Projeto 12345678")
+
+
 class AvisoDeFalhaNaSuperficieEstruturadaTest(unittest.TestCase):
     """Observacao 2 da rodada 7: `format_message` imprime o motivo da falha ao
     lado do marcador (decisao do PR #12), e o dicionario engolia calado.

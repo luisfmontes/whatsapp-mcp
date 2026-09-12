@@ -997,6 +997,59 @@ func rotuloDoParticipante(p mentionParticipant, casou string) string {
 	return casou
 }
 
+// rotulosDistintos garante que a pergunta da D6 seja RESPONDIVEL. A rodada 7
+// trocou "o campo que casou" pelo nome mais especifico conhecido, mas dois
+// participantes podem ter o mesmo nome especifico — dois "Ana Paula" na agenda,
+// com push_name diferente — e ai os dois candidatos saem com rotulo identico e
+// o usuario escolhe no escuro de novo. Quando o rotulo colide, junta-se o outro
+// nome que a pessoa tem e o homonimo nao; nao havendo nenhum, entra a ordem
+// ("1 de 2"). Nunca o numero (D3).
+func rotulosDistintos(participants []mentionParticipant, matches []mentionMatch) []string {
+	rotulos := make([]string, len(matches))
+	for i, m := range matches {
+		rotulos[i] = m.name
+	}
+	colide := func(i int) bool {
+		for j := range rotulos {
+			if j != i && rotulos[j] == rotulos[i] {
+				return true
+			}
+		}
+		return false
+	}
+	for i, m := range matches {
+		if !colide(i) {
+			continue
+		}
+		for _, p := range participants {
+			if p.jid != m.jid {
+				continue
+			}
+			for _, n := range []string{p.fullName, p.businessName, p.pushName, p.firstName} {
+				if n == "" || n == rotulos[i] || len(digitosDe(n)) >= 8 {
+					continue
+				}
+				rotulos[i] = rotulos[i] + " (" + n + ")"
+				break
+			}
+			break
+		}
+	}
+	// O que ainda colide depois disso — homonimos sem nenhum nome que os separe
+	// — ganha a ordem em que apareceu. Feio, mas responder "o segundo" e
+	// possivel; responder "o Ana Paula" nao era.
+	ainda := make([]bool, len(rotulos))
+	for i := range rotulos {
+		ainda[i] = colide(i)
+	}
+	for i := range rotulos {
+		if ainda[i] {
+			rotulos[i] = fmt.Sprintf("%s (%d de %d)", rotulos[i], i+1, len(rotulos))
+		}
+	}
+	return rotulos
+}
+
 // matchMentionName finds every participant whose full_name, first_name,
 // push_name or business_name matches name exactly (case/accent-insensitive,
 // via stripAccents) — never a substring or prefix match, so requesting
@@ -1209,9 +1262,10 @@ func resolveMentionsAgainstParticipants(participants []mentionParticipant, menti
 		}
 		if len(matches) > 1 {
 			candidates := make([]MentionCandidateResponse, 0, len(matches))
-			for _, m := range matches {
+			rotulos := rotulosDistintos(participants, matches)
+			for i, m := range matches {
 				candidates = append(candidates, MentionCandidateResponse{
-					Ref: storeMentionRef(m.jid, raw, chatJID), Nome: m.name, Origem: m.origem,
+					Ref: storeMentionRef(m.jid, raw, chatJID), Nome: rotulos[i], Origem: m.origem,
 				})
 			}
 			return nil, nil, candidates, fmt.Sprintf("%q matches more than one participant in this chat — resend with one of the refs below", raw), http.StatusBadRequest
@@ -1263,6 +1317,52 @@ func fronteiraDeNome(resto string) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 }
 
+// textoNormalizado poe o texto sob a MESMA regua que matchMentionName usa para
+// casar nome (stripAccents: NFD, sem marca, minusculas) e devolve junto as duas
+// traducoes de posicao entre os dois textos: paraOriginal[p] e o deslocamento
+// no texto ORIGINAL de onde veio o byte p do normalizado, e paraNormalizado[o]
+// o caminho inverso.
+//
+// As duas traducoes existem porque normalizar muda o comprimento em bytes:
+// applyMentions precisa casar na regua da resolucao e ainda recortar o texto
+// original byte a byte. Sem isso a comparacao no texto era byte a byte
+// enquanto a da resolucao era normalizada, e o nome longo do OUTRO
+// participante — o candidato que existe so para proteger o prefixo — deixava
+// de casar quando a agenda guardava caixa ou acento diferentes do que o autor
+// escreveu (achado da rodada 8).
+func textoNormalizado(s string) (string, []int, []int) {
+	var b strings.Builder
+	b.Grow(len(s))
+	paraOriginal := make([]int, 0, len(s)+1)
+	paraNormalizado := make([]int, len(s)+1)
+	for k := range paraNormalizado {
+		paraNormalizado[k] = -1
+	}
+	for o, r := range s {
+		paraNormalizado[o] = b.Len()
+		for _, d := range norm.NFD.String(string(r)) {
+			if unicode.Is(unicode.Mn, d) {
+				continue
+			}
+			antes := b.Len()
+			b.WriteRune(unicode.ToLower(d))
+			for k := antes; k < b.Len(); k++ {
+				paraOriginal = append(paraOriginal, o)
+			}
+		}
+	}
+	paraOriginal = append(paraOriginal, len(s))
+	paraNormalizado[len(s)] = b.Len()
+	// Deslocamento no meio de um rune herda o inicio dele. Nao se indexa por
+	// ali no caminho normal, mas -1 vazando viraria panico silencioso.
+	for k := 1; k < len(paraNormalizado); k++ {
+		if paraNormalizado[k] < 0 {
+			paraNormalizado[k] = paraNormalizado[k-1]
+		}
+	}
+	return b.String(), paraOriginal, paraNormalizado
+}
+
 // applyMentions substitutes every "@name" occurrence for each resolved
 // mention with "@phoneUser" (D4 — the WhatsApp app only highlights a mention
 // when the text contains "@<number>" matching a MentionedJID entry) and
@@ -1296,12 +1396,16 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 	// portanto não houve ambiguidade a perguntar.
 	type candidato struct {
 		nome string
+		// norm e o nome sob a regua de matchMentionName. O casamento no texto
+		// se faz por ele, nunca pelos bytes crus: as duas pontas tem de usar a
+		// mesma regua (rodada 8).
+		norm string
 		idx  int // índice em resolved, ou -1 para nome que não foi pedido
 	}
 	cands := make([]candidato, 0, len(resolved)+len(outrosNomes))
 	for i, r := range resolved {
-		if r.name != "" {
-			cands = append(cands, candidato{nome: r.name, idx: i})
+		if n := stripAccents(r.name); n != "" {
+			cands = append(cands, candidato{nome: r.name, norm: n, idx: i})
 		}
 	}
 	for _, n := range outrosNomes {
@@ -1323,7 +1427,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 		// no maximo se paga uma recusa — que e a falha segura.
 		donos := 0
 		for _, outro := range outrosNomes {
-			if outro.nome == n.nome && outro.jid != n.jid {
+			if stripAccents(outro.nome) == stripAccents(n.nome) && outro.jid != n.jid {
 				donos++
 			}
 		}
@@ -1338,11 +1442,15 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			idx = i
 			break
 		}
-		cands = append(cands, candidato{nome: n.nome, idx: idx})
+		norma := stripAccents(n.nome)
+		if norma == "" {
+			continue
+		}
+		cands = append(cands, candidato{nome: n.nome, norm: norma, idx: idx})
 	}
 	sort.SliceStable(cands, func(a, b int) bool {
-		if len(cands[a].nome) != len(cands[b].nome) {
-			return len(cands[a].nome) > len(cands[b].nome)
+		if len(cands[a].norm) != len(cands[b].norm) {
+			return len(cands[a].norm) > len(cands[b].norm)
 		}
 		// Mesmo nome, duas pessoas: quem esta ligado a uma mencao pedida vem
 		// primeiro. Sem este desempate, o homonimo que NAO foi pedido casava
@@ -1353,6 +1461,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 	})
 
 	usados := make([]bool, len(resolved))
+	normText, paraOriginal, paraNormalizado := textoNormalizado(text)
 	var b strings.Builder
 	for i := 0; i < len(text); {
 		if text[i] != '@' {
@@ -1374,27 +1483,43 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 		//
 		// Se o unico casamento mais longo ja foi usado, repete-se ele: a
 		// mencao que sobrar sem ancora vira recusa 400 — falha segura.
+		//
+		// O casamento se faz no texto NORMALIZADO, e o que se consome e medido
+		// no texto ORIGINAL: e a mesma regua da resolucao, e o recorte continua
+		// exato (rodada 8).
+		np := paraNormalizado[i+1]
+		casa := func(c candidato) (int, bool) {
+			if !strings.HasPrefix(normText[np:], c.norm) {
+				return 0, false
+			}
+			fim := paraOriginal[np+len(c.norm)]
+			if !fronteiraDeNome(text[fim:]) {
+				return 0, false
+			}
+			return fim, true
+		}
 		maiorCasamento := -1
 		for _, c := range cands {
-			if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
+			if _, ok := casa(c); !ok {
 				continue
 			}
-			maiorCasamento = len(c.nome)
+			maiorCasamento = len(c.norm)
 			break // cands esta ordenado por comprimento decrescente
 		}
-		escolhido := -1
+		escolhido, fimEscolhido := -1, 0
 		for passada := 0; passada < 2 && escolhido < 0; passada++ {
 			for ci, c := range cands {
-				if len(c.nome) != maiorCasamento {
+				if len(c.norm) != maiorCasamento {
 					continue
 				}
-				if !strings.HasPrefix(text[i+1:], c.nome) || !fronteiraDeNome(text[i+1+len(c.nome):]) {
+				fim, ok := casa(c)
+				if !ok {
 					continue
 				}
 				if passada == 0 && c.idx >= 0 && usados[c.idx] {
 					continue
 				}
-				escolhido = ci
+				escolhido, fimEscolhido = ci, fim
 				break
 			}
 		}
@@ -1412,10 +1537,13 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			usados[c.idx] = true
 		} else {
 			// Nome de participante que ninguém pediu: fica como está
-			// (D5 — "@" não listado passa intacto).
-			b.WriteString(c.nome)
+			// (D5 — "@" não listado passa intacto). Vai o trecho do texto do
+			// AUTOR, nunca o nome da agenda: o casamento e normalizado, entao
+			// os dois podem diferir em caixa e acento, e reescrever a grafia
+			// de quem escreveu seria mexer no texto sem ter sido pedido.
+			b.WriteString(text[i+1 : fimEscolhido])
 		}
-		i += 1 + len(c.nome)
+		i = fimEscolhido
 	}
 
 	mentionedJIDs := make([]string, 0, len(resolved))

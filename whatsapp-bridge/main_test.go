@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
@@ -3135,6 +3136,229 @@ func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
 	}
 	if strings.Contains(texto, "c-b") {
 		t.Fatalf("texto = %q, want no trace of the other person's number where the author wrote a full name", texto)
+	}
+}
+
+// TestPerguntaDaD6ESempreRespondivel: a D6 para de enviar justamente para
+// perguntar "qual dos dois?". Dois candidatos com o MESMO rotulo devolvem o
+// usuario ao escuro — a rodada 7 tratou o caso do campo que casou, e sobrou o
+// caso de dois homonimos de nome completo com push_name diferente.
+func TestPerguntaDaD6ESempreRespondivel(t *testing.T) {
+	t.Run("homonimos_de_nome_completo_se_separam_pelo_outro_nome", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "a@s.whatsapp.net", fullName: "Ana Paula", pushName: "Aninha"},
+			{jid: "b@s.whatsapp.net", fullName: "Ana Paula", pushName: "Paula do Mercado"},
+		}
+
+		_, _, candidates, errMsg, status := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana Paula"}, "g@g.us")
+
+		if errMsg == "" || status != http.StatusBadRequest || len(candidates) != 2 {
+			t.Fatalf("errMsg=%q status=%d candidates=%v, want a pergunta da D6", errMsg, status, candidates)
+		}
+		if candidates[0].Nome == candidates[1].Nome {
+			t.Fatalf("os dois candidatos saem como %q — impossivel escolher", candidates[0].Nome)
+		}
+		for _, c := range candidates {
+			if !strings.Contains(c.Nome, "Ana Paula") {
+				t.Fatalf("candidato %q perdeu o nome que o usuario escreveu", c.Nome)
+			}
+			if len(digitosDe(c.Nome)) >= 8 {
+				t.Fatalf("candidato %q carrega numero — a D3 nao admite", c.Nome)
+			}
+		}
+	})
+
+	t.Run("sem_nenhum_nome_que_separe_entra_a_ordem", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "a@s.whatsapp.net", fullName: "Ana Paula"},
+			{jid: "b@s.whatsapp.net", fullName: "Ana Paula"},
+		}
+
+		_, _, candidates, _, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana Paula"}, "g@g.us")
+
+		if len(candidates) != 2 || candidates[0].Nome == candidates[1].Nome {
+			t.Fatalf("candidates = %v — mesmo sem nome que separe, tem de dar para apontar um", candidates)
+		}
+	})
+}
+
+// TestMesmaReguaDeNomeNosDoisLados cobre o bloqueante da rodada 8: a resolucao
+// casava nome normalizado (matchMentionName -> stripAccents, que faz NFD e
+// ToLower) e a varredura do texto casava byte a byte. Com isso o candidato
+// longo que existe SO para proteger o prefixo — o nome do outro participante —
+// deixava de casar quando a agenda guardava caixa ou acento diferentes do que
+// o autor escreveu, e saia o numero do primeiro onde o autor escreveu o nome do
+// segundo. Sem recusa: mensagem enviada, pessoa errada grifada.
+func TestMesmaReguaDeNomeNosDoisLados(t *testing.T) {
+	t.Run("caixa_diferente_na_agenda_ainda_protege_o_prefixo", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "ana@s.whatsapp.net", phoneUser: "ana-user", firstName: "Ana"},
+			// Contato importado em CAIXA ALTA, como e comum vir da agenda.
+			{jid: "ap@s.whatsapp.net", phoneUser: "ap-user", fullName: "ANA PAULA"},
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, jids, ancora, status := applyMentions("bom dia @Ana Paula", resolved, outros)
+
+		if ancora == "" || status != http.StatusBadRequest {
+			t.Fatalf("ancora=%q status=%d texto=%q jids=%v, want recusa 400 — falha segura",
+				ancora, status, texto, jids)
+		}
+		if texto != "bom dia @Ana Paula" {
+			t.Fatalf("texto = %q — nada pode ser reescrito numa recusa", texto)
+		}
+	})
+
+	t.Run("acento_so_na_agenda_ainda_protege_o_prefixo", func(t *testing.T) {
+		participants := []mentionParticipant{
+			{jid: "jose@s.whatsapp.net", phoneUser: "jose-user", firstName: "Jose"},
+			{jid: "ja@s.whatsapp.net", phoneUser: "ja-user", fullName: "José Antônio"},
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Jose"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, _, ancora, status := applyMentions("bom dia @Jose Antonio", resolved, outros)
+
+		if ancora == "" || status != http.StatusBadRequest {
+			t.Fatalf("ancora=%q status=%d texto=%q, want recusa 400", ancora, status, texto)
+		}
+		if texto != "bom dia @Jose Antonio" {
+			t.Fatalf("texto = %q — numero do Jose onde o autor escreveu Jose Antonio", texto)
+		}
+	})
+
+	t.Run("ancora_em_caixa_diferente_do_pedido_ainda_grifa", func(t *testing.T) {
+		// O outro lado da mesma regua: quem escreve "@ANA" pediu a Ana. Antes
+		// da rodada 8 isso nao casava e a mencao morria numa recusa.
+		participants := []mentionParticipant{
+			{jid: "ana@s.whatsapp.net", phoneUser: "ana-user", firstName: "Ana"},
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, jids, ancora, status := applyMentions("oi @ANA, tudo bem?", resolved, outros)
+
+		if ancora != "" || status != 0 {
+			t.Fatalf("ancora=%q status=%d, want envio", ancora, status)
+		}
+		if texto != "oi @ana, tudo bem?" {
+			t.Fatalf("texto = %q", texto)
+		}
+		if len(jids) != 1 || jids[0] != "ana@s.whatsapp.net" {
+			t.Fatalf("jids = %v", jids)
+		}
+	})
+
+	t.Run("nome_intacto_sai_com_a_grafia_do_autor", func(t *testing.T) {
+		// O candidato que vence sem ter sido pedido fica como esta (D5) — e
+		// "como esta" e o texto de QUEM ESCREVEU, nao o nome da agenda. Como o
+		// casamento agora e normalizado, os dois podem diferir, e reescrever a
+		// grafia do autor seria mexer no texto dele sem ter sido pedido.
+		participants := []mentionParticipant{
+			{jid: "ana@s.whatsapp.net", phoneUser: "ana-user", firstName: "Ana"},
+			{jid: "ap@s.whatsapp.net", phoneUser: "ap-user", fullName: "ANA PAULA"},
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, _, ancora, status := applyMentions("@Ana Paula e @Ana, vejam", resolved, outros)
+
+		if ancora != "" || status != 0 {
+			t.Fatalf("ancora=%q status=%d, want envio", ancora, status)
+		}
+		if texto != "@Ana Paula e @ana, vejam" {
+			t.Fatalf("texto = %q — a grafia do autor tem de sobreviver intacta", texto)
+		}
+	})
+
+	t.Run("nome_compartilhado_em_caixa_diferente_conta_como_compartilhado", func(t *testing.T) {
+		// A contagem de donos de um nome tambem e uma comparacao de nome, e
+		// tambem precisa da mesma regua: com "Ana Paula" na agenda de um e
+		// "ANA PAULA" no push_name do outro, o nome E compartilhado, e ligar
+		// mesmo assim escolheria por conta propria qual dos dois o autor quis
+		// — o dano que a D6 existe para impedir.
+		participants := []mentionParticipant{
+			{jid: "a@s.whatsapp.net", phoneUser: "a-user", fullName: "Ana Paula Souza", firstName: "Ana Paula"},
+			{jid: "b@s.whatsapp.net", phoneUser: "b-user", pushName: "ANA PAULA"},
+		}
+		resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+			participants, []string{"Ana Paula Souza"}, "g@g.us")
+		if errMsg != "" {
+			t.Fatalf("resolucao: %v", errMsg)
+		}
+
+		texto, _, ancora, status := applyMentions("oi @Ana Paula", resolved, outros)
+
+		if ancora == "" || status != http.StatusBadRequest {
+			t.Fatalf("ancora=%q status=%d, want recusa 400", ancora, status)
+		}
+		if texto != "oi @Ana Paula" {
+			t.Fatalf("texto = %q — nome compartilhado nao pode ser ligado sem desambiguacao", texto)
+		}
+	})
+}
+
+// TestTextoNormalizadoTraduzPosicao guarda o contrato do que a rodada 8
+// introduziu: normalizar muda o comprimento em bytes, entao o casamento so
+// pode andar no texto normalizado se souber devolver quantos bytes do texto
+// ORIGINAL foram consumidos. Se as duas traducoes de posicao sairem de fase, o
+// recorte pega metade de um rune e o texto enviado sai corrompido.
+func TestTextoNormalizadoTraduzPosicao(t *testing.T) {
+	for _, entrada := range []string{
+		"", "@Ana Paula", "José Antônio", "ÁÉÍÓÚ ç", "@ANA, tudo bem?",
+		"emoji 🙂 e acento à toa", "combinando A\u0301 solto",
+	} {
+		normalizado, paraOriginal, paraNormalizado := textoNormalizado(entrada)
+
+		if normalizado != stripAccents(entrada) {
+			t.Fatalf("%q: normalizado = %q, want %q — tem de ser a MESMA regua de matchMentionName",
+				entrada, normalizado, stripAccents(entrada))
+		}
+		if len(paraOriginal) != len(normalizado)+1 {
+			t.Fatalf("%q: paraOriginal tem %d entradas, want %d", entrada, len(paraOriginal), len(normalizado)+1)
+		}
+		if paraOriginal[len(normalizado)] != len(entrada) {
+			t.Fatalf("%q: fim do normalizado aponta para %d, want %d", entrada, paraOriginal[len(normalizado)], len(entrada))
+		}
+		for np := 1; np < len(paraOriginal); np++ {
+			if paraOriginal[np] < paraOriginal[np-1] {
+				t.Fatalf("%q: paraOriginal anda para tras em %d", entrada, np)
+			}
+			if o := paraOriginal[np]; o < len(entrada) && !utf8.RuneStart(entrada[o]) {
+				t.Fatalf("%q: paraOriginal[%d] = %d cai no meio de um rune — o recorte sairia corrompido",
+					entrada, np, o)
+			}
+		}
+		for o, r := range entrada {
+			np := paraNormalizado[o]
+			if np < 0 || np > len(normalizado) {
+				t.Fatalf("%q: posicao %d cai fora do normalizado (%d)", entrada, o, np)
+			}
+			// Ida e volta exata para o rune que sobrevive a normalizacao; o
+			// que se apaga (a marca de acento) aponta para o proximo, que e o
+			// que faz "@Ana" seguido de acento solto consumir o acento junto.
+			if stripAccents(string(r)) == "" {
+				continue
+			}
+			if volta := paraOriginal[np]; volta != o {
+				t.Fatalf("%q: posicao %d volta de %d como %d — traducoes fora de fase", entrada, o, np, volta)
+			}
+		}
 	}
 }
 
