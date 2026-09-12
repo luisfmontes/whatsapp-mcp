@@ -25,13 +25,17 @@
     "catraca_mutacao": "2026-09-12",
     "tarefas_feitas": [
       1,
-      2
+      2,
+      3,
+      4,
+      5
     ],
     "branches": [
       "ci/pr14-evidencia",
-      "ci/pr14-falsificacao"
+      "ci/pr14-base",
+      "ci/pr14-falsificacao (apagada do fork depois de lido o log)"
     ],
-    "nota": "tarefas 1 e 2 executadas na janela principal, sem despacho: sao orquestracao de branch e CI remota (push + leitura de run), nao edicao paralela de codigo, e cada uma ficou muito abaixo do limiar de 3.000 tokens da regra 10. Runs em voo, aguardando conclusao real antes de qualquer afirmacao de verde.",
+    "nota": "As 5 tarefas rodaram na janela principal, sem despacho: sao orquestracao de branch e CI remota (escrever YAML, empurrar, ler run), nao edicao paralela de codigo, e cada uma ficou muito abaixo do limiar de 3.000 tokens da regra 10. As tarefas 3, 4 e 5 nasceram durante a execucao (ver Emendas do plano). Este campo e o 'branches' foram corrigidos na revisao de 2026-09-12: tinham ficado congelados no valor do marcador 'parcial', quando so as tarefas 1 e 2 existiam.",
     "em": "2026-09-12",
     "tarefas": 5,
     "tarefas_ok": 5,
@@ -84,7 +88,21 @@
     "saida": "PR: bridge macos/ubuntu/windows success | gofmt success | mcp server macos/ubuntu success | mcp server windows failure ;; BASE: identica job a job, inclusive o mesmo failure em mcp server (windows-latest), com as mesmas duas linhas FAILED de test_db_path.py::TestResolveMessagesDb e o mesmo '2 failed, 16 passed'"
   },
   "revisar": {
-    "status": "pendente"
+    "status": "parcial",
+    "snapshot": {
+      "head": "bf53580d2a1d4f3ba88df524994f609cdf6f1adb",
+      "caminhos_sujos": []
+    },
+    "base": "f20c286",
+    "head": "bf53580",
+    "em_voo": [
+      {
+        "agente": "rainforest-mind:revisor",
+        "tarefa": "revisao da entrega de evidencia de CI para o PR 14, contra o diff real e contra os artefatos remotos (branches, runs, comentario)",
+        "desde": "2026-09-12"
+      }
+    ],
+    "em": "2026-09-12"
   },
   "verificar": {
     "status": "pendente"

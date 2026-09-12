@@ -139,3 +139,24 @@ pronto quando: o único job vermelho do run da branch de validação é vermelho
   identificador **e** o caminho do arquivo, que era a `fixture` declarada.
   Fica a lição para a próxima catraca desta guarda: mutação tem de escolher valor
   **fora** do baseline, senão ela mede o baseline e não a guarda.
+- **2026-09-12 (revisão) — dois achados, os dois de texto desatualizado, os dois
+  consertados.** O revisor rodou contra o diff real e contra os artefatos
+  remotos, e o núcleo da entrega bateu item a item (jobs idênticos nos dois
+  runs, branch do PR intocada em `7721256`, delta de um arquivo, falsificação
+  com `go build`/`go vet` passando antes do `--- FAIL`, comentário coerente com
+  os runs, guarda de dado pessoal verde). Os dois achados:
+  1. O `estado.json` tinha `tarefas_feitas: [1, 2]` e uma lista de `branches`
+     sem a `ci/pr14-base` — valores congelados no marcador `parcial`, de quando
+     só existiam as tarefas 1 e 2, contradizendo o `tarefas_ok: 5` do mesmo
+     bloco. Quem fosse ao `verificar` lendo só aquele resumo concluiria que
+     metade do trabalho não existiu. Remarcado com os cinco números e as três
+     branches, e com o motivo da correção escrito no campo `nota`.
+  2. A D3 do design dizia "**um único commit**", e a branch de validação tem
+     dois (o segundo é o corte do `pytest` da emenda 1). A contagem de commits
+     nunca foi o invariante — o invariante é `git diff --name-only` devolver só
+     o workflow, e isso continua verdade. A D3 foi reescrita para dizer o que
+     de fato se manteve, e a D4 pelo mesmo motivo: ela dizia "dois cortes" e a
+     execução achou três.
+  O revisor registrou uma lacuna honesta: não encontrou o `ideias.jsonl` para
+  conferir as ideias plantadas. Ele mora em `<home>/.rainforest/`, fora
+  de qualquer repositório — o que explica a busca falhar e não afeta o veredito.

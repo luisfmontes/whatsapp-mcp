@@ -40,16 +40,24 @@ Windows compila com `CGO_ENABLED=0`, que naquela árvore não compila.
 
 - **D3 — Roda numa branch de validação separada, não na branch do PR.** A branch
   `ci/pr14-evidencia` nasce **exatamente** na cabeça de
-  `pr/fix-media-and-reliability` e recebe **um único commit, só de configuração
-  de CI**. Porquê: o Actions só executa workflow que exista na ref, e mexer na
+  `pr/fix-media-and-reliability` e recebe **somente commit de configuração de
+  CI** — o invariante é o conjunto de arquivos, não a contagem de commits:
+  `git diff --name-only` contra a cabeça do PR tem de devolver uma linha só, o
+  workflow. (Esta frase dizia "um único commit" até a revisão de 2026-09-12
+  medir dois: o segundo é o corte do `pytest` da emenda 1, e a contagem nunca
+  foi o que importava — o que importa é nenhum arquivo de produto mudar.) Porquê: o Actions só executa workflow que exista na ref, e mexer na
   branch do PR mudaria o conteúdo que está em revisão — um PR de conserto de
   mídia não deve virar um PR de infraestrutura no meio da revisão.
 
-- **D4 — O workflow de validação é derivado do `build.yml` do fork, com dois
-  cortes medidos.** Sai o job `personal-data` (o `scripts/check-personal-data.py`
-  não existe naquela árvore) e o Windows passa a compilar com `CGO_ENABLED=1`
-  (naquela árvore o driver SQLite é só o `mattn/go-sqlite3`, que exige CGO). Os
-  dois cortes ficam comentados no arquivo, com o motivo. Porquê: um vermelho
+- **D4 — O workflow de validação é derivado do `build.yml` do fork, com os
+  cortes que aquela árvore exigir, cada um medido.** Sai o job `personal-data`
+  (o `scripts/check-personal-data.py` não existe naquela árvore); o Windows
+  passa a compilar com `CGO_ENABLED=1` (naquela árvore o driver SQLite é só o
+  `mattn/go-sqlite3`, que exige CGO); e o `pytest` passa a ser fornecido por
+  `uv run --with pytest` (aquela árvore tem teste e não declara o runner — corte
+  achado rodando, não lendo, e registrado na emenda 1 do plano). Cada corte fica
+  comentado no arquivo, com o motivo. O número não era previsível na mesa: o
+  design dizia "dois" e a execução achou o terceiro. Porquê: um vermelho
   causado por arquivo ausente ou por build tag que aquela árvore não tem não diz
   nada sobre o PR — e diria a coisa errada para quem lê.
 
