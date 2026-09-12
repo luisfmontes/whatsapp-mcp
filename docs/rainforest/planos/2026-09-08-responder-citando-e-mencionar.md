@@ -298,6 +298,37 @@ provado por `gh issue view 18 --repo luisfmontes/whatsapp-mcp --json state --jq 
 devolvendo `OPEN`, e `gh issue view 18 --repo luisfmontes/whatsapp-mcp --json body --jq .body | grep -cE '[0-9]{10,}@|55[0-9]{9,}'`
 devolvendo `0`.
 
+### 12. Trava de dado pessoal e limpeza dos vazamentos achados no caminho [tipo: implementar]
+atende: D3
+arquivos: `scripts/check-personal-data.py`, `whatsapp-mcp-server/test_scrub_mentions.py`, `_reversa_forward/003-whatsmeow-gaps-7-8-9/interfaces/group-participants.md`, `docs/rainforest/pedidos/2026-09-08-responder-citando-mensagem.md`
+depende de: nenhuma
+paralela: sim
+
+Tarefa nascida das emendas, escrita aqui em 2026-09-12 para o radar de creep
+poder conferi-la: as quatro coisas abaixo cresceram durante a execução e
+estavam descritas só em prosa, na seção de emendas.
+
+A trava `scripts/check-personal-data.py` ganhou os padrões `jid-grupo`
+(`\d{12,25}@g.us`) e `jid-lid` (`\d{8,25}(:\d+)?@lid`) — ela só reconhecia
+telefone, e um JID de grupo e um `@lid` são identificadores tanto quanto. O
+baseline **não** cresceu: os três `@g.us` pré-existentes foram conferidos contra
+os dois stores (nenhum casa uma linha de `chats`) e reescritos sem dígito, e o
+group JID real que tinha vazado para o arquivo de estado saiu na reescrita da
+branch. `test_scrub_mentions.py` é o arquivo de teste novo da superfície de
+leitura; o doc de interface e o pedido tiveram exemplos com identificador
+trocados por forma mascarada.
+
+mutacao:
+  arquivo: `scripts/check-personal-data.py`
+  de: as duas linhas de padrão `jid-grupo` e `jid-lid` na lista de PATTERNS
+  para: a lista sem elas, só com os padrões de telefone que já existiam
+  bateria: plantar um `@g.us` e três formas de `@lid` num arquivo rastreado e rodar `python scripts/check-personal-data.py`
+  fixture: envenenamento do próprio guard — com os padrões, exit 1 nomeando os quatro; sem eles, exit 0 e o identificador passa. Observado disparando em 2026-09-12, e de novo pelo revisor da rodada 10.
+
+pronto quando: `python scripts/check-personal-data.py` sai 0 na árvore limpa e
+sai 1 nomeando o identificador quando um `@g.us` ou um `@lid` é plantado num
+arquivo rastreado — as duas metades observadas, não inferidas.
+
 ## Emendas
 
 Registradas aqui porque escopo que cresce sem rastro é escopo que ninguém
