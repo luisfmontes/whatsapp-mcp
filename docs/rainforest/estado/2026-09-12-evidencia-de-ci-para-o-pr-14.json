@@ -131,6 +131,35 @@
     "em": "2026-09-12"
   },
   "fechar": {
-    "status": "pendente"
+    "status": "ok",
+    "pr": 20,
+    "branch": "evidencia/ci-do-pr-14",
+    "head": "9fd81b0",
+    "acao": "PR aberto no fork, 16 de 16 checks verdes, mesclado por squash",
+    "worktrees_removidos": [
+      ".claude/worktrees/ci-pr14"
+    ],
+    "worktree_mantido": ".claude/worktrees/rebase-pr14 — nao e deste fluxo; espelha a cabeca do PR 14, que segue OPEN no upstream",
+    "branches_locais_apagadas": [
+      "ci/pr14-falsificacao",
+      "evidencia/ci-do-pr-14"
+    ],
+    "em": "2026-09-12",
+    "merge_commit": "46bffa2",
+    "mesclado_em": "2026-09-12T12:51:38Z",
+    "branch_de_trabalho": "evidencia/ci-do-pr-14, apagada no remoto e no local depois do merge",
+    "entrega_publicada": "comentario no PR 14 do rodrigopg/whatsapp-mcp em 2026-09-12T12:08:18Z",
+    "branches_que_ficam_no_fork": [
+      "ci/pr14-evidencia (e092361) — a arvore do PR mais so o workflow; o run dela e a evidencia citada no comentario",
+      "ci/pr14-base (3b68feb) — upstream/main mais o mesmo workflow; o run dela e o que prova que o unico vermelho e pre-existente"
+    ],
+    "por_que_ficam": "as duas sao a evidencia. Apagar a branch nao apaga o run, mas apaga o jeito de reencontra-lo por SHA e de conferir o diff de um arquivo que o comentario afirma. Saem quando o PR 14 for mesclado ou fechado",
+    "ideias_plantadas": [
+      "2026-09-12-ci-para-o-upstream-do-whatsapp-mcp",
+      "2026-09-12-test-db-path-quebra-no-windows-no-upstream",
+      "2026-09-12-gate-publicacao-nao-tem-como-confirmar-que-e-id"
+    ],
+    "ponta_solta": "o PR 14 continua OPEN no upstream, agora com a evidencia que o mantenedor pediu. O que falta e decisao dele, nao trabalho deste lado",
+    "nota_de_processo": "este arquivo de estado foi para a main em commit direto, sem PR. O destino padrao de branch e PR, mas um PR para gravar 'o PR foi mesclado' precisaria do proprio commit de bookkeeping depois — regresso infinito. Uma linha de JSON de bookkeeping nao paga um ciclo de 16 checks"
   }
 }
