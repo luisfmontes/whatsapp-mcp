@@ -721,3 +721,49 @@ revisa. Cada uma nasceu de um defeito medido, não de conveniência.
   `pronto quando:` `/api/group_info` não devolve dígito de telefone nenhum, e um
   `ref` lido dali remove a pessoa certa pelo `/api/group_participants` — provado
   por `TestGrupoDescritoPorNome` e `TestRefDeGrupoApontaAPessoa`.
+
+- **2026-09-12 (rodada 10) — a correção do achado 3 da rodada 9 valia só em
+  grupo.** O ramo 1:1 de `chatParticipants` montava o participante **sem**
+  `outrasChaves`, então a linha `<lid>@lid` da tabela `senders` nunca era lida
+  numa conversa particular: a mesma pessoa era mencionável no grupo e recusada
+  com `no participant named "X" found in this chat` na conversa. Entra
+  `outrasFormasDoJID`, que pergunta à própria lib o `@lid` de um telefone (ou o
+  telefone de um `@lid`).
+  Medido no store real antes de consertar: dos 2.162 chats 1:1, **zero** estão
+  hoje sem nome pela forma PN e com nome sob `@lid` — o buraco é real no código
+  e o impacto medido é zero neste store, nesta data. Ele abre quando
+  `resolveToPN` grava `@lid` por falta de mapeamento, que é a janela de contato
+  novo ou re-pareamento. Essa janela não foi medida.
+  `pronto quando:` `participantesDaConversa` lê a linha `@lid` e torna a pessoa
+  mencionável em 1:1 — `TestListaDeParticipantesDeCadaLado/conversa_1a1_le_a_linha_lid`.
+
+- **2026-09-12 (rodada 10) — duas correções anteriores não tinham guarda
+  nenhuma: mutação revertia o defeito e a bateria ficava verde.**
+  (a) Reverter a correção do achado 2 da rodada 9 **dentro do laço de
+  `chatParticipants`** — voltar a descartar quem não tem telefone — deixava a
+  suíte inteira verde, porque **nenhum** teste chamava a função. O laço saiu para
+  `participantesDeGrupo`, e o 1:1 para `participantesDaConversa`, que recebe um
+  `mapaDeLID` (interface nossa, de dois métodos) para poder receber um dublê.
+  (b) Trocar o `Participant` do `ContextInfo` pelo user part cru, sem
+  `@servidor`, também ficava verde: os testes de citação cobriam as três recusas
+  e **nunca o caminho de sucesso**, e a única asserção sobre `Participant` na
+  suíte era sobre um `ContextInfo` montado pelo próprio teste — caminho de
+  leitura, não de escrita.
+  `pronto quando:` as duas mutações ficam vermelhas —
+  `TestListaDeParticipantesDeCadaLado` e `TestCitacaoApontaOAutorPeloJIDInteiro`.
+
+- **2026-09-12 (rodada 10) — a recusa mentia sobre o próprio motivo.** Com a
+  generosidade de separador, o nome de um terceiro passa a vencer a posição e a
+  menção pedida fica sem âncora — recusa, que é falha segura e é a troca que
+  `ehSeparadorDeNome` declara aceitar. Mas o texto dizia
+  `mention "Ana" has no "@Ana" anchor in the message text`, com `@Ana`
+  literalmente no texto: o gatilho depende do nome de um terceiro, então ao
+  usuário parecia aleatório. A recusa passa a nomear quem venceu a posição e a
+  dizer o que fazer.
+  **Consequência espelho, aceita:** quando o nome longo É o pedido,
+  `"@Ana\nPaula"` com `mentions: ["Ana Paula"]` consome a quebra de linha do
+  autor. É o preço de tratar separador como separador dos dois lados, e
+  contradiz em letra a frase do README "the bridge never rewrites their
+  spelling" — que vale para o `@` que ninguém pediu, não para o que foi pedido.
+  `pronto quando:` a recusa nomeia o participante que venceu a posição —
+  `TestRecusaDizQuemComeuAAncora`.

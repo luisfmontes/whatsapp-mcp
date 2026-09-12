@@ -860,9 +860,10 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 // mentionParticipant is one candidate for a mention target inside a chat
 // (D5): the list resolveMentions matches requested names against.
 //
-// In a GROUP, jid is always a phone-number JID (@s.whatsapp.net) — chatParticipants
-// builds it from gp.PhoneNumber and skips whoever has none — so it keys the senders
-// table and goes straight into ContextInfo.MentionedJID. In a 1:1 it is whatever
+// In a GROUP, jid is the phone-number JID (@s.whatsapp.net) whenever the server
+// gives one — it keys the senders table and goes straight into
+// ContextInfo.MentionedJID. Quem vem sem telefone entra com phoneUser vazio:
+// presente na lista, nao mencionavel (rodada 9). In a 1:1 it is whatever
 // addresses the chat, which can be an @lid when no PN mapping exists yet; mentioning
 // in that case is refused rather than sent, because WhatsApp will not highlight an
 // @lid and the text would carry a stranger-looking identifier (achado da rodada 5).
@@ -982,21 +983,85 @@ func (store *MessageStore) fillSenderNames(p *mentionParticipant) {
 // the wrong person.
 func chatParticipants(client *whatsmeow.Client, messageStore *MessageStore, chatJID types.JID) ([]mentionParticipant, error) {
 	if chatJID.Server != types.GroupServer {
-		p := mentionParticipant{jid: chatJID.String(), phoneUser: chatJID.User}
-		messageStore.fillSenderNames(&p)
-		return []mentionParticipant{p}, nil
+		return participantesDaConversa(messageStore, chatJID, mapaDeLIDDoCliente(client)), nil
 	}
 	groupInfo, err := client.GetGroupInfo(context.Background(), chatJID)
 	if err != nil {
 		return nil, err
 	}
+	return participantesDeGrupo(messageStore, groupInfo), nil
+}
+
+// participantesDeGrupo e o corpo do ramo de grupo, fora do handler para poder
+// ser exercitado: o achado 2 da rodada 10 foi que reverter a correcao da rodada
+// 9 AQUI DENTRO — voltar a descartar quem nao tem telefone — deixava a bateria
+// inteira verde, porque nenhum teste chamava chatParticipants.
+func participantesDeGrupo(store *MessageStore, groupInfo *types.GroupInfo) []mentionParticipant {
 	participants := make([]mentionParticipant, 0, len(groupInfo.Participants))
 	for _, gp := range groupInfo.Participants {
 		p := participanteDoGrupo(gp)
-		messageStore.fillSenderNames(&p)
+		store.fillSenderNames(&p)
 		participants = append(participants, p)
 	}
-	return participants, nil
+	return participants
+}
+
+// mapaDeLID e o pedaco de store.LIDStore que a ponte usa. A interface e nossa,
+// e pequena, para que o teste possa passar um duble sem implementar as cinco
+// funcoes da lib — sem isso o unico jeito de exercitar a busca seria com um
+// cliente whatsmeow conectado, e a correcao ficaria sem guarda.
+type mapaDeLID interface {
+	GetPNForLID(ctx context.Context, lid types.JID) (types.JID, error)
+	GetLIDForPN(ctx context.Context, pn types.JID) (types.JID, error)
+}
+
+// mapaDeLIDDoCliente devolve nil de verdade quando nao ha mapa, e nao uma
+// interface com ponteiro nulo dentro.
+func mapaDeLIDDoCliente(client *whatsmeow.Client) mapaDeLID {
+	if client == nil || client.Store == nil || client.Store.LIDs == nil {
+		return nil
+	}
+	return client.Store.LIDs
+}
+
+// participantesDaConversa monta o outro lado de uma conversa 1:1. As outras
+// formas do JID vem junto pelo mesmo motivo do grupo: a linha da tabela senders
+// pode estar sob o @lid. O ramo 1:1 nao as tinha, entao a correcao do achado 3
+// da rodada 9 valia so em grupo, e uma pessoa mencionavel no grupo era recusada
+// na conversa particular (achado 1 da rodada 10).
+func participantesDaConversa(store *MessageStore, chatJID types.JID, lids mapaDeLID) []mentionParticipant {
+	p := mentionParticipant{
+		jid:          chatJID.String(),
+		phoneUser:    chatJID.User,
+		outrasChaves: outrasFormasDoJID(lids, chatJID),
+	}
+	store.fillSenderNames(&p)
+	return []mentionParticipant{p}
+}
+
+// outrasFormasDoJID devolve o mesmo endereco na OUTRA forma — o @lid de um
+// telefone, o telefone de um @lid — pelo mapa que a propria lib mantem. Lista
+// vazia quando nao ha mapeamento, que e o caso comum de contato novo.
+func outrasFormasDoJID(lids mapaDeLID, jid types.JID) []string {
+	if lids == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var outra types.JID
+	var err error
+	switch jid.Server {
+	case types.DefaultUserServer:
+		outra, err = lids.GetLIDForPN(ctx, jid)
+	case types.HiddenUserServer:
+		outra, err = lids.GetPNForLID(ctx, jid)
+	default:
+		return nil
+	}
+	if err != nil || outra.IsEmpty() || outra.String() == jid.String() {
+		return nil
+	}
+	return []string{outra.String()}
 }
 
 // participanteDoGrupo traduz o que GetGroupInfo devolve para o participante que
@@ -1530,6 +1595,7 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 	})
 
 	usados := make([]bool, len(resolved))
+	comidoPor := make(map[int]string, len(resolved))
 	normText, paraOriginal, paraNormalizado := textoNormalizado(text)
 	var b strings.Builder
 	for i := 0; i < len(text); {
@@ -1600,6 +1666,17 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 			continue
 		}
 		c := cands[escolhido]
+		if c.idx < 0 {
+			// Este "@" nomeia OUTRO participante, e por isso fica intacto. Se
+			// alguma mencao pedida ainda sem ancora cabe dentro deste nome, e
+			// ele que vai explicar a recusa: sem isso o erro dizia que "@Ana"
+			// nao esta no texto, com "@Ana" no texto (achado 4 da rodada 10).
+			for i, r := range resolved {
+				if !usados[i] && strings.HasPrefix(c.norm, nomeNormalizado(r.name)) {
+					comidoPor[i] = c.nome
+				}
+			}
+		}
 		b.WriteString("@")
 		if c.idx >= 0 {
 			b.WriteString(resolved[c.idx].phoneUser)
@@ -1618,6 +1695,12 @@ func applyMentions(text string, resolved []resolvedMention, outrosNomes []nomeDe
 	mentionedJIDs := make([]string, 0, len(resolved))
 	for i, r := range resolved {
 		if !usados[i] {
+			if outro := comidoPor[i]; outro != "" {
+				return text, nil, fmt.Sprintf(
+					"mention %q was not applied: where %q appears the text names %q, another participant of this chat, and the longer name wins — rewrite the sentence or mention %q instead; nothing was sent",
+					r.name, "@"+r.name, outro, outro,
+				), http.StatusBadRequest
+			}
 			return text, nil, fmt.Sprintf(
 				"mention %q has no %q anchor in the message text — WhatsApp only highlights a mention the body writes, so nothing was sent",
 				r.name, "@"+r.name,

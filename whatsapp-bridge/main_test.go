@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -3136,6 +3137,162 @@ func TestNomeLongoUsadoNaoCaiEmNomeCurtoDeOutro(t *testing.T) {
 	}
 	if strings.Contains(texto, "c-b") {
 		t.Fatalf("texto = %q, want no trace of the other person's number where the author wrote a full name", texto)
+	}
+}
+
+// TestListaDeParticipantesDeCadaLado cobre os achados 1 e 2 da rodada 10. O
+// achado 2 e um buraco de bateria: reverter a correcao da rodada 9 dentro do
+// laco de chatParticipants — voltar a descartar quem nao tem telefone —
+// deixava a suite INTEIRA verde, porque nenhum teste chamava a funcao. O
+// achado 1 e o outro lado dela: o ramo 1:1 montava o participante sem
+// outrasChaves, entao a correcao do achado 3 da rodada 9 valia so em grupo e a
+// linha @lid nunca era lida numa conversa particular.
+func TestListaDeParticipantesDeCadaLado(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite3", filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE senders (
+		jid TEXT PRIMARY KEY, push_name TEXT, full_name TEXT, first_name TEXT, business_name TEXT
+	)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store := &MessageStore{db: db}
+
+	t.Run("grupo_mantem_quem_nao_tem_telefone", func(t *testing.T) {
+		comTelefone := types.JID{User: "55" + "62" + "9" + "0000005", Server: types.DefaultUserServer}
+		semTelefone := types.JID{User: "9988776655", Server: types.HiddenUserServer}
+		info := &types.GroupInfo{Participants: []types.GroupParticipant{
+			{JID: comTelefone, PhoneNumber: comTelefone},
+			{JID: semTelefone, LID: semTelefone},
+		}}
+
+		participants := participantesDeGrupo(store, info)
+
+		if len(participants) != 2 {
+			t.Fatalf("participants = %v — quem nao tem telefone continua na lista: o nome dele protege o prefixo e conta na D6", participants)
+		}
+		if participants[1].phoneUser != "" {
+			t.Fatalf("phoneUser = %q, want vazio", participants[1].phoneUser)
+		}
+	})
+
+	t.Run("conversa_1a1_le_a_linha_lid", func(t *testing.T) {
+		lid := types.JID{User: "1122334455", Server: types.HiddenUserServer}
+		if _, err := db.Exec(
+			"INSERT INTO senders (jid, push_name, full_name, first_name, business_name) VALUES (?, ?, ?, ?, ?)",
+			lid.String(), "", "Ana Paula Souza", "Ana Paula", "",
+		); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		chat := types.JID{User: "55" + "62" + "9" + "0000006", Server: types.DefaultUserServer}
+
+		participants := participantesDaConversa(store, chat, mapaFixo{pn: chat, lid: lid})
+
+		if len(participants) != 1 {
+			t.Fatalf("participants = %v", participants)
+		}
+		if participants[0].fullName != "Ana Paula Souza" {
+			t.Fatalf("fullName = %q — em 1:1 a linha @lid tambem tem de ser lida; sem ela a mesma pessoa e mencionavel no grupo e recusada na conversa", participants[0].fullName)
+		}
+		if len(matchMentionName(participants, "Ana Paula")) != 1 {
+			t.Fatalf("want a pessoa mencionavel em 1:1 pelo nome que so existe na linha @lid")
+		}
+	})
+
+	t.Run("sem_mapa_de_lid_nao_estoura", func(t *testing.T) {
+		chat := types.JID{User: "55" + "62" + "9" + "0000009", Server: types.DefaultUserServer}
+		if participants := participantesDaConversa(store, chat, nil); len(participants) != 1 {
+			t.Fatalf("participants = %v — contato novo nao tem mapeamento, e isso e o caso comum", participants)
+		}
+	})
+}
+
+// mapaFixo e um duble do mapa LID<->PN da lib, com um unico par.
+type mapaFixo struct {
+	pn  types.JID
+	lid types.JID
+}
+
+func (m mapaFixo) GetLIDForPN(_ context.Context, pn types.JID) (types.JID, error) {
+	if pn.String() == m.pn.String() {
+		return m.lid, nil
+	}
+	return types.JID{}, nil
+}
+
+func (m mapaFixo) GetPNForLID(_ context.Context, lid types.JID) (types.JID, error) {
+	if lid.String() == m.lid.String() {
+		return m.pn, nil
+	}
+	return types.JID{}, nil
+}
+
+// TestCitacaoApontaOAutorPeloJIDInteiro e a guarda que faltava (achado 3 da
+// rodada 10): trocar o Participant do ContextInfo pelo user part cru, sem
+// "@servidor", deixava a bateria verde. Os testes de citacao cobriam as tres
+// recusas e nunca o caminho de sucesso, e a unica assercao sobre Participant na
+// suite era sobre um ContextInfo montado pelo proprio teste — caminho de
+// leitura, nao de escrita.
+func TestCitacaoApontaOAutorPeloJIDInteiro(t *testing.T) {
+	store := setupPollStore(t)
+	const grupo = "grupo-da-guarda-de-citacao@g.us"
+	autor := "55" + "62" + "9" + "0000007" + "@s.whatsapp.net"
+	if err := store.StoreChat(grupo, "Grupo", time.Now()); err != nil {
+		t.Fatalf("StoreChat: %v", err)
+	}
+	if err := store.StoreMessage("MSG-CITADA", grupo, "alguem", "bom dia a todos", time.Now(), false, "", "", "", nil, nil, nil, 0); err != nil {
+		t.Fatalf("StoreMessage: %v", err)
+	}
+	if err := store.StoreMessageSenderJID("MSG-CITADA", grupo, autor); err != nil {
+		t.Fatalf("StoreMessageSenderJID: %v", err)
+	}
+
+	ctxInfo, errMsg, status := buildQuoteContextInfo(store, "MSG-CITADA", grupo)
+
+	if errMsg != "" || status != 0 || ctxInfo == nil {
+		t.Fatalf("errMsg=%q status=%d ctxInfo=%v", errMsg, status, ctxInfo)
+	}
+	if ctxInfo.GetStanzaID() != "MSG-CITADA" {
+		t.Fatalf("StanzaID = %q", ctxInfo.GetStanzaID())
+	}
+	// O ponto do teste: Participant tem de ser o JID INTEIRO do autor. Sem o
+	// "@servidor" o destinatario nao tem a quem atribuir a citacao.
+	if ctxInfo.GetParticipant() != autor {
+		t.Fatalf("Participant = %q, want o JID inteiro do autor", ctxInfo.GetParticipant())
+	}
+	if ctxInfo.GetQuotedMessage().GetConversation() != "bom dia a todos" {
+		t.Fatalf("QuotedMessage = %q", ctxInfo.GetQuotedMessage().GetConversation())
+	}
+}
+
+// TestRecusaDizQuemComeuAAncora cobre o achado 4 da rodada 10: com a
+// generosidade de separador, o nome de um terceiro passa a vencer a posicao
+// e a mencao pedida fica sem ancora — recusa, que e falha segura. Mas o texto
+// da recusa dizia que "@Ana" nao esta na mensagem, com "@Ana" na mensagem.
+func TestRecusaDizQuemComeuAAncora(t *testing.T) {
+	participants := []mentionParticipant{
+		{jid: "ana@s.whatsapp.net", phoneUser: "ana", firstName: "Ana"},
+		{jid: "ap@s.whatsapp.net", phoneUser: "ap", fullName: "Ana Paula"},
+	}
+	resolved, outros, _, errMsg, _ := resolveMentionsAgainstParticipants(
+		participants, []string{"Ana"}, "g@g.us")
+	if errMsg != "" {
+		t.Fatalf("resolucao: %v", errMsg)
+	}
+
+	_, _, ancora, status := applyMentions("@Ana - Paula ja respondeu", resolved, outros)
+
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want recusa", status)
+	}
+	if !strings.Contains(ancora, "Ana Paula") {
+		t.Fatalf("a recusa %q nao diz quem venceu a posicao — quem le nao tem como entender por que", ancora)
+	}
+	if strings.Contains(ancora, "has no") {
+		t.Fatalf("a recusa %q ainda diz que a ancora nao esta no texto, e ela esta", ancora)
 	}
 }
 
