@@ -1,0 +1,136 @@
+{
+  "slug": "2026-09-12-evidencia-de-ci-para-o-pr-14",
+  "titulo": "Evidencia de CI verde para o PR 14 no upstream",
+  "criado_em": "2026-09-12",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+    "aprovado_por": "Luis, autorizacao previa: faz o fluxo todo no recomendado sem precisar de mim",
+    "em": "2026-09-12"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+    "tarefas": 5,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-09-12",
+    "nota": "eram 4 quando o plano fechou; a tarefa 5 (medicao de base) nasceu durante o executar e esta registrada nas Emendas. O campo foi corrigido na rodada 2 da revisao, que pegou a divergencia entre plano.tarefas 4 e executar.tarefas 5 no mesmo arquivo"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-12",
+    "tarefas_feitas": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "branches": [
+      "ci/pr14-evidencia",
+      "ci/pr14-base",
+      "ci/pr14-falsificacao (apagada do fork depois de lido o log)"
+    ],
+    "nota": "As 5 tarefas rodaram na janela principal, sem despacho: sao orquestracao de branch e CI remota (escrever YAML, empurrar, ler run), nao edicao paralela de codigo, e cada uma ficou muito abaixo do limiar de 3.000 tokens da regra 10. As tarefas 3, 4 e 5 nasceram durante a execucao (ver Emendas do plano). Este campo e o 'branches' foram corrigidos na revisao de 2026-09-12: tinham ficado congelados no valor do marcador 'parcial', quando so as tarefas 1 e 2 existiam.",
+    "em": "2026-09-12",
+    "tarefas": 5,
+    "tarefas_ok": 5,
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "n/a",
+        "motivo": "arquivo de configuracao de CI, sem comportamento de produto a inverter; a inversao que valida o que a tarefa montou e a da tarefa 2, no codigo sob teste"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "return \"/\" + parts[1]",
+        "para": "recorte da query com strings.SplitN(parts[1], \"?\", 2)[0]",
+        "bateria": "workflow pr14-evidencia na CI do fork, branch ci/pr14-falsificacao, SHA 8088b9b",
+        "resultado": "vermelho",
+        "fixture": "TestExtractDirectPathFromURL — '--- FAIL' em bridge (ubuntu-latest), (macos-latest) e (windows-latest), com o build compilando nas tres",
+        "nota": "bateria remota de proposito: a arvore do PR so tem o driver SQLite com CGO e nao compila nesta maquina, entao vermelho local seria vermelho de build"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "n/a",
+        "motivo": "documento e comentario nao tem ramo a inverter; a falsificacao e a coerencia com o gh, conferida no pronto quando (SHA, run e lista de jobs relidos)"
+      },
+      {
+        "tarefa": 4,
+        "arquivo": "docs/rainforest/pedidos/2026-09-12-evidencia-de-ci-para-o-pr-14.md",
+        "de": "titulo de secao '## O que foi pedido'",
+        "para": "o mesmo titulo seguido de valor com forma de telefone AUSENTE do baseline",
+        "bateria": "python scripts/check-personal-data.py",
+        "resultado": "vermelho",
+        "fixture": "check-personal-data.py, padrao 'telefone' — a saida nomeou o identificador E o caminho do arquivo",
+        "nota": "conferir-mutacao.cjs: baseline VERDE (exit 0) -> mutacao VERMELHA (exit 1), fonte restaurado. A primeira tentativa voltou verde porque o valor escolhido ja constava do baseline — verde correto, mutacao errada"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "n/a",
+        "motivo": "a branch de base e a arvore de upstream/main SEM alteracao nenhuma mais o workflow ja falsificado pela tarefa 2 — a ausencia de mutacao e o proprio experimento, e inverter algo destruiria o que ela mede"
+      }
+    ],
+    "runs": {
+      "evidencia": "branch ci/pr14-evidencia, SHA e092361",
+      "base": "branch ci/pr14-base, SHA 3b68feb (= upstream/main + o mesmo workflow)",
+      "falsificacao": "branch ci/pr14-falsificacao, SHA 8088b9b (apagada depois de lido o log)",
+      "como_reencontrar": "gh run list --repo luisfmontes/whatsapp-mcp --commit <sha> --json databaseId,conclusion,url",
+      "por_que_sem_id": "id de run tem 11 digitos e casa a forma de telefone do gate-publicacao-destino, que nao tem allowlist; o SHA e ancora melhor e passa pela isencao de hex"
+    },
+    "comentario": "comentario no PR 14 do upstream, publicado em 2026-09-12T12:08:18Z — gh pr view 14 --repo rodrigopg/whatsapp-mcp --json comments",
+    "comando": "gh run view <run da evidencia> --repo luisfmontes/whatsapp-mcp --json jobs --jq '.jobs[] | .name + \"|\" + .conclusion' | sort  (e o mesmo no run da base)",
+    "saida": "PR: bridge macos/ubuntu/windows success | gofmt success | mcp server macos/ubuntu success | mcp server windows failure ;; BASE: identica job a job, inclusive o mesmo failure em mcp server (windows-latest), com as mesmas duas linhas FAILED de test_db_path.py::TestResolveMessagesDb e o mesmo '2 failed, 16 passed'"
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "5dda8df6f48fc6f7353515d5a868502b64af4a53",
+      "caminhos_sujos": []
+    },
+    "base": "f20c286",
+    "head": "5dda8df",
+    "em": "2026-09-12",
+    "rodada": 3,
+    "veredito_rodada_3": "aprovada com ressalva: tabela dos cinco cortes confere linha a linha contra os dois YAML; dois achados de texto (frase duplicada na D4 e alegacao de completude mais larga que a tabela), os dois fechados",
+    "rodadas": 3,
+    "revisor": "rainforest-mind:revisor, contexto zerado em cada rodada",
+    "veredito": "aprovada",
+    "achados": 7,
+    "achados_fechados": 7,
+    "onde_estavam": "nenhum achado no artefato publicado. Todos os sete foram texto afirmando mais do que a medicao sustentava: estado.json congelado no marcador parcial (x2), D3 falando em contagem de commit quando o invariante era conjunto de arquivos, D4 dizendo dois cortes quando eram tres, D4 afirmando completude de comentario no YAML quando um corte nao tinha, frase duplicada na D4, e 'lista completa' mais larga que a tabela.",
+    "nucleo_confirmado_pelos_revisores": "jobs identicos job a job entre o run da arvore do PR e o da base; branch do PR intocada em 7721256; delta de um arquivo contra a cabeca do PR; falsificacao com go build e go vet passando ANTES do --- FAIL do TestExtractDirectPathFromURL; comentario publicado coerente com o que os runs devolvem; guarda de dado pessoal verde.",
+    "ressalva_da_rodada_3": "a rodada 3 devolveu 'aprovada com ressalva' por dois achados de texto (frase duplicada na D4 e alegacao de completude mais larga que a tabela). Os dois foram consertados em 5dda8df, DEPOIS do veredito — e conferidos por mim, na janela principal, nao por uma quarta rodada: sao uma frase apagada e uma delimitacao acrescentada, e rodar mais uma rodada de revisor sobre prosa de doc e o que o freio de Pareto existe para barrar. Fica escrito que o conserto dessas duas nao passou por revisor independente."
+  },
+  "verificar": {
+    "status": "ok",
+    "criterios": 5,
+    "criterios_ok": 5,
+    "comando": "git diff --name-only origin/pr/fix-media-and-reliability origin/ci/pr14-evidencia ; diff <(gh run view <evidencia> --json jobs --jq '.jobs[]|.name+\" | \"+.conclusion'|sort) <(gh run view <base> ... |sort) ; gh api .../jobs/<id> --jq '.steps[]|.name+\" | \"+.conclusion' ; gh pr view 14 --repo rodrigopg/whatsapp-mcp --json comments ; python scripts/check-personal-data.py",
+    "saida": "T1a: uma linha, .github/workflows/pr14-evidencia.yml. T1b+T5: as duas listas de jobs IDENTICAS job a job (diff vazio), unico failure em mcp server (windows-latest) nos DOIS lados, com as mesmas duas linhas FAILED de test_db_path.py e o mesmo '2 failed, 16 passed'. T2a: git ls-remote da branch de falsificacao vazio. T2b: conclusion failure, '--- FAIL: TestExtractDirectPathFromURL' nas tres plataformas. T2c: passos do job = build success, vet success, test FAILURE — vermelho de teste, nao de build. T3: o comentario cita os tres SHA certos, tres URLs de run, o delta de um arquivo, a falsificacao, e a tabela de jobs bate nome a nome E celula a celula com o que os runs devolvem. T4: guarda exit 0, ok (24 identificadores conhecidos); grep nos arquivos da entrega vazio.",
+    "por_tarefa": {
+      "1": "ok — delta de um arquivo, e o criterio EMENDADO (todo job verde exceto vermelho identico na base) cumprido. O criterio original, run inteiro verde, seria inalcancavel nesta arvore: a conclusion do run e 'failure', e isso esta escrito aqui em vez de escondido",
+      "2": "ok — falsificacao vermelha nas tres plataformas com build e vet passando antes, e a branch descartavel apagada do fork",
+      "3": "ok — comentario publicado no PR 14 conferido campo a campo contra o gh",
+      "4": "ok — guarda verde com a mesma contagem de antes da entrega, e a catraca da guarda ficou VERMELHA com valor fora do baseline",
+      "5": "ok — as duas listas de jobs identicas, e as linhas FAILED identicas nos dois lados"
+    },
+    "invariantes": {
+      "branch_do_PR_intocada": "ok — origin/pr/fix-media-and-reliability em 7721256, e o headRefOid do PR no upstream e o mesmo; PR segue OPEN",
+      "main_do_upstream_sem_push": "ok — upstream/main em e1b447a, o mesmo do inicio; os tres commits no topo do upstream sao de 26 e 27 de agosto, nenhum meu",
+      "sem_dado_pessoal": "ok — check-personal-data.py exit 0",
+      "verde_so_com_run_lido": "ok — nenhuma afirmacao de verde sem conclusion e steps vindos do gh",
+      "branch_de_falsificacao_apagada": "ok — ls-remote vazio"
+    },
+    "em": "2026-09-12"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
