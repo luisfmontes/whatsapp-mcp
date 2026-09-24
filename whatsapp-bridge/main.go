@@ -40,8 +40,11 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waMmsRetry"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -641,6 +644,23 @@ func (store *MessageStore) MarkMessageRevoked(id, chatJID string, revokedAt time
 		return "", false, err
 	}
 	return filenameNull.String, true, nil
+}
+
+// StoreRevokedTombstone leaves a placeholder row for a history-sync REVOKE
+// stub whose target this store never saw (D2, issue #23) — a fresh database,
+// or the message simply never having reached this store. Same shape a live
+// revoke leaves behind (empty content, revoked_at set), so the conversation
+// keeps the gap instead of silently missing the message. ON CONFLICT DO
+// NOTHING makes this a no-op when the row already exists — that case is
+// handled by MarkMessageRevoked (via applyProtocolMessage) instead.
+func (store *MessageStore) StoreRevokedTombstone(id, chatJID, sender string, revokedAt time.Time, isFromMe bool) error {
+	_, err := store.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, revoked_at)
+		VALUES (?, ?, ?, '', ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO NOTHING`,
+		id, chatJID, sender, revokedAt, isFromMe, revokedAt,
+	)
+	return err
 }
 
 // ApplyMessageEdit replaces the content of (id, chat_jid) with the edited
@@ -6919,101 +6939,167 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			messageStore.StoreChat(chatJID, name, timestamp)
 
 			// Store messages
-			for _, msg := range messages {
-				if msg == nil || msg.Message == nil {
-					continue
-				}
-
-				// Extract text content (includes media captions)
-				content := extractTextContent(msg.Message.Message)
-
-				// Extract media info
-				var mediaType, filename, url string
-				var mediaKey, fileSHA256, fileEncSHA256 []byte
-				var fileLength uint64
-
-				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
-				}
-
-				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
-
-				// Skip messages with no content and no media
-				if content == "" && mediaType == "" {
-					continue
-				}
-
-				// Determine sender
-				var sender string
-				isFromMe := false
-				if msg.Message.Key != nil {
-					if msg.Message.Key.FromMe != nil {
-						isFromMe = *msg.Message.Key.FromMe
-					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						if pjid, perr := types.ParseJID(*msg.Message.Key.Participant); perr == nil {
-							sender = resolveToPN(client, pjid).User
-						} else {
-							sender = *msg.Message.Key.Participant
-						}
-					} else if isFromMe {
-						sender = client.Store.ID.User
-					} else {
-						sender = jid.User
-					}
-				} else {
-					sender = jid.User
-				}
-
-				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
-
-				// Get message timestamp
-				timestamp := time.Time{}
-				if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
-					timestamp = time.Unix(int64(ts), 0)
-				} else {
-					continue
-				}
-
-				err = messageStore.StoreMessage(
-					msgID,
-					chatJID,
-					sender,
-					content,
-					timestamp,
-					isFromMe,
-					mediaType,
-					filename,
-					url,
-					mediaKey,
-					fileSHA256,
-					fileEncSHA256,
-					fileLength,
-				)
-				if err != nil {
-					logger.Warnf("Failed to store history message: %v", err)
-				} else {
-					syncedCount++
-					// Log successful message storage
-					if mediaType != "" {
-						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
-					} else {
-						logger.Infof("Stored message: [%s] %s -> %s: %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
-					}
-				}
-			}
+			syncedCount += storeHistoryConversation(client, messageStore, jid, chatJID, messages, logger)
 		}
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
 	SyncAllContacts(client, messageStore, logger)
+}
+
+// pendingHistorySyncProtocolMsg is a ProtocolMessage (REVOKE or MESSAGE_EDIT)
+// found while storing a history-sync conversation, held until every message
+// of that conversation has been written (D3, issue #23) — see
+// storeHistoryConversation.
+type pendingHistorySyncProtocolMsg struct {
+	pm *waProto.ProtocolMessage
+	at time.Time
+}
+
+// historySyncSender determines the sender and is-from-me flag for a history
+// sync entry from its key, the same logic handleHistorySync always used —
+// pulled out here so both the stub-REVOKE path and the regular StoreMessage
+// path in storeHistoryConversation share it instead of duplicating it.
+func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.MessageKey) (sender string, isFromMe bool) {
+	if key == nil {
+		return jid.User, false
+	}
+	if key.FromMe != nil {
+		isFromMe = *key.FromMe
+	}
+	if !isFromMe && key.Participant != nil && *key.Participant != "" {
+		if pjid, err := types.ParseJID(*key.Participant); err == nil {
+			sender = resolveToPN(client, pjid).User
+		} else {
+			sender = *key.Participant
+		}
+	} else if isFromMe {
+		sender = client.Store.ID.User
+	} else {
+		sender = jid.User
+	}
+	return sender, isFromMe
+}
+
+// storeHistoryConversation stores the messages of one history-sync
+// conversation (issue #23). The sync delivers newest-first, so a
+// ProtocolMessage REVOKE/MESSAGE_EDIT arrives before the message it targets —
+// applying it right away would never find the target row (D3). Every such
+// entry is deferred into pending instead of going through StoreMessage, and
+// applied with applyProtocolMessage only after the whole conversation has
+// been written.
+//
+// A stub entry (no waE2E message, just a system event) with type REVOKE is
+// how the sync delivers "this message was deleted for everyone" (D1): it is
+// routed through the same applyProtocolMessage path the live revoke event
+// uses, so a message the store already has is revoked and its cached media
+// removed. When the store never saw the original (a fresh database), that
+// leaves nothing to revoke — StoreRevokedTombstone then leaves a placeholder
+// row so the conversation keeps the gap (D2); its ON CONFLICT DO NOTHING
+// makes the call a no-op for the case the row already exists.
+//
+// Returns how many rows it stored.
+func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, messages []*waHistorySync.HistorySyncMsg, logger waLog.Logger) int {
+	syncedCount := 0
+	var pending []*pendingHistorySyncProtocolMsg
+
+	for _, msg := range messages {
+		if msg == nil || msg.Message == nil {
+			continue
+		}
+
+		msgID := ""
+		if msg.Message.Key != nil && msg.Message.Key.ID != nil {
+			msgID = *msg.Message.Key.ID
+		}
+
+		// Get message timestamp
+		timestamp := time.Time{}
+		if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
+			timestamp = time.Unix(int64(ts), 0)
+		} else {
+			continue
+		}
+
+		if msg.Message.Message == nil {
+			if msgID != "" {
+				if msg.Message.GetMessageStubType() == waWeb.WebMessageInfo_REVOKE {
+					sender, isFromMe := historySyncSender(client, jid, msg.Message.Key)
+					applyProtocolMessage(messageStore, chatJID, &waProto.ProtocolMessage{
+						Type: waProto.ProtocolMessage_REVOKE.Enum(),
+						Key:  &waCommon.MessageKey{ID: proto.String(msgID)},
+					}, timestamp, logger)
+					if err := messageStore.StoreRevokedTombstone(msgID, chatJID, sender, timestamp, isFromMe); err != nil {
+						logger.Warnf("Failed to store revoked tombstone for %s: %v", msgID, err)
+					}
+				}
+			}
+			continue
+		}
+
+		if pm := msg.Message.GetMessage().GetProtocolMessage(); pm != nil &&
+			(pm.GetType() == waProto.ProtocolMessage_REVOKE || pm.GetType() == waProto.ProtocolMessage_MESSAGE_EDIT) {
+			pending = append(pending, &pendingHistorySyncProtocolMsg{pm: pm, at: timestamp})
+			continue
+		}
+
+		// Extract text content (includes media captions)
+		content := extractTextContent(msg.Message.Message)
+
+		// Extract media info
+		var mediaType, filename, url string
+		var mediaKey, fileSHA256, fileEncSHA256 []byte
+		var fileLength uint64
+
+		if msg.Message.Message != nil {
+			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
+		}
+
+		// Log the message content for debugging
+		logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
+
+		// Skip messages with no content and no media
+		if content == "" && mediaType == "" {
+			continue
+		}
+
+		sender, isFromMe := historySyncSender(client, jid, msg.Message.Key)
+
+		err := messageStore.StoreMessage(
+			msgID,
+			chatJID,
+			sender,
+			content,
+			timestamp,
+			isFromMe,
+			mediaType,
+			filename,
+			url,
+			mediaKey,
+			fileSHA256,
+			fileEncSHA256,
+			fileLength,
+		)
+		if err != nil {
+			logger.Warnf("Failed to store history message: %v", err)
+		} else {
+			syncedCount++
+			// Log successful message storage
+			if mediaType != "" {
+				logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
+					timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
+			} else {
+				logger.Infof("Stored message: [%s] %s -> %s: %s",
+					timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
+			}
+		}
+	}
+
+	for _, pm := range pending {
+		applyProtocolMessage(messageStore, chatJID, pm.pm, pm.at, logger)
+	}
+
+	return syncedCount
 }
 
 // Request history sync from the server

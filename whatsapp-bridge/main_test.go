@@ -22,6 +22,8 @@ import (
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -2703,6 +2705,229 @@ func TestEditedMessage(t *testing.T) {
 		}
 		if msg.Edited {
 			t.Error("Edited = true, want false — an empty edit must not stamp edited_at")
+		}
+	})
+}
+
+// TestHistorySyncRevoke covers D1/D2/D4 (issue #23): a REVOKE stub the
+// history sync delivers (a WebMessageInfo with MessageStubType REVOKE and no
+// waE2E message) revokes the message it targets through the same
+// applyProtocolMessage path the live event uses — including dropping the
+// cached media — and, when the store never saw the target (a fresh
+// database), leaves a tombstone row instead of silently dropping the
+// deletion.
+func TestHistorySyncRevoke(t *testing.T) {
+	const chatJID = "grupo-history-revoke@g.us"
+	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	// Not phone-shaped: letters, not digits, in the local part.
+	jid := types.JID{User: "au" + "tor" + "-hist" + "-revoke", Server: types.DefaultUserServer}
+	client := &whatsmeow.Client{Store: &store.Device{ID: &jid}}
+
+	stubRevoke := func(id string, ts time.Time) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{
+			Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String(id), FromMe: proto.Bool(false)},
+				MessageTimestamp: proto.Uint64(uint64(ts.Unix())),
+				MessageStubType:  waWeb.WebMessageInfo_REVOKE.Enum(),
+			},
+		}
+	}
+
+	t.Run("stub_revoga_linha_existente", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-REVOKE-1"
+		if err := messageStore.StoreMessage(messageID, chatJID, "autor-a", "legenda da foto", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		if err := os.MkdirAll(chatDir, 0755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		cachePath, err := safeMediaPath(chatDir, messageID, "foto.jpg")
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		if err := os.WriteFile(cachePath, []byte("bytes da foto em cache"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		messages := []*waHistorySync.HistorySyncMsg{stubRevoke(messageID, baseTS.Add(time.Minute))}
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.Content != revokedPlaceholder {
+			t.Errorf("content = %q, want %q", msg.Content, revokedPlaceholder)
+		}
+		if !msg.Revoked {
+			t.Error("Revoked = false, want true")
+		}
+		if msg.MediaType != nil {
+			t.Errorf("MediaType = %q, want nil", *msg.MediaType)
+		}
+		if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
+			t.Errorf("cache file still exists after revoke: stat err = %v", statErr)
+		}
+	})
+
+	t.Run("stub_sem_linha_grava_revogada", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-REVOKE-2"
+
+		messages := []*waHistorySync.HistorySyncMsg{stubRevoke(messageID, baseTS.Add(time.Minute))}
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.ID != messageID {
+			t.Errorf("ID = %q, want %q", msg.ID, messageID)
+		}
+		if msg.Content != revokedPlaceholder {
+			t.Errorf("content = %q, want %q", msg.Content, revokedPlaceholder)
+		}
+		if !msg.Revoked {
+			t.Error("Revoked = false, want true")
+		}
+	})
+}
+
+// TestHistorySyncProtocol covers D3/D4 (issue #23): the history sync
+// delivers newest-first, so a ProtocolMessage REVOKE/MESSAGE_EDIT arrives
+// before the message it targets. storeHistoryConversation must defer it
+// (D3) and apply it only after every message of the conversation was
+// stored — the target ends up revoked/edited, and the protocol entry itself
+// never becomes a row of its own.
+func TestHistorySyncProtocol(t *testing.T) {
+	const chatJID = "grupo-history-protocol@g.us"
+	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	jid := types.JID{User: "au" + "tor" + "-hist" + "-protocol", Server: types.DefaultUserServer}
+	client := &whatsmeow.Client{Store: &store.Device{ID: &jid}}
+
+	targetMsg := func(id, text string, ts time.Time) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{
+			Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String(id), FromMe: proto.Bool(false)},
+				MessageTimestamp: proto.Uint64(uint64(ts.Unix())),
+				Message:          &waProto.Message{Conversation: proto.String(text)},
+			},
+		}
+	}
+	protocolMsg := func(ownID string, ts time.Time, pm *waProto.ProtocolMessage) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{
+			Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String(ownID), FromMe: proto.Bool(false)},
+				MessageTimestamp: proto.Uint64(uint64(ts.Unix())),
+				Message:          &waProto.Message{ProtocolMessage: pm},
+			},
+		}
+	}
+
+	t.Run("revoke_antes_do_alvo", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-PROTO-REVOKE"
+		revokePM := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		// Newest first, like the real sync: the protocol entry before its target.
+		messages := []*waHistorySync.HistorySyncMsg{
+			protocolMsg("PROTO-"+messageID, baseTS.Add(time.Minute), revokePM),
+			targetMsg(messageID, "texto original", baseTS),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1: %+v", len(resp.Messages), resp.Messages)
+		}
+		msg := resp.Messages[0]
+		if msg.Content != revokedPlaceholder || !msg.Revoked {
+			t.Errorf("target message = %+v, want the revoked placeholder", msg)
+		}
+	})
+
+	t.Run("edit_antes_do_alvo", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-PROTO-EDIT"
+		editPM := &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String(messageID)},
+			EditedMessage: &waProto.Message{Conversation: proto.String("texto editado")},
+		}
+		messages := []*waHistorySync.HistorySyncMsg{
+			protocolMsg("PROTO-"+messageID, baseTS.Add(time.Minute), editPM),
+			targetMsg(messageID, "texto original", baseTS),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1: %+v", len(resp.Messages), resp.Messages)
+		}
+		msg := resp.Messages[0]
+		if msg.Content != "texto editado" || !msg.Edited {
+			t.Errorf("target message = %+v, want the edited content", msg)
+		}
+	})
+
+	t.Run("protocolo_nao_vira_linha", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-PROTO-BOTH"
+		revokePM := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		messages := []*waHistorySync.HistorySyncMsg{
+			protocolMsg("PROTO-"+messageID, baseTS.Add(time.Minute), revokePM),
+			targetMsg(messageID, "texto original", baseTS),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		var count int
+		if err := messageStore.db.QueryRow("SELECT COUNT(*) FROM messages WHERE chat_jid = ?", chatJID).Scan(&count); err != nil {
+			t.Fatalf("count query: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("got %d rows in messages, want 1 (the protocol entry must not become its own row)", count)
 		}
 	})
 }
