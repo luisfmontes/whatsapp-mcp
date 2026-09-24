@@ -20,7 +20,9 @@ import (
 	"unicode/utf8"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -274,7 +276,7 @@ func TestHandleReact(t *testing.T) {
 // TestHandleEdit covers /api/edit request validation. Edit has no group guard
 // (WhatsApp only allows editing your own messages), so it isn't tested here.
 func TestHandleEdit(t *testing.T) {
-	handler := handleEdit(nil)
+	handler := handleEdit(nil, nil)
 
 	t.Run("non-POST returns 405", func(t *testing.T) {
 		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
@@ -2195,7 +2197,7 @@ func messagesColumnNames(t *testing.T, db *sql.DB) []string {
 // (128,377 rows) predates sender_jid/quoted_*/mentions. ensureMessagesSchema
 // is what migrates it, and has to do so without erroring when run again.
 func TestEnsureMessagesSchema(t *testing.T) {
-	newColumns := []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions"}
+	newColumns := []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at"}
 
 	t.Run("banco_legado_ganha_as_cinco_colunas", func(t *testing.T) {
 		db := setupLegacyMessagesStore(t)
@@ -2264,6 +2266,309 @@ func TestEnsureMessagesSchema(t *testing.T) {
 			if !gotSet[want] {
 				t.Errorf("new store missing column %q; got %v", want, got)
 			}
+		}
+	})
+}
+
+// TestRevokedMessage covers issue #21, D1/D4/D5: a ProtocolMessage REVOKE
+// marks (id, chat_jid) as deleted for everyone — content, media reference and
+// context are cleared, the row itself stays (so the conversation keeps the
+// gap), downloads are refused even with the file already cached, a re-sync
+// carrying the original content does not resurrect it, and the scope is the
+// chat the event arrived in, not the message id alone.
+func TestRevokedMessage(t *testing.T) {
+	const chatJID = "grupo-de-teste@g.us"
+	const messageID = "MSG-REVOKE-1"
+	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+
+	// newFixture stores one image message with a caption, filename, url and
+	// media keys — the shape a revoke has to unwind (content, media_type,
+	// filename, url, keys).
+	newFixture := func(t *testing.T) *MessageStore {
+		t.Helper()
+		store := setupPollStore(t)
+		if err := store.StoreChat(chatJID, "Grupo de teste", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda da foto", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		return store
+	}
+
+	revoke := func(t *testing.T, store *MessageStore, scopeChatJID string, at time.Time) {
+		t.Helper()
+		pm := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, scopeChatJID, pm, at, waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+	}
+
+	t.Run("listMessages_mostra_marcador_sem_media", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, chatJID, baseTS.Add(time.Minute))
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.Content != revokedPlaceholder {
+			t.Errorf("content = %q, want %q", msg.Content, revokedPlaceholder)
+		}
+		if !msg.Revoked {
+			t.Error("Revoked = false, want true")
+		}
+		if msg.MediaType != nil {
+			t.Errorf("MediaType = %q, want nil", *msg.MediaType)
+		}
+	})
+
+	t.Run("busca_pela_legenda_nao_acha", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, chatJID, baseTS.Add(time.Minute))
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID), Query: proto.String("legenda")})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 0 {
+			t.Fatalf("got %d messages matching the deleted caption, want 0: %+v", len(resp.Messages), resp.Messages)
+		}
+	})
+
+	t.Run("download_recusado_mesmo_com_cache", func(t *testing.T) {
+		store := newFixture(t)
+
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		if err := os.MkdirAll(chatDir, 0755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		cachePath, err := safeMediaPath(chatDir, messageID, "foto.jpg")
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		if err := os.WriteFile(cachePath, []byte("bytes da foto em cache"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		revoke(t, store, chatJID, baseTS.Add(time.Minute))
+
+		ok, _, _, _, err := downloadMedia(nil, store, messageID, chatJID)
+		if err == nil {
+			t.Fatal("downloadMedia: expected an error, got nil")
+		}
+		if ok {
+			t.Error("downloadMedia: ok = true, want false")
+		}
+		if !strings.Contains(err.Error(), "deleted by the sender") {
+			t.Errorf("downloadMedia error = %q, want it to say the message was deleted by the sender", err.Error())
+		}
+		if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
+			t.Errorf("cache file still exists after revoke: stat err = %v", statErr)
+		}
+	})
+
+	t.Run("revoke_de_outro_chat_nao_toca_a_linha", func(t *testing.T) {
+		store := newFixture(t)
+		const outroChatJID = "outro-grupo@g.us"
+		if err := store.StoreChat(outroChatJID, "Outro grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat (outro): %v", err)
+		}
+
+		revoke(t, store, outroChatJID, baseTS.Add(time.Minute))
+
+		revoked, err := store.IsMessageRevoked(messageID, chatJID)
+		if err != nil {
+			t.Fatalf("IsMessageRevoked: %v", err)
+		}
+		if revoked {
+			t.Error("message in the original chat was revoked by a protocol message scoped to another chat")
+		}
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 || resp.Messages[0].Content != "legenda da foto" || resp.Messages[0].Revoked {
+			t.Errorf("original message changed by a revoke scoped to another chat: %+v", resp.Messages)
+		}
+	})
+
+	t.Run("StoreMessage_posterior_nao_ressuscita", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, chatJID, baseTS.Add(time.Minute))
+
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda da foto", baseTS.Add(2*time.Minute), false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage (re-sync): %v", err)
+		}
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		if resp.Messages[0].Content != revokedPlaceholder || !resp.Messages[0].Revoked {
+			t.Errorf("a re-sync with the original content resurrected the message: %+v", resp.Messages[0])
+		}
+	})
+
+	t.Run("getMessageContext_mostra_o_marcador", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, chatJID, baseTS.Add(time.Minute))
+
+		resp, found, err := getMessageContext(store.db, MessageContextRequest{MessageID: messageID})
+		if err != nil {
+			t.Fatalf("getMessageContext: %v", err)
+		}
+		if !found {
+			t.Fatal("getMessageContext: message not found")
+		}
+		if resp.Message.Content != revokedPlaceholder {
+			t.Errorf("content = %q, want %q", resp.Message.Content, revokedPlaceholder)
+		}
+		if !resp.Message.Revoked {
+			t.Error("Revoked = false, want true")
+		}
+	})
+
+	t.Run("banco_legado_ganha_revoked_at_edited_at", func(t *testing.T) {
+		db := setupLegacyMessagesStore(t)
+		before := messagesColumnNames(t, db)
+		for _, col := range []string{"revoked_at", "edited_at"} {
+			for _, name := range before {
+				if name == col {
+					t.Fatalf("legacy fixture unexpectedly already has column %q; got %v", col, before)
+				}
+			}
+		}
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema: %v", err)
+		}
+		after := messagesColumnNames(t, db)
+		afterSet := make(map[string]bool, len(after))
+		for _, name := range after {
+			afterSet[name] = true
+		}
+		for _, col := range []string{"revoked_at", "edited_at"} {
+			if !afterSet[col] {
+				t.Errorf("column %q missing after ensureMessagesSchema; got %v", col, after)
+			}
+		}
+	})
+}
+
+// TestEditedMessage covers issue #21, D2: a ProtocolMessage MESSAGE_EDIT
+// replaces the stored content with the edited text and stamps edited_at,
+// except when the target row is already revoked (D1 takes precedence) or the
+// edit carries no text (an edit never blanks a message).
+func TestEditedMessage(t *testing.T) {
+	const chatJID = "grupo-de-teste@g.us"
+	const messageID = "MSG-EDIT-1"
+	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+
+	newFixture := func(t *testing.T) *MessageStore {
+		t.Helper()
+		store := setupPollStore(t)
+		if err := store.StoreChat(chatJID, "Grupo de teste", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "texto original", baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		return store
+	}
+
+	edit := func(t *testing.T, store *MessageStore, newText string, at time.Time) {
+		t.Helper()
+		pm := &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String(messageID)},
+			EditedMessage: &waProto.Message{Conversation: proto.String(newText)},
+		}
+		applyProtocolMessage(store, chatJID, pm, at, waLog.Noop)
+	}
+
+	t.Run("conteudo_trocado", func(t *testing.T) {
+		store := newFixture(t)
+		edit(t, store, "novo", baseTS.Add(time.Minute))
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.Content != "novo" {
+			t.Errorf("content = %q, want %q", msg.Content, "novo")
+		}
+		if !msg.Edited {
+			t.Error("Edited = false, want true")
+		}
+	})
+
+	t.Run("edicao_sobre_linha_revogada_nao_altera", func(t *testing.T) {
+		store := newFixture(t)
+		revokePM := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, chatJID, revokePM, baseTS.Add(time.Minute), waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+
+		edit(t, store, "novo", baseTS.Add(2*time.Minute))
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.Content != revokedPlaceholder {
+			t.Errorf("content = %q, want the revoked placeholder unchanged", msg.Content)
+		}
+		if !msg.Revoked {
+			t.Error("Revoked = false, want true")
+		}
+		if msg.Edited {
+			t.Error("Edited = true, want false — a revoked row must not also show as edited")
+		}
+	})
+
+	t.Run("edicao_com_texto_vazio_nao_apaga", func(t *testing.T) {
+		store := newFixture(t)
+		edit(t, store, "", baseTS.Add(time.Minute))
+
+		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(resp.Messages))
+		}
+		msg := resp.Messages[0]
+		if msg.Content != "texto original" {
+			t.Errorf("content = %q, want the original text preserved", msg.Content)
+		}
+		if msg.Edited {
+			t.Error("Edited = true, want false — an empty edit must not stamp edited_at")
 		}
 	})
 }

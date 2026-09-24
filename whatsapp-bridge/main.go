@@ -2655,7 +2655,7 @@ func handleReact(client *whatsmeow.Client, messageStore *MessageStore) http.Hand
 // handleEdit returns the handler for POST /api/edit. Editing is always the
 // caller's own message (WhatsApp only allows editing your own messages), so
 // there's no group/from_me ambiguity to guard against here.
-func handleEdit(client *whatsmeow.Client) http.HandlerFunc {
+func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2684,6 +2684,15 @@ func handleEdit(client *whatsmeow.Client) http.HandlerFunc {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: fmt.Sprintf("SendMessage error: %v", err)})
 			return
+		}
+		// Issue #21 (D3): a single-device account gets no echo of its own
+		// action, so the local store needs the same edit applied here.
+		if messageStore != nil {
+			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Key:           &waProto.MessageKey{ID: proto.String(req.MessageID)},
+				EditedMessage: newContent,
+			}, time.Now(), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s edited", req.MessageID)})
@@ -2735,6 +2744,14 @@ func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.Han
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: fmt.Sprintf("SendMessage error: %v", err)})
 			return
+		}
+		// Issue #21 (D3): a single-device account gets no echo of its own
+		// action, so the local store needs the same revoke applied here.
+		if messageStore != nil {
+			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+				Type: waProto.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waProto.MessageKey{ID: proto.String(req.MessageID)},
+			}, time.Now(), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s revoked", req.MessageID)})
@@ -6311,7 +6328,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	http.HandleFunc("/api/react", handleReact(client, messageStore))
 
 	// Handler for editing the text of a previously sent message.
-	http.HandleFunc("/api/edit", handleEdit(client))
+	http.HandleFunc("/api/edit", handleEdit(client, messageStore))
 
 	// Handler for revoking (deleting for everyone) a previously sent message.
 	http.HandleFunc("/api/revoke", handleRevoke(client, messageStore))
