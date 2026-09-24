@@ -51,10 +51,29 @@
     ]
   },
   "revisar": {
-    "status": "pendente"
+    "status": "ok",
+    "snapshot": {
+      "head": "1b27a16c1a2b753200223666ebb4dcae3f52664e",
+      "caminhos_sujos": []
+    },
+    "em": "2026-09-24",
+    "achados": 0,
+    "base": "942a2993b766a8c75f41a738b685a86bb9325ddb",
+    "head": "1b27a16c1a2b753200223666ebb4dcae3f52664e",
+    "sugestoes": [
+      "TOCTOU entre IsMessageRevoked e WriteFile, mesmo padrao do downloadMedia"
+    ]
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "ok; TestWriteRecoveredMedia 2/2, TestLocalChatKey 2/2 PASS; mutacoes T1 e T2 vermelhas no fixture certo",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok"
+    },
+    "em": "2026-09-24"
   },
   "fechar": {
     "status": "pendente"
