@@ -6,6 +6,7 @@ and supports fallback to legacy single-account environment setup.
 
 import os
 import json
+import sqlite3
 from pathlib import Path
 from typing import Optional, List
 
@@ -229,3 +230,65 @@ def account_task_name(alias: Optional[str] = None) -> str:
             raise ValueError("No default account set")
 
     return f"WhatsAppMCPBridge-{alias}"
+
+
+def message_in_account(alias: Optional[str], message_id: str, chat_jid: str) -> bool:
+    """
+    Check if a message exists in a specific account's database.
+
+    Args:
+        alias: Account alias, or None to use the default account.
+        message_id: The message ID to search for.
+        chat_jid: The chat JID to search within.
+
+    Returns:
+        True if the message exists in the account's database, False otherwise.
+        Returns False for any error (missing directory, database file, table,
+        or database access issues).
+    """
+    try:
+        dir_path = account_dir(alias)
+        db_path = Path(dir_path) / "store" / "messages.db"
+
+        # Use URI mode with read-only flag to safely check for messages
+        uri = db_path.as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            result = conn.execute(
+                "SELECT 1 FROM messages WHERE id=? AND chat_jid=? LIMIT 1",
+                (message_id, chat_jid)
+            ).fetchone()
+            return result is not None
+    except (sqlite3.Error, OSError, ValueError):
+        # Covers: missing file, not-a-database, missing table, missing directory/alias
+        return False
+
+
+def find_message_accounts(message_id: str, chat_jid: str, exclude: Optional[str] = None) -> List[str]:
+    """
+    Find which account(s) contain a specific message.
+
+    Searches the message database of each configured account for the given
+    message ID and chat JID. If exclude is None, defaults to excluding the
+    default account.
+
+    Args:
+        message_id: The message ID to search for.
+        chat_jid: The chat JID to search within.
+        exclude: Account alias to skip, or None to skip the default account.
+
+    Returns:
+        A sorted list of account aliases that contain the message.
+    """
+    if exclude is None:
+        accounts_map = _load_accounts_map()
+        if accounts_map:
+            exclude = accounts_map.get("default")
+
+    found_accounts = []
+    for alias in known_aliases():
+        if alias == exclude:
+            continue
+        if message_in_account(alias, message_id, chat_jid):
+            found_accounts.append(alias)
+
+    return found_accounts

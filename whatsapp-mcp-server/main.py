@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+import accounts
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -347,6 +348,20 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
             "hint": "The sender deleted this message for everyone - do not look "
                     "for a copy of the file elsewhere, and treat the message as withdrawn."
         }
+    if "failed to find message" in (status_message or ""):
+        other_accounts = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
+        if other_accounts:
+            account_list = '", "'.join(other_accounts)
+            return {
+                "success": False,
+                "message": f"Failed to download media: {status_message}",
+                "hint": f'Message found in account(s): "{account_list}" - retry with account="{other_accounts[0]}"'
+            }
+        return {
+            "success": False,
+            "message": f"Failed to download media: {status_message}",
+            "hint": "Message not found in any account - check message_id and chat_jid."
+        }
     return {
         "success": False,
         "message": f"Failed to download media: {status_message}",
@@ -381,6 +396,16 @@ def get_deleted_message(message_id: str, chat_jid: str, download: bool = False, 
     result, status_message = whatsapp_get_deleted_message(message_id, chat_jid, download=download, account=account)
 
     if result is None:
+        if "neither deleted nor edited" in (status_message or ""):
+            other_accounts = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
+            message_in_called_account = accounts.message_in_account(account, message_id, chat_jid)
+            if other_accounts and not message_in_called_account:
+                account_list = '", "'.join(other_accounts)
+                return {
+                    "success": False,
+                    "message": status_message,
+                    "hint": f'Message found in account(s): "{account_list}" - retry with account="{other_accounts[0]}"'
+                }
         return {
             "success": False,
             "message": status_message,
