@@ -39,14 +39,30 @@
     "em": "2026-09-24"
   },
   "revisar": {
-    "status": "pendente",
+    "status": "ok",
     "snapshot": {
-      "head": "e2299921d45362af51b5385d20c1dfa90f713eeb",
+      "head": "2361b323069e612a0ad6937e8e0ffde3e14a6f7c",
       "caminhos_sujos": []
-    }
+    },
+    "achados": 2,
+    "base": "d42df7e",
+    "head": "2361b32",
+    "em_voo": [],
+    "rodadas": [
+      "e229992: aprovado, 2 avisos (autor = JID de broadcast/newsletter sem participante; proprio sem aparelho diverge do live) + 1 sugestao (sem teste de participante invalido) -> corrigidos em 2361b32",
+      "2361b32 (delta): aprovado, 0 bloqueantes; guard antigo deixa broadcast_sem_participante vermelho (rodado na janela principal)"
+    ],
+    "em": "2026-09-24"
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "ok whatsapp-client; TestHistorySyncContext 6/6 PASS; vet linux/darwin ok; personal-data ok. Sem sync real: unico gatilho e re-parear.",
+    "tarefas": {
+      "1": "ok"
+    },
+    "em": "2026-09-24"
   },
   "fechar": {
     "status": "pendente"
