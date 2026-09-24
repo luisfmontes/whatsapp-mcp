@@ -337,13 +337,21 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
             "message": status_message,
             "file_path": file_path
         }
-    else:
+    # Issue #21: the sender deleted it for everyone. Pointing at the downloads
+    # folder here would send the agent after exactly what was taken back.
+    if "deleted by the sender" in (status_message or ""):
         return {
             "success": False,
             "message": f"Failed to download media: {status_message}",
-            "hint": "The desktop client usually saves received media to the local "
-                    "downloads folder - look for the file there before retrying."
+            "hint": "The sender deleted this message for everyone - do not look "
+                    "for a copy of the file elsewhere, and treat the message as withdrawn."
         }
+    return {
+        "success": False,
+        "message": f"Failed to download media: {status_message}",
+        "hint": "The desktop client usually saves received media to the local "
+                "downloads folder - look for the file there before retrying."
+    }
 
 @mcp.tool()
 def create_group(

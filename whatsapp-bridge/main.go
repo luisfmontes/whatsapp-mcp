@@ -281,6 +281,8 @@ func NewMessageStore() (*MessageStore, error) {
 			quoted_sender TEXT,
 			quoted_content TEXT,
 			mentions TEXT,
+			revoked_at TIMESTAMP,
+			edited_at TIMESTAMP,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -357,7 +359,7 @@ func NewMessageStore() (*MessageStore, error) {
 
 // ensureMessagesSchema adds to an existing messages table the columns
 // introduced after the CREATE TABLE block above (sender_jid, quoted_message_id,
-// quoted_sender, quoted_content, mentions), for databases that were created
+// quoted_sender, quoted_content, mentions, revoked_at, edited_at), for databases that were created
 // before those columns existed. Idempotent: reads the table's current columns
 // via PRAGMA table_info and only emits ALTER TABLE ADD COLUMN for the ones
 // still missing, so running it again (or against a brand-new database that
@@ -386,7 +388,7 @@ func ensureMessagesSchema(db *sql.DB) error {
 	}
 	rows.Close()
 
-	for _, col := range []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions"} {
+	for _, col := range []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at"} {
 		if existing[col] {
 			continue
 		}
@@ -517,6 +519,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	// keeps whichever content is already there when the incoming value is
 	// empty, same pattern as StoreSender below.
 	//
+	// The WHERE on the DO UPDATE keeps a revoked row revoked (issue #21): a
+	// re-delivery of the original must not bring back what the sender deleted.
+	//
 	// media_key/file_sha256/file_enc_sha256 need the same treatment, but as
 	// BLOB columns NULLIF(x, '') does NOT catch an empty []byte the way it
 	// catches an empty TEXT — '' there is compared as TEXT and never equals a
@@ -538,7 +543,8 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			media_key       = CASE WHEN length(excluded.media_key)       > 0 THEN excluded.media_key       ELSE messages.media_key       END,
 			file_sha256     = CASE WHEN length(excluded.file_sha256)     > 0 THEN excluded.file_sha256     ELSE messages.file_sha256     END,
 			file_enc_sha256 = CASE WHEN length(excluded.file_enc_sha256) > 0 THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
-			file_length     = excluded.file_length`,
+			file_length     = excluded.file_length
+		WHERE messages.revoked_at IS NULL`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
@@ -599,6 +605,118 @@ func nullIfEmpty(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// MarkMessageRevoked records that the message (id, chat_jid) was deleted for
+// everyone (issue #21). What the sender took back goes with it: content,
+// media reference and keys, and the quoted/mentions context are cleared, and
+// media_type is set to NULL so the transcription sweep and download_media stop
+// treating the row as media. The row itself stays, so the conversation keeps
+// the gap in place and the reader can tell a message was there. Returns the
+// stored filename (for removing the cached media file) and whether a row that
+// was not already revoked matched — a revoke for a message this store never
+// saw is a no-op, not an error.
+func (store *MessageStore) MarkMessageRevoked(id, chatJID string, revokedAt time.Time) (filename string, found bool, err error) {
+	var filenameNull sql.NullString
+	err = store.db.QueryRow(
+		"SELECT filename FROM messages WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
+		id, chatJID,
+	).Scan(&filenameNull)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	_, err = store.db.Exec(`
+		UPDATE messages SET
+			content = '', media_type = NULL, filename = NULL, url = NULL,
+			media_key = NULL, file_sha256 = NULL, file_enc_sha256 = NULL, file_length = NULL,
+			quoted_message_id = NULL, quoted_sender = NULL, quoted_content = NULL, mentions = NULL,
+			revoked_at = ?
+		WHERE id = ? AND chat_jid = ?`,
+		revokedAt, id, chatJID,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	return filenameNull.String, true, nil
+}
+
+// ApplyMessageEdit replaces the content of (id, chat_jid) with the edited
+// text and stamps edited_at (issue #21). A revoked row is not touched, and an
+// empty newContent is a no-op — an edit never blanks a message.
+func (store *MessageStore) ApplyMessageEdit(id, chatJID, newContent string, editedAt time.Time) (bool, error) {
+	if newContent == "" {
+		return false, nil
+	}
+	res, err := store.db.Exec(
+		"UPDATE messages SET content = ?, edited_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
+		newContent, editedAt, id, chatJID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// IsMessageRevoked reports whether (id, chat_jid) was deleted for everyone.
+func (store *MessageStore) IsMessageRevoked(id, chatJID string) (bool, error) {
+	var revoked bool
+	err := store.db.QueryRow(
+		"SELECT revoked_at IS NOT NULL FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	).Scan(&revoked)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return revoked, err
+}
+
+// applyProtocolMessage handles the ProtocolMessage types that change a message
+// already in the store (issue #21): REVOKE (deleted for everyone) and
+// MESSAGE_EDIT. The target is Key.ID scoped to the chat the event arrived in,
+// so a protocol message can only touch a message of its own conversation.
+// Returns true when pm was one of those types — the caller then stops, since
+// the event carries no message of its own to store.
+func applyProtocolMessage(messageStore *MessageStore, chatJID string, pm *waProto.ProtocolMessage, at time.Time, logger waLog.Logger) bool {
+	if pm == nil {
+		return false
+	}
+	targetID := pm.GetKey().GetID()
+	switch pm.GetType() {
+	case waProto.ProtocolMessage_REVOKE:
+		if targetID == "" {
+			return true
+		}
+		filename, found, err := messageStore.MarkMessageRevoked(targetID, chatJID, at)
+		if err != nil {
+			logger.Warnf("Failed to mark message %s as revoked: %v", targetID, err)
+			return true
+		}
+		if found && filename != "" {
+			chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+			if p, err := safeMediaPath(chatDir, targetID, filename); err == nil {
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					logger.Warnf("Failed to remove cached media of revoked message %s: %v", targetID, err)
+				}
+			}
+		}
+		if found {
+			fmt.Printf("[%s] message %s in %s was deleted by the sender\n", at.Format("2006-01-02 15:04:05"), targetID, chatJID)
+		}
+		return true
+	case waProto.ProtocolMessage_MESSAGE_EDIT:
+		if targetID == "" {
+			return true
+		}
+		if _, err := messageStore.ApplyMessageEdit(targetID, chatJID, extractTextContent(pm.GetEditedMessage()), at); err != nil {
+			logger.Warnf("Failed to apply edit to message %s: %v", targetID, err)
+		}
+		return true
+	}
+	return false
 }
 
 // GetMessageForQuote looks up a message to quote by (id, chat_jid), scoped to
@@ -2220,6 +2338,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		logger.Warnf("Failed to store chat: %v", err)
 	}
 
+	// Issue #21: a delete-for-everyone or an edit arrives as a ProtocolMessage
+	// pointing at a message already stored; it has no text or media of its own.
+	if applyProtocolMessage(messageStore, chatJID, msg.Message.GetProtocolMessage(), msg.Info.Timestamp, logger) {
+		return
+	}
+
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
@@ -2531,7 +2655,7 @@ func handleReact(client *whatsmeow.Client, messageStore *MessageStore) http.Hand
 // handleEdit returns the handler for POST /api/edit. Editing is always the
 // caller's own message (WhatsApp only allows editing your own messages), so
 // there's no group/from_me ambiguity to guard against here.
-func handleEdit(client *whatsmeow.Client) http.HandlerFunc {
+func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2560,6 +2684,15 @@ func handleEdit(client *whatsmeow.Client) http.HandlerFunc {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: fmt.Sprintf("SendMessage error: %v", err)})
 			return
+		}
+		// Issue #21 (D3): a single-device account gets no echo of its own
+		// action, so the local store needs the same edit applied here.
+		if messageStore != nil {
+			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+				Key:           &waProto.MessageKey{ID: proto.String(req.MessageID)},
+				EditedMessage: newContent,
+			}, time.Now(), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s edited", req.MessageID)})
@@ -2611,6 +2744,14 @@ func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.Han
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: fmt.Sprintf("SendMessage error: %v", err)})
 			return
+		}
+		// Issue #21 (D3): a single-device account gets no echo of its own
+		// action, so the local store needs the same revoke applied here.
+		if messageStore != nil {
+			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+				Type: waProto.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waProto.MessageKey{ID: proto.String(req.MessageID)},
+			}, time.Now(), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s revoked", req.MessageID)})
@@ -4332,6 +4473,14 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
 
+	// Issue #21: the sender deleted it for everyone — refuse before anything
+	// else, including the local-cache hit below.
+	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil {
+		return false, "", "", "", fmt.Errorf("failed to check message: %v", err)
+	} else if revoked {
+		return false, "", "", "", fmt.Errorf("message was deleted by the sender")
+	}
+
 	// Get media info from the database
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err = messageStore.GetMediaInfo(messageID, chatJID)
 
@@ -4511,6 +4660,28 @@ type APIMessage struct {
 	QuotedSender    *string   `json:"quoted_sender"`
 	QuotedContent   *string   `json:"quoted_content"`
 	Mentions        []string  `json:"mentions,omitempty"`
+	// Issue #21: Revoked means the sender deleted it for everyone — Content is
+	// then revokedPlaceholder and there is no media to download. Edited means
+	// Content is the latest edit, not the original text.
+	Revoked bool `json:"revoked,omitempty"`
+	Edited  bool `json:"edited,omitempty"`
+}
+
+// revokedPlaceholder is what the read endpoints show in place of the content
+// of a message the sender deleted for everyone.
+const revokedPlaceholder = "[mensagem apagada]"
+
+// applyMessageFlags sets Revoked/Edited on a scanned row and, for a revoked
+// one, swaps in the placeholder and drops the media type — the one place the
+// read endpoints decide how a deleted message looks.
+func (m *APIMessage) applyMessageFlags(revoked, edited bool) {
+	m.Revoked = revoked
+	m.Edited = edited && !revoked
+	if revoked {
+		m.Content = revokedPlaceholder
+		m.MediaType = nil
+		m.QuotedMessageID, m.QuotedSender, m.QuotedContent, m.Mentions = nil, nil, nil, nil
+	}
 }
 
 // APIChat is the wire shape for a chat row.
@@ -4679,12 +4850,12 @@ func scanAPIMessageRow(rows interface {
 	var timestamp time.Time
 	var sender, content, chatJID, id string
 	var chatName, mediaType, quotedMessageID, quotedSender, quotedContent, mentions sql.NullString
-	var isFromMe bool
-	err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions)
+	var isFromMe, revoked, edited bool
+	err := rows.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions, &revoked, &edited)
 	if err != nil {
 		return APIMessage{}, err
 	}
-	return APIMessage{
+	msg := APIMessage{
 		Timestamp:       timestamp,
 		Sender:          sender,
 		ChatName:        nullStringToPtr(chatName),
@@ -4697,7 +4868,9 @@ func scanAPIMessageRow(rows interface {
 		QuotedSender:    nullStringToPtr(quotedSender),
 		QuotedContent:   nullStringToPtr(quotedContent),
 		Mentions:        decodeMentionsColumn(mentions),
-	}, nil
+	}
+	msg.applyMessageFlags(revoked, edited)
+	return msg, nil
 }
 
 // decodeMentionsColumn deserializes the mentions column (a JSON array of
@@ -4871,7 +5044,7 @@ func listMessages(db *sql.DB, req MessagesRequest) (MessagesResponse, error) {
 	}
 
 	queryParts := []string{
-		`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions FROM messages`,
+		`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions, messages.revoked_at IS NOT NULL, messages.edited_at IS NOT NULL FROM messages`,
 		`JOIN chats ON messages.chat_jid = chats.jid`,
 	}
 	var whereClauses []string
@@ -4963,7 +5136,7 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 	}
 
 	row := db.QueryRow(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions, messages.revoked_at IS NOT NULL, messages.edited_at IS NOT NULL
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.id = ?
@@ -4972,8 +5145,8 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 	var timestamp time.Time
 	var sender, content, chatJID, id, targetChatJID string
 	var chatName, mediaType, quotedMessageID, quotedSender, quotedContent, mentions sql.NullString
-	var isFromMe bool
-	err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &targetChatJID, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions)
+	var isFromMe, revoked, edited bool
+	err := row.Scan(&timestamp, &sender, &chatName, &content, &isFromMe, &chatJID, &id, &targetChatJID, &mediaType, &quotedMessageID, &quotedSender, &quotedContent, &mentions, &revoked, &edited)
 	if err == sql.ErrNoRows {
 		return MessageContextResponse{}, false, nil
 	}
@@ -4994,9 +5167,10 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 		QuotedContent:   nullStringToPtr(quotedContent),
 		Mentions:        decodeMentionsColumn(mentions),
 	}
+	target.applyMessageFlags(revoked, edited)
 
 	beforeRows, err := db.Query(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions, messages.revoked_at IS NOT NULL, messages.edited_at IS NOT NULL
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.chat_jid = ? AND messages.timestamp < ?
@@ -5020,7 +5194,7 @@ func getMessageContext(db *sql.DB, req MessageContextRequest) (MessageContextRes
 	}
 
 	afterRows, err := db.Query(`
-		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.quoted_sender, messages.quoted_content, messages.mentions, messages.revoked_at IS NOT NULL, messages.edited_at IS NOT NULL
 		FROM messages
 		JOIN chats ON messages.chat_jid = chats.jid
 		WHERE messages.chat_jid = ? AND messages.timestamp > ?
@@ -5213,7 +5387,7 @@ type LastInteractionResponse struct {
 func getLastInteraction(db *sql.DB, jid string) (LastInteractionResponse, error) {
 	row := db.QueryRow(`
 		SELECT
-			m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type, m.quoted_message_id, m.quoted_sender, m.quoted_content, m.mentions
+			m.timestamp, m.sender, c.name, m.content, m.is_from_me, c.jid, m.id, m.media_type, m.quoted_message_id, m.quoted_sender, m.quoted_content, m.mentions, m.revoked_at IS NOT NULL, m.edited_at IS NOT NULL
 		FROM messages m
 		JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.sender = ? OR c.jid = ?
@@ -6154,7 +6328,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	http.HandleFunc("/api/react", handleReact(client, messageStore))
 
 	// Handler for editing the text of a previously sent message.
-	http.HandleFunc("/api/edit", handleEdit(client))
+	http.HandleFunc("/api/edit", handleEdit(client, messageStore))
 
 	// Handler for revoking (deleting for everyone) a previously sent message.
 	http.HandleFunc("/api/revoke", handleRevoke(client, messageStore))

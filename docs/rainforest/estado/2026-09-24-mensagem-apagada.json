@@ -1,0 +1,100 @@
+{
+  "slug": "2026-09-24-mensagem-apagada",
+  "titulo": "Mensagem apagada ou editada pelo remetente (issue #21)",
+  "criado_em": "2026-09-24",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-24-mensagem-apagada.md",
+    "em": "2026-09-24"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-24-mensagem-apagada.md",
+    "tarefas": 4,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-09-24"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "em": "2026-09-24",
+    "commits": [
+      "db15f11",
+      "7845e37"
+    ],
+    "comando": "go test ./... (whatsapp-bridge)",
+    "saida": "ok whatsapp-client; TestRevokedMessage 7/7 PASS, TestEditedMessage 3/3 PASS",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "} else if revoked {",
+        "para": "} else if revoked && false {",
+        "bateria": "go test -run TestRevokedMessage -v .",
+        "resultado": "vermelho",
+        "fixture": "TestRevokedMessage/download_recusado_mesmo_com_cache"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "case waProto.ProtocolMessage_MESSAGE_EDIT:",
+        "para": "case waProto.ProtocolMessage_Type(-1):",
+        "bateria": "go test -run TestEditedMessage -v .",
+        "resultado": "vermelho",
+        "fixture": "TestEditedMessage/conteudo_trocado"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "n/a",
+        "motivo": "ramo pos-SendMessage real; prova na tarefa 4"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "n/a",
+        "motivo": "validacao de ambiente real"
+      }
+    ]
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "0687a62d38d60510e9e9509a2b240f3810c4d5b8",
+      "caminhos_sujos": []
+    },
+    "em": "2026-09-24",
+    "achados": 0,
+    "avisos": 3,
+    "base": "867b888f225d11b966630ac0219e75fbeb351c95",
+    "head": "0687a62d38d60510e9e9509a2b240f3810c4d5b8",
+    "avisos_lista": [
+      "history sync nao aplica REVOKE/EDIT",
+      "corrida em /api/mediaretry pode regravar midia revogada no disco",
+      "/api/revoke|edit usam req.ChatJID sem resolveToPN"
+    ]
+  },
+  "verificar": {
+    "status": "ok",
+    "comando": "mcp list_messages/download_media (pessoal e trabalho, grupo de teste) apos reiniciar as pontes com o binario de 0687a62; go test ./...; uv run python -m unittest test_download_revoked -v",
+    "sensor_externo": "go test ./...",
+    "saida": "T1/T4 pessoal: imagem = [mensagem apagada], download recusado \"message was deleted by the sender\", arquivo em cache removido do disco. T2/T4 pessoal: texto = versao EDITADA. T3/T4 trabalho (acao propria pelo MCP): mesmo resultado no proprio store. go test ok; python 90 testes OK; mutacoes T1,T2,T5 vermelhas no fixture certo. T5 chamada real pendente: exige reiniciar o servidor MCP com main.py mesclado.",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok",
+      "3": "ok",
+      "4": "ok",
+      "5": "ok (unitario + mutacao); chamada real apos merge"
+    },
+    "em": "2026-09-24"
+  },
+  "fechar": {
+    "status": "ok",
+    "acao": "pr",
+    "pr": 22,
+    "em": "2026-09-24"
+  }
+}
