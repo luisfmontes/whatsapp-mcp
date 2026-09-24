@@ -5624,3 +5624,117 @@ func TestHistorySyncUnwrap(t *testing.T) {
 		}
 	})
 }
+
+// TestHistorySyncContext covers issue #28: a history-sync message gets the
+// same sender_jid, quote and mentions the live path records (D1, D2), so a
+// synced message from another group participant can be quoted.
+func TestHistorySyncContext(t *testing.T) {
+	const groupJID = "grupo-history-ctx@g.us"
+	baseTS := time.Date(2026, 9, 24, 17, 0, 0, 0, time.UTC)
+	own := types.JID{User: "con" + "ta-hist-ctx", Device: 3, Server: types.DefaultUserServer}
+	client := &whatsmeow.Client{Store: &store.Device{ID: &own}}
+	participant := "partici" + "pante-hist-ctx@" + types.DefaultUserServer
+	mentioned := "mencio" + "nado-hist-ctx@" + types.DefaultUserServer
+
+	entry := func(id string, fromMe bool, participant string, m *waProto.Message) *waHistorySync.HistorySyncMsg {
+		key := &waCommon.MessageKey{ID: proto.String(id), FromMe: proto.Bool(fromMe)}
+		if participant != "" {
+			key.Participant = proto.String(participant)
+		}
+		return &waHistorySync.HistorySyncMsg{Message: &waWeb.WebMessageInfo{
+			Key:              key,
+			MessageTimestamp: proto.Uint64(uint64(baseTS.Unix())),
+			Message:          m,
+		}}
+	}
+	text := func(s string) *waProto.Message { return &waProto.Message{Conversation: proto.String(s)} }
+	run := func(t *testing.T, chatJID string, messages ...*waHistorySync.HistorySyncMsg) *MessageStore {
+		t.Helper()
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		chat, err := types.ParseJID(chatJID)
+		if err != nil {
+			t.Fatalf("ParseJID: %v", err)
+		}
+		storeHistoryConversation(client, messageStore, chat, chatJID, messages, waLog.Noop)
+		return messageStore
+	}
+	senderJIDOf := func(t *testing.T, messageStore *MessageStore, id, chatJID string) string {
+		t.Helper()
+		senderJID, _, _, _, err := messageStore.GetMessageForQuote(id, chatJID)
+		if err != nil {
+			t.Fatalf("GetMessageForQuote(%s): %v", id, err)
+		}
+		return senderJID
+	}
+
+	t.Run("grupo_resposta_com_mencao", func(t *testing.T) {
+		reply := &waProto.Message{EphemeralMessage: &waProto.FutureProofMessage{Message: &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String("respondendo"),
+				ContextInfo: &waProto.ContextInfo{
+					StanzaID:      proto.String("MSG-CTX-ORIGINAL"),
+					Participant:   proto.String(mentioned),
+					QuotedMessage: text("original"),
+					MentionedJID:  []string{mentioned},
+				},
+			},
+		}}}
+		messageStore := run(t, groupJID, entry("MSG-CTX-REPLY", false, participant, reply))
+
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-REPLY", groupJID); got != participant {
+			t.Fatalf("sender_jid = %q, want %q", got, participant)
+		}
+		var quotedID, quotedContent, mentions sql.NullString
+		if err := messageStore.db.QueryRow(
+			"SELECT quoted_message_id, quoted_content, mentions FROM messages WHERE id = ? AND chat_jid = ?",
+			"MSG-CTX-REPLY", groupJID,
+		).Scan(&quotedID, &quotedContent, &mentions); err != nil {
+			t.Fatalf("select context: %v", err)
+		}
+		if quotedID.String != "MSG-CTX-ORIGINAL" || quotedContent.String != "original" || !strings.Contains(mentions.String, mentioned) {
+			t.Fatalf("context = (%q, %q, %q), want the quote and the mention stored", quotedID.String, quotedContent.String, mentions.String)
+		}
+		if _, errMsg, _ := buildQuoteContextInfo(messageStore, "MSG-CTX-REPLY", groupJID); errMsg != "" {
+			t.Fatalf("buildQuoteContextInfo refused the synced message: %s", errMsg)
+		}
+	})
+
+	t.Run("propria_sem_aparelho", func(t *testing.T) {
+		messageStore := run(t, groupJID, entry("MSG-CTX-OWN", true, "", text("minha")))
+		if got, want := senderJIDOf(t, messageStore, "MSG-CTX-OWN", groupJID), own.ToNonAD().String(); got != want {
+			t.Fatalf("sender_jid = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("conversa_1a1", func(t *testing.T) {
+		messageStore := run(t, participant, entry("MSG-CTX-DM", false, "", text("direta")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-DM", participant); got != participant {
+			t.Fatalf("sender_jid = %q, want %q", got, participant)
+		}
+	})
+
+	t.Run("grupo_sem_participante", func(t *testing.T) {
+		messageStore := run(t, groupJID, entry("MSG-CTX-NOPART", false, "", text("sem autor")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-NOPART", groupJID); got != "" {
+			t.Fatalf("sender_jid = %q, want empty (unknown author), never the group", got)
+		}
+	})
+
+	t.Run("grupo_participante_invalido", func(t *testing.T) {
+		messageStore := run(t, groupJID, entry("MSG-CTX-BADPART", false, "invalido:x@"+types.DefaultUserServer, text("autor ruim")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-BADPART", groupJID); got != "" {
+			t.Fatalf("sender_jid = %q, want empty for a participant that doesn't parse", got)
+		}
+	})
+
+	t.Run("broadcast_sem_participante", func(t *testing.T) {
+		const broadcastJID = "status@broadcast"
+		messageStore := run(t, broadcastJID, entry("MSG-CTX-BCAST", false, "", text("status")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-BCAST", broadcastJID); got != "" {
+			t.Fatalf("sender_jid = %q, want empty, never the broadcast JID", got)
+		}
+	})
+}

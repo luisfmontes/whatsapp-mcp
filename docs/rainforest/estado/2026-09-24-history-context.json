@@ -1,0 +1,73 @@
+{
+  "slug": "2026-09-24-history-context",
+  "titulo": "History sync grava autor, citacao e mencoes (issue #28)",
+  "criado_em": "2026-09-24",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-24-history-context.md",
+    "em": "2026-09-24"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-24-history-context.md",
+    "tarefas": 1,
+    "paralelas": [],
+    "em": "2026-09-24"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "commits": [
+      "HEAD"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "saida": "ok; TestHistorySyncContext 4/4; vet linux/darwin ok; personal-data ok",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\t\t\tsenderJID = pn.String()",
+        "para": "\t\t\tsenderJID = \"\"",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestHistorySyncContext -v .",
+        "resultado": "vermelho",
+        "fixture": "TestHistorySyncContext/grupo_resposta_com_mencao"
+      }
+    ],
+    "em": "2026-09-24"
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "2361b323069e612a0ad6937e8e0ffde3e14a6f7c",
+      "caminhos_sujos": []
+    },
+    "achados": 2,
+    "base": "d42df7e",
+    "head": "2361b32",
+    "em_voo": [],
+    "rodadas": [
+      "e229992: aprovado, 2 avisos (autor = JID de broadcast/newsletter sem participante; proprio sem aparelho diverge do live) + 1 sugestao (sem teste de participante invalido) -> corrigidos em 2361b32",
+      "2361b32 (delta): aprovado, 0 bloqueantes; guard antigo deixa broadcast_sem_participante vermelho (rodado na janela principal)"
+    ],
+    "em": "2026-09-24"
+  },
+  "verificar": {
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "ok whatsapp-client; TestHistorySyncContext 6/6 PASS; vet linux/darwin ok; personal-data ok. Sem sync real: unico gatilho e re-parear.",
+    "tarefas": {
+      "1": "ok"
+    },
+    "em": "2026-09-24"
+  },
+  "fechar": {
+    "status": "ok",
+    "acao": "pr",
+    "pr": 30,
+    "em": "2026-09-24"
+  }
+}
