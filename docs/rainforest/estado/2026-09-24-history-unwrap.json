@@ -21,7 +21,30 @@
     "em": "2026-09-24"
   },
   "executar": {
-    "status": "pendente"
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "commits": [
+      "HEAD"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "saida": "ok; TestHistorySyncUnwrap 3/3; issue #28 aberta (tarefa 2)",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\t\tinner := unwrapHistoryMessage(msg.Message.Message)",
+        "para": "\t\tinner := msg.Message.Message",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestHistorySyncUnwrap -v .",
+        "resultado": "vermelho",
+        "fixture": "TestHistorySyncUnwrap/texto_em_ephemeral"
+      },
+      {
+        "tarefa": 2,
+        "resultado": "n/a",
+        "motivo": "abertura de issue"
+      }
+    ],
+    "em": "2026-09-24"
   },
   "revisar": {
     "status": "pendente"
