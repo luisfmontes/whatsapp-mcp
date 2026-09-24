@@ -84,7 +84,7 @@ mutacao:
   arquivo: `whatsapp-mcp-server/main.py`
   de: `if "deleted by the sender" in (status_message or ""):`
   para: `if False:`
-  bateria: `python -m unittest test_download_revoked -v`
+  bateria: `cd whatsapp-mcp-server && uv run python -m unittest test_download_revoked -v`
   fixture: `test_download_revoked.TestDownloadRevoked.test_apagada_nao_sugere_procurar_o_arquivo`
 
-pronto quando: com a recusa real que a ponte devolve para mensagem apagada (`HTTP 500 - {"success":false,"message":"Failed to download media: message was deleted by the sender"}`), a tool `download_media` responde sem "downloads folder" na dica — provado por `python -m unittest test_download_revoked -v` devolvendo `OK` nos 2 testes, e pela chamada real de `download_media` na conta `pessoal` depois de reiniciar o servidor MCP.
+pronto quando: com a recusa real que a ponte devolve para mensagem apagada (`HTTP 500 - {"success":false,"message":"Failed to download media: message was deleted by the sender"}`), a tool `download_media` responde sem "downloads folder" na dica — provado por `cd whatsapp-mcp-server && uv run python -m unittest test_download_revoked -v` devolvendo `OK` nos 2 testes, e pela chamada real de `download_media` na conta `pessoal` depois de reiniciar o servidor MCP.

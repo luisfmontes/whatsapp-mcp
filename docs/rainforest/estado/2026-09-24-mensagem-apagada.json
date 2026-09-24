@@ -78,7 +78,18 @@
     ]
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "mcp list_messages/download_media (pessoal e trabalho, grupo de teste) apos reiniciar as pontes com o binario de 0687a62; go test ./...; uv run python -m unittest test_download_revoked -v",
+    "sensor_externo": "go test ./...",
+    "saida": "T1/T4 pessoal: imagem = [mensagem apagada], download recusado \"message was deleted by the sender\", arquivo em cache removido do disco. T2/T4 pessoal: texto = versao EDITADA. T3/T4 trabalho (acao propria pelo MCP): mesmo resultado no proprio store. go test ok; python 90 testes OK; mutacoes T1,T2,T5 vermelhas no fixture certo. T5 chamada real pendente: exige reiniciar o servidor MCP com main.py mesclado.",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok",
+      "3": "ok",
+      "4": "ok",
+      "5": "ok (unitario + mutacao); chamada real apos merge"
+    },
+    "em": "2026-09-24"
   },
   "fechar": {
     "status": "pendente"
