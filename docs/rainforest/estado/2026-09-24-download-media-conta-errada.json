@@ -1,0 +1,106 @@
+{
+  "slug": "2026-09-24-download-media-conta-errada",
+  "titulo": "download_media sem account falha sem indicar a conta certa",
+  "criado_em": "2026-09-24",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-24-download-media-conta-errada.md",
+    "em": "2026-09-24"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-24-download-media-conta-errada.md",
+    "tarefas": 3,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-09-24"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "tarefas_ok": 3,
+    "tarefas": 3,
+    "carimbos": [
+      {
+        "tarefa": 1,
+        "hash_base": "0a15cd7",
+        "iteracao": 1,
+        "sessao": "75e2d03c-04c0-48d3-b983-beb250dff2f9",
+        "ts": "2026-09-24T22:14:23.625Z"
+      },
+      {
+        "tarefa": 2,
+        "hash_base": "0a15cd7",
+        "iteracao": 1,
+        "sessao": "75e2d03c-04c0-48d3-b983-beb250dff2f9",
+        "ts": "2026-09-24T22:14:23.625Z"
+      },
+      {
+        "tarefa": 3,
+        "hash_base": "0a15cd7",
+        "iteracao": 1,
+        "sessao": "75e2d03c-04c0-48d3-b983-beb250dff2f9",
+        "ts": "2026-09-24T22:14:23.625Z"
+      }
+    ],
+    "em": "2026-09-24",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "test_other_account.py::test_helper_ignora_a_conta_chamada"
+      },
+      {
+        "tarefa": 2,
+        "resultado": "vermelho",
+        "fixture": "test_other_account.py::test_download_indica_a_outra_conta"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "vermelho",
+        "fixture": "test_other_account.py::test_deleted_indica_a_outra_conta"
+      }
+    ],
+    "comando": "conferir-entrega.cjs + conferir-mutacao.cjs x3 + criterios reais",
+    "saida": "entrega APROVADO; 3 mutacoes vermelhas; T1 [trabalho] []; T2 hint account=trabalho / not found in any account / True; T3 hint trabalho / sem hint"
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "0a15cd79a57cdb33e5dc5497630bbf7c498c580a",
+      "caminhos_sujos": [
+        "docs/rainforest/design/2026-09-24-download-media-conta-errada.md",
+        "docs/rainforest/estado/2026-09-24-download-media-conta-errada.json",
+        "docs/rainforest/planos/2026-09-24-download-media-conta-errada.md"
+      ]
+    },
+    "vereditos": [
+      {
+        "agente": "rainforest-mind:revisor",
+        "agente_id": "a2c6428dd48b40699",
+        "veredito": "ok",
+        "em": "2026-09-24",
+        "transcrito": "C:\\Users\\Luis\\.claude\\projects\\C--Projetos-whatsapp-mcp\\75e2d03c-04c0-48d3-b983-beb250dff2f9\\subagents\\agent-a2c6428dd48b40699.jsonl"
+      }
+    ],
+    "achados": 4,
+    "corrigidos": 4,
+    "base": "0a15cd79a57cdb33e5dc5497630bbf7c498c580a",
+    "head": "a6891fbd050772a936f923032ef85abaf5299b71",
+    "em": "2026-09-24"
+  },
+  "verificar": {
+    "status": "ok",
+    "comando": "cd whatsapp-mcp-server && uv run python -c download_media/get_deleted_message com MSG/CHAT reais nos dois bridges",
+    "sensor_externo": "uv run python -c",
+    "saida": "T1 ['trabalho'] []; T2 hint account=trabalho | not found in any account | True; T3 hint trabalho | sem hint na conta certa | not found in any account p/ id inexistente",
+    "em": "2026-09-24"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
