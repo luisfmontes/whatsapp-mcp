@@ -3121,6 +3121,51 @@ func TestDeletedMessageEndpoint(t *testing.T) {
 		}
 	})
 
+	t.Run("banco_legado_com_colunas_text", func(t *testing.T) {
+		// The real store predates revoked_at/edited_at, so ensureMessagesSchema
+		// added them as TEXT and the driver reads them back as strings — the
+		// shape that broke /api/deleted_message on the live bridge.
+		db := setupLegacyMessagesStore(t)
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema: %v", err)
+		}
+		store := &MessageStore{db: db}
+		const chatJID = "grupo-deleted-endpoint-legado@g.us"
+		if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type) VALUES
+			('MSG-LEGADO-APAGADA', ?, 'autor-a', 'legenda legada', ?, 0, 'image'),
+			('MSG-LEGADO-EDITADA', ?, 'autor-a', 'texto legado', ?, 0, '')`,
+			chatJID, baseTS, chatJID, baseTS); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String("MSG-LEGADO-APAGADA")},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String("MSG-LEGADO-EDITADA")},
+			EditedMessage: &waProto.Message{Conversation: proto.String("texto legado editado")},
+		}, baseTS.Add(2*time.Minute), waLog.Noop)
+
+		resp, found, err := getDeletedMessage(db, DeletedMessageRequest{MessageID: "MSG-LEGADO-APAGADA", ChatJID: chatJID})
+		if err != nil || !found {
+			t.Fatalf("getDeletedMessage (revoked) = found %v, err %v", found, err)
+		}
+		if resp.Content != "legenda legada" || resp.RevokedAt == nil {
+			t.Errorf("revoked resp = %+v, want the original caption and revoked_at", resp)
+		} else if _, perr := time.Parse(time.RFC3339, *resp.RevokedAt); perr != nil {
+			t.Errorf("revoked_at = %q, want RFC3339: %v", *resp.RevokedAt, perr)
+		}
+
+		resp, found, err = getDeletedMessage(db, DeletedMessageRequest{MessageID: "MSG-LEGADO-EDITADA", ChatJID: chatJID})
+		if err != nil || !found {
+			t.Fatalf("getDeletedMessage (edited) = found %v, err %v", found, err)
+		}
+		if resp.PreviousContent == nil || *resp.PreviousContent != "texto legado" || resp.EditedAt == nil {
+			t.Errorf("edited resp = %+v, want previous_content and edited_at", resp)
+		}
+	})
+
 	t.Run("mediaretry_recusa_apagada", func(t *testing.T) {
 		store := setupPollStore(t)
 		const chatJID = "grupo-deleted-endpoint-retry@g.us"

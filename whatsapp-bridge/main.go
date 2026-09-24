@@ -4837,6 +4837,27 @@ func getContactNameFromStore(phone string) string {
 }
 
 // nullTimeToPtr renders a sql.NullTime as an RFC3339 string pointer, or nil.
+// storedTimeToPtr renders a timestamp read back as text (see getDeletedMessage)
+// as RFC3339, like nullTimeToPtr does for a scanned time. The layouts are the
+// ones the SQLite drivers write for a time.Time parameter; a value in none of
+// them is returned as stored rather than dropped.
+func storedTimeToPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	// The first layout is time.Time.String(), which the Windows driver
+	// (modernc) writes into a TEXT column — the real store holds e.g.
+	// "2026-09-24 15:32:41 -0300 -03".
+	for _, layout := range []string{"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999-07:00", time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, v.String); err == nil {
+			s := t.Format(time.RFC3339)
+			return &s
+		}
+	}
+	s := v.String
+	return &s
+}
+
 func nullTimeToPtr(t sql.NullTime) *string {
 	if !t.Valid {
 		return nil
@@ -5603,9 +5624,14 @@ type DeletedMessageResponse struct {
 func getDeletedMessage(db *sql.DB, req DeletedMessageRequest) (DeletedMessageResponse, bool, error) {
 	var content string
 	var previousContent, mediaType sql.NullString
-	var revokedAt, editedAt sql.NullTime
+	// CAST AS TEXT: on a database that predates these columns,
+	// ensureMessagesSchema added them as TEXT, and the driver then hands back a
+	// string that a sql.NullTime cannot scan (seen on the real store: "unsupported
+	// Scan, storing driver.Value type string into type *time.Time"). A fresh
+	// database declares them TIMESTAMP; reading both as text covers either.
+	var revokedAt, editedAt sql.NullString
 	err := db.QueryRow(
-		"SELECT content, previous_content, media_type, revoked_at, edited_at FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT content, previous_content, media_type, CAST(revoked_at AS TEXT), CAST(edited_at AS TEXT) FROM messages WHERE id = ? AND chat_jid = ?",
 		req.MessageID, req.ChatJID,
 	).Scan(&content, &previousContent, &mediaType, &revokedAt, &editedAt)
 	if err == sql.ErrNoRows {
@@ -5621,8 +5647,8 @@ func getDeletedMessage(db *sql.DB, req DeletedMessageRequest) (DeletedMessageRes
 		Content:         content,
 		PreviousContent: nullStringToPtr(previousContent),
 		MediaType:       nullStringToPtr(mediaType),
-		RevokedAt:       nullTimeToPtr(revokedAt),
-		EditedAt:        nullTimeToPtr(editedAt),
+		RevokedAt:       storedTimeToPtr(revokedAt),
+		EditedAt:        storedTimeToPtr(editedAt),
 	}, true, nil
 }
 
