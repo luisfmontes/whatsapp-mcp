@@ -2146,6 +2146,14 @@ func resolveToPN(client *whatsmeow.Client, jid types.JID) types.JID {
 	return pn
 }
 
+// localChatKey returns the key the local store uses for chatJID — the same
+// PN-normalized string handleMessage writes rows under (D2, follow-up to
+// issue #21), so applying a revoke/edit against a chatJID that arrived as
+// @lid still lands on the live row instead of missing it silently.
+func localChatKey(client *whatsmeow.Client, chatJID types.JID) string {
+	return resolveToPN(client, chatJID).String()
+}
+
 // resolveContactJIDs returns every JID (regular PN + LID) that maps to a phone
 // number, using the whatsmeow LID store API (never the internal lid_map table).
 // Parity with the Python _resolve_phone_to_jids: PN first, then the LID if known.
@@ -2688,7 +2696,7 @@ func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.Handl
 		// Issue #21 (D3): a single-device account gets no echo of its own
 		// action, so the local store needs the same edit applied here.
 		if messageStore != nil {
-			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+			applyProtocolMessage(messageStore, localChatKey(client, chatJID), &waProto.ProtocolMessage{
 				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
 				Key:           &waProto.MessageKey{ID: proto.String(req.MessageID)},
 				EditedMessage: newContent,
@@ -2748,7 +2756,7 @@ func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.Han
 		// Issue #21 (D3): a single-device account gets no echo of its own
 		// action, so the local store needs the same revoke applied here.
 		if messageStore != nil {
-			applyProtocolMessage(messageStore, req.ChatJID, &waProto.ProtocolMessage{
+			applyProtocolMessage(messageStore, localChatKey(client, chatJID), &waProto.ProtocolMessage{
 				Type: waProto.ProtocolMessage_REVOKE.Enum(),
 				Key:  &waProto.MessageKey{ID: proto.String(req.MessageID)},
 			}, time.Now(), waLog.Noop)
@@ -7268,6 +7276,28 @@ func requestMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, mes
 // handleMediaRetry processes the phone's response to a media retry request: on
 // success it downloads with the fresh directPath and persists the file so the
 // normal download/transcription path can use it.
+// writeRecoveredMedia writes a media-retry download to disk, unless the
+// sender revoked (deleted for everyone) the message in the meantime — the
+// phone's asynchronous retry response must not resurrect bytes on disk for a
+// message the store no longer carries (D1, follow-up to issue #21).
+func writeRecoveredMedia(messageStore *MessageStore, messageID, chatJID, filename string, data []byte) (string, error) {
+	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil || revoked {
+		return "", fmt.Errorf("message was deleted by the sender")
+	}
+	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	if err := os.MkdirAll(chatDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir failed: %v", err)
+	}
+	localPath, err := safeMediaPath(chatDir, messageID, filename)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		return "", fmt.Errorf("write failed: %v", err)
+	}
+	return localPath, nil
+}
+
 // Stable log contract consumed by recover_audios.py. Every terminal outcome
 // emits exactly one of these tags so the recovery orchestrator can classify it
 // without guessing — keep these in sync with the regexes in recover_audios.py.
@@ -7324,18 +7354,9 @@ func handleMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, evt 
 		return
 	}
 
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(entry.chatJID, ":", "_"))
-	if err := os.MkdirAll(chatDir, 0755); err != nil {
-		fmt.Printf("MEDIA RETRY %s: ERROR mkdir failed: %v\n", evt.MessageID, err)
-		return
-	}
-	localPath, err := safeMediaPath(chatDir, evt.MessageID, entry.filename)
+	localPath, err := writeRecoveredMedia(messageStore, evt.MessageID, entry.chatJID, entry.filename, data)
 	if err != nil {
 		fmt.Printf("MEDIA RETRY %s: ERROR %v\n", evt.MessageID, err)
-		return
-	}
-	if err := os.WriteFile(localPath, data, 0644); err != nil {
-		fmt.Printf("MEDIA RETRY %s: ERROR write failed: %v\n", evt.MessageID, err)
 		return
 	}
 	fmt.Printf("MEDIA RETRY %s: SUCCESS recovered %d bytes -> %s\n", evt.MessageID, len(data), localPath)

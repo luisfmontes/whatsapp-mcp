@@ -19,8 +19,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
@@ -2473,6 +2475,130 @@ func TestRevokedMessage(t *testing.T) {
 			if !afterSet[col] {
 				t.Errorf("column %q missing after ensureMessagesSchema; got %v", col, after)
 			}
+		}
+	})
+}
+
+// TestWriteRecoveredMedia covers D1 (avisos-revisao-21): a media-retry
+// response that lands after the sender already deleted the message for
+// everyone must not resurrect bytes on disk for it.
+func TestWriteRecoveredMedia(t *testing.T) {
+	const chatJID = "grupo-media-retry@g.us"
+	const messageID = "MSG-RETRY-1"
+	const filename = "foto.jpg"
+	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	data := []byte("bytes recuperados do telefone")
+
+	newFixture := func(t *testing.T) *MessageStore {
+		t.Helper()
+		store := setupPollStore(t)
+		if err := store.StoreChat(chatJID, "Grupo media retry", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda da foto", baseTS, false,
+			"image", filename, "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		return store
+	}
+
+	wantPath := func(t *testing.T) string {
+		t.Helper()
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		p, err := safeMediaPath(chatDir, messageID, filename)
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		return p
+	}
+
+	t.Run("apagada_nao_grava", func(t *testing.T) {
+		store := newFixture(t)
+		pm := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, chatJID, pm, baseTS.Add(time.Minute), waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+
+		path, err := writeRecoveredMedia(store, messageID, chatJID, filename, data)
+		if err == nil {
+			t.Fatalf("writeRecoveredMedia returned no error (path=%q), want a revoked-message refusal", path)
+		}
+		if !strings.Contains(err.Error(), "deleted by the sender") {
+			t.Fatalf("err = %q, want it to mention 'deleted by the sender'", err.Error())
+		}
+		if _, statErr := os.Stat(wantPath(t)); !os.IsNotExist(statErr) {
+			t.Fatalf("os.Stat(%q) = %v, want the file to not exist", wantPath(t), statErr)
+		}
+	})
+
+	t.Run("nao_apagada_grava", func(t *testing.T) {
+		store := newFixture(t)
+
+		path, err := writeRecoveredMedia(store, messageID, chatJID, filename, data)
+		if err != nil {
+			t.Fatalf("writeRecoveredMedia: %v", err)
+		}
+		if want := wantPath(t); path != want {
+			t.Fatalf("path = %q, want %q", path, want)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("os.ReadFile(%q): %v", path, readErr)
+		}
+		if string(got) != string(data) {
+			t.Fatalf("file content = %q, want %q", got, data)
+		}
+	})
+}
+
+// lidsFalso e um duble minimo de store.LIDStore: embute a interface (nil,
+// nunca chamado) e so implementa os dois metodos Get* que localChatKey usa
+// por baixo de resolveToPN.
+type lidsFalso struct {
+	store.LIDStore
+	pn, lid types.JID
+}
+
+func (l lidsFalso) GetPNForLID(_ context.Context, lid types.JID) (types.JID, error) {
+	if lid.String() == l.lid.String() {
+		return l.pn, nil
+	}
+	return types.JID{}, nil
+}
+
+func (l lidsFalso) GetLIDForPN(_ context.Context, pn types.JID) (types.JID, error) {
+	if pn.String() == l.pn.String() {
+		return l.lid, nil
+	}
+	return types.JID{}, nil
+}
+
+// TestLocalChatKey covers D2 (avisos-revisao-21): revoke/edit tem de aplicar
+// no store pela mesma chave PN-normalizada que handleMessage grava, nao pelo
+// chat_jid cru — um chat_jid em forma @lid batia em linha nenhuma.
+func TestLocalChatKey(t *testing.T) {
+	pn := types.JID{User: "55" + "62" + "9" + "0000012", Server: types.DefaultUserServer}
+	lid := types.JID{User: "88" + "99" + "00" + "1122", Server: types.HiddenUserServer}
+	client := &whatsmeow.Client{Store: &store.Device{LIDs: lidsFalso{pn: pn, lid: lid}}}
+
+	t.Run("lid_vira_pn", func(t *testing.T) {
+		got := localChatKey(client, lid)
+		if got != pn.String() {
+			t.Fatalf("localChatKey(lid) = %q, want %q", got, pn.String())
+		}
+	})
+
+	t.Run("pn_e_grupo_inalterados", func(t *testing.T) {
+		if got := localChatKey(client, pn); got != pn.String() {
+			t.Fatalf("localChatKey(pn) = %q, want %q (unchanged)", got, pn.String())
+		}
+		grupo := types.JID{User: "grupo-teste-localchatkey", Server: types.GroupServer}
+		if got := localChatKey(client, grupo); got != grupo.String() {
+			t.Fatalf("localChatKey(grupo) = %q, want %q (unchanged)", got, grupo.String())
 		}
 	})
 }
