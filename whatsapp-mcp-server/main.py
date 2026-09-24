@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+import accounts
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -318,6 +319,17 @@ def send_audio_message(recipient: str, media_path: str, account: Optional[str] =
         "message": status_message
     }
 
+def _message_elsewhere_hint(message_id: str, chat_jid: str, account: Optional[str]) -> str:
+    """Hint for a message the called account does not have: name the account
+    that does, so the caller retries there instead of hunting for the file."""
+    found = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
+    if found:
+        names = ", ".join(f'"{a}"' for a in found)
+        return f'Message found in account(s): {names} - retry with account="{found[0]}"'
+    if accounts.known_aliases():
+        return "Message not found in any account - check message_id and chat_jid."
+    return "Message not found - check message_id and chat_jid."
+
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
@@ -346,6 +358,12 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
             "message": f"Failed to download media: {status_message}",
             "hint": "The sender deleted this message for everyone - do not look "
                     "for a copy of the file elsewhere, and treat the message as withdrawn."
+        }
+    if "failed to find message" in (status_message or ""):
+        return {
+            "success": False,
+            "message": f"Failed to download media: {status_message}",
+            "hint": _message_elsewhere_hint(message_id, chat_jid, account),
         }
     return {
         "success": False,
@@ -381,6 +399,15 @@ def get_deleted_message(message_id: str, chat_jid: str, download: bool = False, 
     result, status_message = whatsapp_get_deleted_message(message_id, chat_jid, download=download, account=account)
 
     if result is None:
+        if "neither deleted nor edited" in (status_message or ""):
+            # The bridge says the same thing for a message it has but that was
+            # never changed, so only look elsewhere when this account lacks it.
+            if not accounts.message_in_account(account, message_id, chat_jid):
+                return {
+                    "success": False,
+                    "message": status_message,
+                    "hint": _message_elsewhere_hint(message_id, chat_jid, account),
+                }
         return {
             "success": False,
             "message": status_message,
