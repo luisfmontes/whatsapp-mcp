@@ -16,7 +16,7 @@ Uma mensagem apagada "para todos" depois de armazenada passa a aparecer como apa
 
 ## Fora de escopo
 - Mensagens apagadas antes da correção (ex.: a de 24/09 09:25:48): o evento de revogação já se perdeu e não há como detectá-las; a correção vale do reinício da bridge em diante.
-- Servidor MCP Python: lê tudo via REST da bridge; marcador no conteúdo e recusa do download bastam.
+- Servidor MCP Python: lê tudo via REST da bridge; marcador no conteúdo e recusa do download bastam. Exceção achada na validação real (tarefa 5 do plano): a dica de falha do `download_media` mandava procurar o arquivo na pasta de downloads, o que para mensagem apagada é ir atrás do que o remetente retirou.
 - `last_message` do `list_chats` para chat cuja última mensagem foi apagada: mostra texto vazio, não o marcador.
 
 ## Em aberto

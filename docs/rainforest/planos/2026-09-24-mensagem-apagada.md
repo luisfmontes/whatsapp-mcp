@@ -71,3 +71,20 @@ mutacao: n/a
   motivo: validação de ambiente real; não há linha de código nova a inverter nesta tarefa.
 
 pronto quando: com a imagem e o texto reais enviados pela conta `trabalho`, a conta `pessoal` mostra no `list_messages` a imagem como `[mensagem apagada]` sem tipo de mídia e o texto com a versão editada, o `download_media` dela é recusado, e a conta `trabalho` mostra o mesmo no próprio `list_messages` — provado pelas saídas das tools MCP `list_messages`/`download_media` das duas contas coladas na evidência do `verificar`.
+
+### 5. download_media não sugere procurar mídia apagada [tipo: implementar]
+atende: D1
+arquivos: `whatsapp-mcp-server/main.py`, `whatsapp-mcp-server/test_download_revoked.py`
+depende de: 4
+paralela: nao
+
+Achado da tarefa 4: com a recusa `message was deleted by the sender`, a tool devolvia a dica "look for the file in the downloads folder". Recusa por mensagem apagada passa a trazer dica que manda tratar a mensagem como retirada; as demais falhas mantêm a dica antiga.
+
+mutacao:
+  arquivo: `whatsapp-mcp-server/main.py`
+  de: `if "deleted by the sender" in (status_message or ""):`
+  para: `if False:`
+  bateria: `python -m unittest test_download_revoked -v`
+  fixture: `test_download_revoked.TestDownloadRevoked.test_apagada_nao_sugere_procurar_o_arquivo`
+
+pronto quando: com a recusa real que a ponte devolve para mensagem apagada (`HTTP 500 - {"success":false,"message":"Failed to download media: message was deleted by the sender"}`), a tool `download_media` responde sem "downloads folder" na dica — provado por `python -m unittest test_download_revoked -v` devolvendo `OK` nos 2 testes, e pela chamada real de `download_media` na conta `pessoal` depois de reiniciar o servidor MCP.

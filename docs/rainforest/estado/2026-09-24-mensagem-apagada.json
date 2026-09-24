@@ -61,7 +61,21 @@
     ]
   },
   "revisar": {
-    "status": "pendente"
+    "status": "ok",
+    "snapshot": {
+      "head": "0687a62d38d60510e9e9509a2b240f3810c4d5b8",
+      "caminhos_sujos": []
+    },
+    "em": "2026-09-24",
+    "achados": 0,
+    "avisos": 3,
+    "base": "867b888f225d11b966630ac0219e75fbeb351c95",
+    "head": "0687a62d38d60510e9e9509a2b240f3810c4d5b8",
+    "avisos_lista": [
+      "history sync nao aplica REVOKE/EDIT",
+      "corrida em /api/mediaretry pode regravar midia revogada no disco",
+      "/api/revoke|edit usam req.ChatJID sem resolveToPN"
+    ]
   },
   "verificar": {
     "status": "pendente"
