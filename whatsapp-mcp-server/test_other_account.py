@@ -238,7 +238,7 @@ class TestDownloadMediaIndicatesOtherAccount:
     def test_download_indica_a_outra_conta(self):
         """When message not found in default account but exists elsewhere, hint names the account."""
         # Mock whatsapp_download_media to return "failed to find message" error
-        bridge_response = 'HTTP 500 - {"success":false,"message":"failed to find message: sql: no rows in result set"}'
+        bridge_response = 'HTTP 500 - {"success":false,"message":"Failed to download media: failed to find message: sql: no rows in result set"}'
         
         # Mock the helper to return an alternate account
         with mock.patch.object(main, "whatsapp_download_media", return_value=(None, bridge_response)):
@@ -252,7 +252,7 @@ class TestDownloadMediaIndicatesOtherAccount:
 
     def test_download_nenhuma_conta_tem_a_mensagem(self):
         """When message not found in any account, hint uses D3 text without downloads folder."""
-        bridge_response = 'HTTP 500 - {"success":false,"message":"failed to find message: sql: no rows in result set"}'
+        bridge_response = 'HTTP 500 - {"success":false,"message":"Failed to download media: failed to find message: sql: no rows in result set"}'
         
         with mock.patch.object(main, "whatsapp_download_media", return_value=(None, bridge_response)):
             with mock.patch.object(accounts, "find_message_accounts", return_value=[]):
@@ -262,6 +262,17 @@ class TestDownloadMediaIndicatesOtherAccount:
         assert "not found" in out["hint"].lower()
         assert "downloads folder" not in out["hint"]
         assert "any account" in out["hint"].lower()
+
+    def test_download_sem_accounts_json_nao_fala_em_contas(self):
+        """Single-account install: no accounts to point at, and "any account"
+        would be misleading."""
+        bridge_response = 'HTTP 500 - {"success":false,"message":"Failed to download media: failed to find message: sql: no rows in result set"}'
+
+        with mock.patch.object(main, "whatsapp_download_media", return_value=(None, bridge_response)):
+            with mock.patch.object(accounts, "_load_accounts_map", return_value=None):
+                out = main.download_media("MSG-123", "test-jid-1@g.us")
+
+        assert out["hint"] == "Message not found - check message_id and chat_jid."
 
     def test_download_nao_abre_banco_no_caminho_feliz(self):
         """Happy path (success or other error) never calls the helper."""
@@ -301,7 +312,7 @@ class TestGetDeletedMessageIndicatesOtherAccount:
 
     def test_deleted_indica_a_outra_conta(self):
         """When 'neither deleted nor edited' in default, but exists elsewhere, hint names it."""
-        bridge_response = 'HTTP 404 - {"error":"message MSG-123 was neither deleted nor edited"}'
+        bridge_response = "message MSG-123 was neither deleted nor edited"
         
         with mock.patch.object(main, "whatsapp_get_deleted_message", return_value=(None, bridge_response)):
             with mock.patch.object(accounts, "find_message_accounts", return_value=["trabalho"]):
@@ -315,7 +326,7 @@ class TestGetDeletedMessageIndicatesOtherAccount:
 
     def test_deleted_mensagem_esta_na_conta_chamada_sem_hint(self):
         """When message is in the called account (not deleted/edited), no hint, return as normal."""
-        bridge_response = 'HTTP 404 - {"error":"message MSG-123 was neither deleted nor edited"}'
+        bridge_response = "message MSG-123 was neither deleted nor edited"
         
         with mock.patch.object(main, "whatsapp_get_deleted_message", return_value=(None, bridge_response)):
             with mock.patch.object(accounts, "message_in_account", return_value=True):
@@ -327,13 +338,26 @@ class TestGetDeletedMessageIndicatesOtherAccount:
 
     def test_deleted_nenhuma_conta_tem_a_mensagem(self):
         """When neither deleted nor edited in all accounts, no hint."""
-        bridge_response = 'HTTP 404 - {"error":"message MSG-123 was neither deleted nor edited"}'
+        bridge_response = "message MSG-123 was neither deleted nor edited"
         
         with mock.patch.object(main, "whatsapp_get_deleted_message", return_value=(None, bridge_response)):
             with mock.patch.object(accounts, "find_message_accounts", return_value=[]):
                 with mock.patch.object(accounts, "message_in_account", return_value=False):
                     out = main.get_deleted_message("MSG-123", "test-jid-1@g.us")
         
+        assert out["success"] is False
+        assert "any account" in out["hint"]
+
+    def test_deleted_mensagem_nas_duas_contas_sem_hint(self):
+        """Group message received by both accounts, never changed: the called
+        account has it, so pointing at the other one would only repeat the 404."""
+        bridge_response = "message MSG-123 was neither deleted nor edited"
+
+        with mock.patch.object(main, "whatsapp_get_deleted_message", return_value=(None, bridge_response)):
+            with mock.patch.object(accounts, "find_message_accounts", return_value=["trabalho"]):
+                with mock.patch.object(accounts, "message_in_account", return_value=True):
+                    out = main.get_deleted_message("MSG-123", "test-jid-1@g.us")
+
         assert out["success"] is False
         assert "hint" not in out
 

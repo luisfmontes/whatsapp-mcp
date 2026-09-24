@@ -6,9 +6,13 @@ and supports fallback to legacy single-account environment setup.
 
 import os
 import json
+import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 
 def _get_accounts_file() -> Optional[Path]:
@@ -252,14 +256,19 @@ def message_in_account(alias: Optional[str], message_id: str, chat_jid: str) -> 
 
         # Use URI mode with read-only flag to safely check for messages
         uri = db_path.as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
             result = conn.execute(
                 "SELECT 1 FROM messages WHERE id=? AND chat_jid=? LIMIT 1",
                 (message_id, chat_jid)
             ).fetchone()
             return result is not None
+    except sqlite3.OperationalError as e:
+        # A locked database is not an absent message: log it so a "not found"
+        # during a history sync can be told apart from a real miss.
+        logger.warning("Could not read messages db of account %r: %s", alias, e)
+        return False
     except (sqlite3.Error, OSError, ValueError):
-        # Covers: missing file, not-a-database, missing table, missing directory/alias
+        # Covers: not-a-database, missing directory/alias
         return False
 
 

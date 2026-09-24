@@ -319,6 +319,17 @@ def send_audio_message(recipient: str, media_path: str, account: Optional[str] =
         "message": status_message
     }
 
+def _message_elsewhere_hint(message_id: str, chat_jid: str, account: Optional[str]) -> str:
+    """Hint for a message the called account does not have: name the account
+    that does, so the caller retries there instead of hunting for the file."""
+    found = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
+    if found:
+        names = ", ".join(f'"{a}"' for a in found)
+        return f'Message found in account(s): {names} - retry with account="{found[0]}"'
+    if accounts.known_aliases():
+        return "Message not found in any account - check message_id and chat_jid."
+    return "Message not found - check message_id and chat_jid."
+
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str, account: Optional[str] = None) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
@@ -349,18 +360,10 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
                     "for a copy of the file elsewhere, and treat the message as withdrawn."
         }
     if "failed to find message" in (status_message or ""):
-        other_accounts = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
-        if other_accounts:
-            account_list = '", "'.join(other_accounts)
-            return {
-                "success": False,
-                "message": f"Failed to download media: {status_message}",
-                "hint": f'Message found in account(s): "{account_list}" - retry with account="{other_accounts[0]}"'
-            }
         return {
             "success": False,
             "message": f"Failed to download media: {status_message}",
-            "hint": "Message not found in any account - check message_id and chat_jid."
+            "hint": _message_elsewhere_hint(message_id, chat_jid, account),
         }
     return {
         "success": False,
@@ -397,14 +400,13 @@ def get_deleted_message(message_id: str, chat_jid: str, download: bool = False, 
 
     if result is None:
         if "neither deleted nor edited" in (status_message or ""):
-            other_accounts = accounts.find_message_accounts(message_id, chat_jid, exclude=account)
-            message_in_called_account = accounts.message_in_account(account, message_id, chat_jid)
-            if other_accounts and not message_in_called_account:
-                account_list = '", "'.join(other_accounts)
+            # The bridge says the same thing for a message it has but that was
+            # never changed, so only look elsewhere when this account lacks it.
+            if not accounts.message_in_account(account, message_id, chat_jid):
                 return {
                     "success": False,
                     "message": status_message,
-                    "hint": f'Message found in account(s): "{account_list}" - retry with account="{other_accounts[0]}"'
+                    "hint": _message_elsewhere_hint(message_id, chat_jid, account),
                 }
         return {
             "success": False,
