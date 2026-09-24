@@ -87,7 +87,19 @@
     ]
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./... ; validacao real: list_messages/download_media via MCP e POST /api/deleted_message nas portas 3005 e 3006 com o binario de 5e8ab4b",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "go ok. Real (pessoal e trabalho): imagem apagada = [mensagem apagada], download_media recusa, arquivo em cache mantido; deleted_message devolve media_type image e revoked_at 2026-09-24T15:32:41-03:00, download=true devolve o arquivo; texto editado devolve previous_content (original) e content (editado). Imagem do teste da manha sem conteudo (perda D5). Dois defeitos achados na validacao real e corrigidos (horario TEXT em store legado; sufixo monotonico), com re-revisao aprovada. Tool MCP get_deleted_message: chamada real apos merge + /mcp.",
+    "revisao_delta": "3b55a67...5e8ab4b aprovada, 0 bloqueantes",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok",
+      "3": "ok",
+      "4": "ok (unitario); chamada real da tool apos merge",
+      "5": "ok"
+    },
+    "em": "2026-09-24"
   },
   "fechar": {
     "status": "pendente"
