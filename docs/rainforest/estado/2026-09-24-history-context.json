@@ -39,7 +39,11 @@
     "em": "2026-09-24"
   },
   "revisar": {
-    "status": "pendente"
+    "status": "pendente",
+    "snapshot": {
+      "head": "e2299921d45362af51b5385d20c1dfa90f713eeb",
+      "caminhos_sujos": []
+    }
   },
   "verificar": {
     "status": "pendente"

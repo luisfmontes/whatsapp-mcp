@@ -5722,4 +5722,19 @@ func TestHistorySyncContext(t *testing.T) {
 			t.Fatalf("sender_jid = %q, want empty (unknown author), never the group", got)
 		}
 	})
+
+	t.Run("grupo_participante_invalido", func(t *testing.T) {
+		messageStore := run(t, groupJID, entry("MSG-CTX-BADPART", false, "invalido:x@"+types.DefaultUserServer, text("autor ruim")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-BADPART", groupJID); got != "" {
+			t.Fatalf("sender_jid = %q, want empty for a participant that doesn't parse", got)
+		}
+	})
+
+	t.Run("broadcast_sem_participante", func(t *testing.T) {
+		const broadcastJID = "status@broadcast"
+		messageStore := run(t, broadcastJID, entry("MSG-CTX-BCAST", false, "", text("status")))
+		if got := senderJIDOf(t, messageStore, "MSG-CTX-BCAST", broadcastJID); got != "" {
+			t.Fatalf("sender_jid = %q, want empty, never the broadcast JID", got)
+		}
+	})
 }

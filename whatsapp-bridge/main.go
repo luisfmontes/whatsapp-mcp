@@ -7128,8 +7128,10 @@ type pendingHistorySyncProtocolMsg struct {
 // derived the same way (issue #28, D1): the key's participant in a group, the
 // chat itself in a 1:1, the account without its device part for our own
 // messages. It stays empty when the author can't be told — a participant that
-// doesn't parse, or a group entry with no participant — so the row reads as
-// unknown author (D9) instead of getting the group's own JID as its author.
+// doesn't parse, or an entry with no participant in anything but a 1:1 (group,
+// status@broadcast, newsletter) — so the row reads as unknown author (D9)
+// instead of getting the chat's own JID as its author: isUnknownAuthor only
+// catches that for @g.us, so a broadcast JID would pass as a real author.
 func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.MessageKey) (sender, senderJID string, isFromMe bool) {
 	if key == nil {
 		return jid.User, "", false
@@ -7150,7 +7152,7 @@ func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.Me
 		senderJID = client.Store.ID.ToNonAD().String()
 	} else {
 		sender = jid.User
-		if jid.Server != types.GroupServer {
+		if jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer {
 			senderJID = resolveToPN(client, jid).String()
 		}
 	}
