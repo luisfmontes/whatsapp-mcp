@@ -1,0 +1,84 @@
+{
+  "slug": "2026-09-24-avisos-revisao-21",
+  "titulo": "Midia apagada regravada pelo mediaretry e chat_jid sem normalizar em revoke/edit",
+  "criado_em": "2026-09-24",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-09-24-avisos-revisao-21.md",
+    "em": "2026-09-24"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-09-24-avisos-revisao-21.md",
+    "tarefas": 2,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-09-24"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "em": "2026-09-24",
+    "commits": [
+      "a845a34",
+      "HEAD"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "saida": "ok whatsapp-client",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\tif deleted {",
+        "para": "\tif deleted && false {",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestWriteRecoveredMedia -v .",
+        "resultado": "vermelho",
+        "fixture": "TestWriteRecoveredMedia/apagada_nao_grava"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\treturn resolveToPN(client, chatJID).String()",
+        "para": "\treturn chatJID.String()",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestLocalChatKey -v .",
+        "resultado": "vermelho",
+        "fixture": "TestLocalChatKey/lid_vira_pn"
+      }
+    ]
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "1b27a16c1a2b753200223666ebb4dcae3f52664e",
+      "caminhos_sujos": []
+    },
+    "em": "2026-09-24",
+    "achados": 0,
+    "base": "942a2993b766a8c75f41a738b685a86bb9325ddb",
+    "head": "1b27a16c1a2b753200223666ebb4dcae3f52664e",
+    "sugestoes": [
+      "TOCTOU entre IsMessageRevoked e WriteFile, mesmo padrao do downloadMedia"
+    ]
+  },
+  "verificar": {
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "ok; TestWriteRecoveredMedia 2/2, TestLocalChatKey 2/2 PASS; mutacoes T1 e T2 vermelhas no fixture certo",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok"
+    },
+    "em": "2026-09-24"
+  },
+  "fechar": {
+    "status": "ok",
+    "acao": "pr",
+    "pr": 24,
+    "em": "2026-09-24"
+  }
+}
