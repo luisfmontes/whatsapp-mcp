@@ -50,22 +50,32 @@
     ]
   },
   "revisar": {
-    "status": "parcial",
+    "status": "ok",
     "snapshot": {
-      "head": "7593852361498cc2e9e8fc1b3d0f0086db9036fd",
+      "head": "251d43799bc63368ae7d16255502e67b306bfd06",
       "caminhos_sujos": []
     },
-    "em_voo": [
-      {
-        "agente": "revisor",
-        "tarefa": "revisao 69e21d7...HEAD",
-        "desde": "2026-09-24"
-      }
+    "em": "2026-09-24",
+    "achados": 0,
+    "base": "69e21d7ec437cd05f5e5487780f27e24f548c39b",
+    "head": "251d43799bc63368ae7d16255502e67b306bfd06",
+    "rodadas": [
+      "6e3f0b3: aprovado, 2 avisos (protocolo embrulhado; teste sem alvo) -> corrigidos em 7593852",
+      "7593852: aprovado, 3 avisos (doc comment; edit no formato BuildEdit; prova da tarefa 3 no plano) -> corrigidos em 389907e"
     ],
-    "em": "2026-09-24"
+    "delta_pos_revisao": "389907e: comentario movido e 1 subteste; mutacao da tarefa 3 re-rodada na integracao, vermelha em revoke_embrulhado_em_device_sent e edit_no_formato_do_buildedit"
   },
   "verificar": {
-    "status": "pendente"
+    "status": "ok",
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "sensor_externo": "go test -count=1 ./...",
+    "saida": "ok; TestHistorySyncRevoke 2/2, TestHistorySyncProtocol 6/6; mutacoes T1,T2,T3 vermelhas no fixture certo. Sem sync real (D4): o unico gatilho e re-parear.",
+    "tarefas": {
+      "1": "ok",
+      "2": "ok",
+      "3": "ok"
+    },
+    "em": "2026-09-24"
   },
   "fechar": {
     "status": "pendente"
