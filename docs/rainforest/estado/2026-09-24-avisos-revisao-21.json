@@ -20,7 +20,35 @@
     "em": "2026-09-24"
   },
   "executar": {
-    "status": "pendente"
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "em": "2026-09-24",
+    "commits": [
+      "a845a34",
+      "HEAD"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "saida": "ok whatsapp-client",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\tif deleted {",
+        "para": "\tif deleted && false {",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestWriteRecoveredMedia -v .",
+        "resultado": "vermelho",
+        "fixture": "TestWriteRecoveredMedia/apagada_nao_grava"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\treturn resolveToPN(client, chatJID).String()",
+        "para": "\treturn chatJID.String()",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestLocalChatKey -v .",
+        "resultado": "vermelho",
+        "fixture": "TestLocalChatKey/lid_vira_pn"
+      }
+    ]
   },
   "revisar": {
     "status": "pendente"
