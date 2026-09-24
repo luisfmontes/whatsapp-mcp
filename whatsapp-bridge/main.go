@@ -7123,25 +7123,38 @@ type pendingHistorySyncProtocolMsg struct {
 // sync entry from its key, the same logic handleHistorySync always used —
 // pulled out here so both the stub-REVOKE path and the regular StoreMessage
 // path in storeHistoryConversation share it instead of duplicating it.
-func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.MessageKey) (sender string, isFromMe bool) {
+//
+// senderJID is the full author JID the live path records in sender_jid (D8),
+// derived the same way (issue #28, D1): the key's participant in a group, the
+// chat itself in a 1:1, the account without its device part for our own
+// messages. It stays empty when the author can't be told — a participant that
+// doesn't parse, or a group entry with no participant — so the row reads as
+// unknown author (D9) instead of getting the group's own JID as its author.
+func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.MessageKey) (sender, senderJID string, isFromMe bool) {
 	if key == nil {
-		return jid.User, false
+		return jid.User, "", false
 	}
 	if key.FromMe != nil {
 		isFromMe = *key.FromMe
 	}
 	if !isFromMe && key.Participant != nil && *key.Participant != "" {
 		if pjid, err := types.ParseJID(*key.Participant); err == nil {
-			sender = resolveToPN(client, pjid).User
+			pn := resolveToPN(client, pjid)
+			sender = pn.User
+			senderJID = pn.String()
 		} else {
 			sender = *key.Participant
 		}
 	} else if isFromMe {
 		sender = client.Store.ID.User
+		senderJID = client.Store.ID.ToNonAD().String()
 	} else {
 		sender = jid.User
+		if jid.Server != types.GroupServer {
+			senderJID = resolveToPN(client, jid).String()
+		}
 	}
-	return sender, isFromMe
+	return sender, senderJID, isFromMe
 }
 
 // unwrapHistoryMessage peels the same wrappers the live path gets peeled by
@@ -7201,7 +7214,7 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 		if msg.Message.Message == nil {
 			if msgID != "" {
 				if msg.Message.GetMessageStubType() == waWeb.WebMessageInfo_REVOKE {
-					sender, isFromMe := historySyncSender(client, jid, msg.Message.Key)
+					sender, _, isFromMe := historySyncSender(client, jid, msg.Message.Key)
 					applyProtocolMessage(messageStore, chatJID, &waProto.ProtocolMessage{
 						Type: waProto.ProtocolMessage_REVOKE.Enum(),
 						Key:  &waCommon.MessageKey{ID: proto.String(msgID)},
@@ -7247,7 +7260,7 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 			continue
 		}
 
-		sender, isFromMe := historySyncSender(client, jid, msg.Message.Key)
+		sender, senderJID, isFromMe := historySyncSender(client, jid, msg.Message.Key)
 
 		err := messageStore.StoreMessage(
 			msgID,
@@ -7268,6 +7281,18 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 			logger.Warnf("Failed to store history message: %v", err)
 		} else {
 			syncedCount++
+			// #28: the author and the quote/mention context, the two writes the
+			// live path makes right after StoreMessage (D8, D1/D13) — without
+			// them a synced message can't be quoted, reacted to or revoked as
+			// someone else's, and doesn't show what it replied to.
+			if err := messageStore.StoreMessageSenderJID(msgID, chatJID, senderJID); err != nil {
+				logger.Warnf("Failed to store history message sender_jid: %v", err)
+			}
+			if ci := extractContextInfo(inner); ci != nil {
+				if err := messageStore.StoreMessageContext(msgID, chatJID, ci); err != nil {
+					logger.Warnf("Failed to store history message context: %v", err)
+				}
+			}
 			// Log successful message storage
 			if mediaType != "" {
 				logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
