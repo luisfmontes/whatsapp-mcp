@@ -2201,7 +2201,7 @@ func messagesColumnNames(t *testing.T, db *sql.DB) []string {
 // (128,377 rows) predates sender_jid/quoted_*/mentions. ensureMessagesSchema
 // is what migrates it, and has to do so without erroring when run again.
 func TestEnsureMessagesSchema(t *testing.T) {
-	newColumns := []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at"}
+	newColumns := []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at", "previous_content"}
 
 	t.Run("banco_legado_ganha_as_cinco_colunas", func(t *testing.T) {
 		db := setupLegacyMessagesStore(t)
@@ -2274,12 +2274,14 @@ func TestEnsureMessagesSchema(t *testing.T) {
 	})
 }
 
-// TestRevokedMessage covers issue #21, D1/D4/D5: a ProtocolMessage REVOKE
-// marks (id, chat_jid) as deleted for everyone — content, media reference and
-// context are cleared, the row itself stays (so the conversation keeps the
-// gap), downloads are refused even with the file already cached, a re-sync
-// carrying the original content does not resurrect it, and the scope is the
-// chat the event arrived in, not the message id alone.
+// TestRevokedMessage covers issue #21 and the soft-delete design of
+// 2026-09-24 (D1/D2): a ProtocolMessage REVOKE marks (id, chat_jid) as
+// deleted for everyone, but content, media reference and context all stay in
+// the row — and the cached file on disk stays too — for TestSoftDelete's
+// get_deleted_message path (D3) to read later. Normal reads still hide it:
+// downloads are refused even with the file already cached, a re-sync
+// carrying the original content does not resurrect visibility, and the scope
+// is the chat the event arrived in, not the message id alone.
 func TestRevokedMessage(t *testing.T) {
 	const chatJID = "grupo-de-teste@g.us"
 	const messageID = "MSG-REVOKE-1"
@@ -2374,7 +2376,7 @@ func TestRevokedMessage(t *testing.T) {
 
 		revoke(t, store, chatJID, baseTS.Add(time.Minute))
 
-		ok, _, _, _, err := downloadMedia(nil, store, messageID, chatJID)
+		ok, _, _, _, err := downloadMedia(nil, store, messageID, chatJID, false)
 		if err == nil {
 			t.Fatal("downloadMedia: expected an error, got nil")
 		}
@@ -2384,8 +2386,10 @@ func TestRevokedMessage(t *testing.T) {
 		if !strings.Contains(err.Error(), "deleted by the sender") {
 			t.Errorf("downloadMedia error = %q, want it to say the message was deleted by the sender", err.Error())
 		}
-		if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
-			t.Errorf("cache file still exists after revoke: stat err = %v", statErr)
+		// D1 (soft delete, 2026-09-24): the cache file is no longer removed on
+		// revoke — it stays for get_deleted_message's download=true (D3).
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			t.Errorf("cache file missing after revoke: stat err = %v, want it to still exist", statErr)
 		}
 	})
 
@@ -2477,6 +2481,204 @@ func TestRevokedMessage(t *testing.T) {
 			if !afterSet[col] {
 				t.Errorf("column %q missing after ensureMessagesSchema; got %v", col, after)
 			}
+		}
+	})
+}
+
+// TestSoftDelete covers task 1 of the soft-delete design
+// (docs/rainforest/planos/2026-09-24-soft-delete.md, D1/D2): a revoked
+// message keeps its content, media reference and cached file in the store —
+// TestRevokedMessage already covers that shape in detail — and this test
+// is the one that walks every normal read path (listMessages,
+// getMessageContext, the text search, the last_message of listChats/getChat,
+// and citing) and checks each one still hides it.
+func TestSoftDelete(t *testing.T) {
+	const chatJID = "grupo-soft-delete@g.us"
+	const messageID = "MSG-SOFT-DELETE-1"
+	baseTS := time.Date(2026, 9, 24, 11, 0, 0, 0, time.UTC)
+
+	// newFixture stores one image message with a caption and writes its
+	// cached file to disk — the shape D1 says a revoke must leave untouched.
+	newFixture := func(t *testing.T) *MessageStore {
+		t.Helper()
+		store := setupPollStore(t)
+		if err := store.StoreChat(chatJID, "Grupo soft delete", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda apagavel", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		if err := os.MkdirAll(chatDir, 0755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		cachePath, err := safeMediaPath(chatDir, messageID, "foto.jpg")
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		if err := os.WriteFile(cachePath, []byte("bytes da foto em cache"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return store
+	}
+
+	revoke := func(t *testing.T, store *MessageStore, at time.Time) {
+		t.Helper()
+		pm := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, chatJID, pm, at, waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+	}
+
+	t.Run("conteudo_guardado_no_banco", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, baseTS.Add(time.Minute))
+
+		var content string
+		var mediaKey []byte
+		if err := store.db.QueryRow(
+			"SELECT content, media_key FROM messages WHERE id = ? AND chat_jid = ?", messageID, chatJID,
+		).Scan(&content, &mediaKey); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if content != "legenda apagavel" {
+			t.Errorf("content = %q, want the original caption still in the row", content)
+		}
+		if len(mediaKey) == 0 {
+			t.Error("media_key is empty, want the original media key still in the row")
+		}
+
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		cachePath, err := safeMediaPath(chatDir, messageID, "foto.jpg")
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			t.Errorf("cache file missing after revoke: %v, want it to still exist", statErr)
+		}
+	})
+
+	t.Run("leituras_escondem", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, baseTS.Add(time.Minute))
+
+		listResp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(listResp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1", len(listResp.Messages))
+		}
+		if msg := listResp.Messages[0]; msg.Content != revokedPlaceholder || msg.MediaType != nil {
+			t.Errorf("listMessages did not hide the deleted message: %+v", msg)
+		}
+
+		ctxResp, found, err := getMessageContext(store.db, MessageContextRequest{MessageID: messageID})
+		if err != nil {
+			t.Fatalf("getMessageContext: %v", err)
+		}
+		if !found {
+			t.Fatal("getMessageContext: message not found")
+		}
+		if ctxResp.Message.Content != revokedPlaceholder || ctxResp.Message.MediaType != nil {
+			t.Errorf("getMessageContext did not hide the deleted message: %+v", ctxResp.Message)
+		}
+	})
+
+	t.Run("busca_nao_casa_com_apagada", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, baseTS.Add(time.Minute))
+
+		// The text search calls unaccent(), which only the read handle carries
+		// on the CGO driver (Linux/macOS) — the same handle the endpoint uses.
+		readDB, err := openUnaccentMessagesDB()
+		if err != nil {
+			t.Fatalf("openUnaccentMessagesDB: %v", err)
+		}
+		defer readDB.Close()
+
+		resp, err := listMessages(readDB, MessagesRequest{ChatJID: proto.String(chatJID), Query: proto.String("apagavel")})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 0 {
+			t.Fatalf("got %d messages matching the deleted caption, want 0: %+v", len(resp.Messages), resp.Messages)
+		}
+	})
+
+	t.Run("last_message_esconde", func(t *testing.T) {
+		store := newFixture(t)
+		revoke(t, store, baseTS.Add(time.Minute))
+
+		chatsResp, err := listChats(store.db, ChatsRequest{})
+		if err != nil {
+			t.Fatalf("listChats: %v", err)
+		}
+		var chatFromList *APIChat
+		for i := range chatsResp.Chats {
+			if chatsResp.Chats[i].JID == chatJID {
+				chatFromList = &chatsResp.Chats[i]
+			}
+		}
+		if chatFromList == nil {
+			t.Fatalf("chat %s not found in listChats: %+v", chatJID, chatsResp.Chats)
+		}
+		if chatFromList.LastMessage == nil || *chatFromList.LastMessage != revokedPlaceholder {
+			t.Errorf("listChats last_message = %v, want %q", chatFromList.LastMessage, revokedPlaceholder)
+		}
+
+		chatResp, err := getChat(store.db, ChatRequest{ChatJID: chatJID})
+		if err != nil {
+			t.Fatalf("getChat: %v", err)
+		}
+		if chatResp.Chat == nil {
+			t.Fatal("getChat: chat not found")
+		}
+		if chatResp.Chat.LastMessage == nil || *chatResp.Chat.LastMessage != revokedPlaceholder {
+			t.Errorf("getChat last_message = %v, want %q", chatResp.Chat.LastMessage, revokedPlaceholder)
+		}
+
+		contactResp, err := getContactChats(store.db, ContactChatsRequest{JID: "autor-a"})
+		if err != nil {
+			t.Fatalf("getContactChats: %v", err)
+		}
+		if len(contactResp.Chats) != 1 {
+			t.Fatalf("getContactChats: got %d chats, want 1: %+v", len(contactResp.Chats), contactResp.Chats)
+		}
+		if lm := contactResp.Chats[0].LastMessage; lm == nil || *lm != revokedPlaceholder {
+			t.Errorf("getContactChats last_message = %v, want %q", lm, revokedPlaceholder)
+		}
+	})
+
+	t.Run("citar_apagada_recusa", func(t *testing.T) {
+		store := newFixture(t)
+		// A known author, so the unknown-author refusal (D9) cannot be what
+		// answers here — only the deleted-message one can.
+		if err := store.StoreMessageSenderJID(messageID, chatJID, "autor-a@s.whatsapp.net"); err != nil {
+			t.Fatalf("StoreMessageSenderJID: %v", err)
+		}
+		if _, errMsg, _ := buildQuoteContextInfo(store, messageID, chatJID); errMsg != "" {
+			t.Fatalf("before the revoke the quote must be accepted, got %q", errMsg)
+		}
+		revoke(t, store, baseTS.Add(time.Minute))
+
+		ctxInfo, errMsg, status := buildQuoteContextInfo(store, messageID, chatJID)
+		if errMsg == "" {
+			t.Fatalf("buildQuoteContextInfo: expected a refusal citing a deleted message, got ctxInfo=%v", ctxInfo)
+		}
+		if ctxInfo != nil {
+			t.Errorf("ctxInfo = %v, want nil on refusal", ctxInfo)
+		}
+		if status < 400 || status >= 500 {
+			t.Errorf("status = %d, want 4xx; msg=%q", status, errMsg)
+		}
+		if !strings.Contains(errMsg, "deleted by the sender") {
+			t.Errorf("errMsg = %q, want the deleted-message refusal", errMsg)
 		}
 	})
 }
@@ -2709,13 +2911,68 @@ func TestEditedMessage(t *testing.T) {
 	})
 }
 
-// TestHistorySyncRevoke covers D1/D2/D4 (issue #23): a REVOKE stub the
-// history sync delivers (a WebMessageInfo with MessageStubType REVOKE and no
-// waE2E message) revokes the message it targets through the same
-// applyProtocolMessage path the live event uses — including dropping the
-// cached media — and, when the store never saw the target (a fresh
-// database), leaves a tombstone row instead of silently dropping the
-// deletion.
+// TestEditPreservesOriginal covers task 2 of the soft-delete design
+// (docs/rainforest/planos/2026-09-24-soft-delete.md, D4): the first edit
+// stamps previous_content with the pre-edit text, and a second edit must not
+// overwrite that original with the intermediate text —
+// COALESCE(previous_content, content) only fires while previous_content is
+// still NULL.
+func TestEditPreservesOriginal(t *testing.T) {
+	const chatJID = "grupo-preserva-original@g.us"
+	const messageID = "MSG-PRESERVA-ORIGINAL-1"
+	baseTS := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	newFixture := func(t *testing.T) *MessageStore {
+		t.Helper()
+		store := setupPollStore(t)
+		if err := store.StoreChat(chatJID, "Grupo preserva original", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "texto original", baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		return store
+	}
+
+	edit := func(t *testing.T, store *MessageStore, newText string, at time.Time) {
+		t.Helper()
+		pm := &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String(messageID)},
+			EditedMessage: &waProto.Message{Conversation: proto.String(newText)},
+		}
+		applyProtocolMessage(store, chatJID, pm, at, waLog.Noop)
+	}
+
+	t.Run("duas_edicoes_guardam_o_original", func(t *testing.T) {
+		store := newFixture(t)
+		edit(t, store, "primeira edicao", baseTS.Add(time.Minute))
+		edit(t, store, "segunda edicao", baseTS.Add(2*time.Minute))
+
+		var content string
+		var previousContent sql.NullString
+		if err := store.db.QueryRow(
+			"SELECT content, previous_content FROM messages WHERE id = ? AND chat_jid = ?", messageID, chatJID,
+		).Scan(&content, &previousContent); err != nil {
+			t.Fatalf("query row: %v", err)
+		}
+		if content != "segunda edicao" {
+			t.Errorf("content = %q, want %q (the latest edit)", content, "segunda edicao")
+		}
+		if !previousContent.Valid || previousContent.String != "texto original" {
+			t.Errorf("previous_content = %v, want %q (the text before the FIRST edit)", previousContent, "texto original")
+		}
+	})
+}
+
+// TestHistorySyncRevoke covers D1/D2/D4 (issue #23) and the soft-delete
+// design of 2026-09-24: a REVOKE stub the history sync delivers (a
+// WebMessageInfo with MessageStubType REVOKE and no waE2E message) revokes
+// the message it targets through the same applyProtocolMessage path the live
+// event uses — content and cached media stay (D1), only hidden from normal
+// reads — and, when the store never saw the target (a fresh database), leaves
+// a tombstone row instead of silently dropping the deletion.
 func TestHistorySyncRevoke(t *testing.T) {
 	const chatJID = "grupo-history-revoke@g.us"
 	baseTS := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
@@ -2777,8 +3034,10 @@ func TestHistorySyncRevoke(t *testing.T) {
 		if msg.MediaType != nil {
 			t.Errorf("MediaType = %q, want nil", *msg.MediaType)
 		}
-		if _, statErr := os.Stat(cachePath); !os.IsNotExist(statErr) {
-			t.Errorf("cache file still exists after revoke: stat err = %v", statErr)
+		// D1 (soft delete, 2026-09-24): the cache file is no longer removed on
+		// revoke — it stays for get_deleted_message's download=true (D3).
+		if _, statErr := os.Stat(cachePath); statErr != nil {
+			t.Errorf("cache file missing after revoke: stat err = %v, want it to still exist", statErr)
 		}
 	})
 
@@ -2808,6 +3067,279 @@ func TestHistorySyncRevoke(t *testing.T) {
 		}
 		if !msg.Revoked {
 			t.Error("Revoked = false, want true")
+		}
+	})
+}
+
+// TestDeletedMessageEndpoint covers task 3 of the soft-delete design
+// (docs/rainforest/planos/2026-09-24-soft-delete.md, D3): getDeletedMessage
+// is the one explicit path back to what a sender deleted or what a message
+// said before it was edited, and downloadMedia's allowRevoked exception is
+// what lets its download=true actually fetch the cached bytes of a revoked
+// message.
+func TestDeletedMessageEndpoint(t *testing.T) {
+	baseTS := time.Date(2026, 9, 24, 13, 0, 0, 0, time.UTC)
+
+	// storeRevokedText saves a text message and revokes it — no media at all.
+	storeRevokedText := func(t *testing.T, store *MessageStore, chatJID, messageID, text string) {
+		t.Helper()
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", text, baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+	}
+
+	t.Run("download_de_texto_apagado_mantem_o_conteudo", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-texto@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-TEXTO"
+		storeRevokedText(t, store, chatJID, messageID, "texto que a pessoa apagou")
+
+		body := strings.NewReader(`{"message_id":"` + messageID + `","chat_jid":"` + chatJID + `","download":true}`)
+		rec := httptest.NewRecorder()
+		handleDeletedMessage(nil, store)(rec, httptest.NewRequest(http.MethodPost, "/api/deleted_message", body))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp DeletedMessageResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		if resp.Content != "texto que a pessoa apagou" {
+			t.Errorf("Content = %q, want the original text even though the download failed", resp.Content)
+		}
+		if resp.Downloaded || resp.DownloadError == "" {
+			t.Errorf("Downloaded = %v, DownloadError = %q; want false and the reason", resp.Downloaded, resp.DownloadError)
+		}
+	})
+
+	t.Run("banco_legado_com_colunas_text", func(t *testing.T) {
+		// The real store predates revoked_at/edited_at, so ensureMessagesSchema
+		// added them as TEXT and the driver reads them back as strings — the
+		// shape that broke /api/deleted_message on the live bridge.
+		db := setupLegacyMessagesStore(t)
+		if err := ensureMessagesSchema(db); err != nil {
+			t.Fatalf("ensureMessagesSchema: %v", err)
+		}
+		store := &MessageStore{db: db}
+		const chatJID = "grupo-deleted-endpoint-legado@g.us"
+		if _, err := db.Exec(`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type) VALUES
+			('MSG-LEGADO-APAGADA', ?, 'autor-a', 'legenda legada', ?, 0, 'image'),
+			('MSG-LEGADO-EDITADA', ?, 'autor-a', 'texto legado', ?, 0, '')`,
+			chatJID, baseTS, chatJID, baseTS); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String("MSG-LEGADO-APAGADA")},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String("MSG-LEGADO-EDITADA")},
+			EditedMessage: &waProto.Message{Conversation: proto.String("texto legado editado")},
+		}, baseTS.Add(2*time.Minute), waLog.Noop)
+
+		resp, found, err := getDeletedMessage(db, DeletedMessageRequest{MessageID: "MSG-LEGADO-APAGADA", ChatJID: chatJID})
+		if err != nil || !found {
+			t.Fatalf("getDeletedMessage (revoked) = found %v, err %v", found, err)
+		}
+		if resp.Content != "legenda legada" || resp.RevokedAt == nil {
+			t.Errorf("revoked resp = %+v, want the original caption and revoked_at", resp)
+		} else if _, perr := time.Parse(time.RFC3339, *resp.RevokedAt); perr != nil {
+			t.Errorf("revoked_at = %q, want RFC3339: %v", *resp.RevokedAt, perr)
+		}
+
+		resp, found, err = getDeletedMessage(db, DeletedMessageRequest{MessageID: "MSG-LEGADO-EDITADA", ChatJID: chatJID})
+		if err != nil || !found {
+			t.Fatalf("getDeletedMessage (edited) = found %v, err %v", found, err)
+		}
+		if resp.PreviousContent == nil || *resp.PreviousContent != "texto legado" || resp.EditedAt == nil {
+			t.Errorf("edited resp = %+v, want previous_content and edited_at", resp)
+		}
+	})
+
+	t.Run("horario_com_leitura_monotonica", func(t *testing.T) {
+		// What the real "trabalho" store holds for a revoke made through
+		// /api/revoke before the Round(0): time.Time.String() of a time.Now().
+		got := storedTimeToPtr(sql.NullString{String: "2026-09-24 15:32:41.5852521 -0300 -03 m=+58.988151001", Valid: true})
+		if got == nil || *got != "2026-09-24T15:32:41-03:00" {
+			t.Errorf("storedTimeToPtr = %v, want %q", got, "2026-09-24T15:32:41-03:00")
+		}
+	})
+
+	t.Run("mediaretry_recusa_apagada", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-retry@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-RETRY"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+
+		// The media keys survive the soft delete, so only the explicit check
+		// stops the retry receipt from going out (client stays unused).
+		err := requestMediaRetry(nil, store, messageID, chatJID)
+		if err == nil || !strings.Contains(err.Error(), "deleted by the sender") {
+			t.Fatalf("requestMediaRetry err = %v, want the deleted-message refusal", err)
+		}
+	})
+
+	t.Run("apagada_devolve_original", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-1@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-1"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda da foto apagada", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		pm := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, chatJID, pm, baseTS.Add(time.Minute), waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+
+		resp, found, err := getDeletedMessage(store.db, DeletedMessageRequest{MessageID: messageID, ChatJID: chatJID})
+		if err != nil {
+			t.Fatalf("getDeletedMessage: %v", err)
+		}
+		if !found {
+			t.Fatal("getDeletedMessage: found = false, want true for a revoked message")
+		}
+		if resp.Content != "legenda da foto apagada" {
+			t.Errorf("Content = %q, want the original caption", resp.Content)
+		}
+		if resp.RevokedAt == nil {
+			t.Error("RevokedAt = nil, want it set")
+		}
+		if resp.MediaType == nil || *resp.MediaType != "image" {
+			t.Errorf("MediaType = %v, want %q", resp.MediaType, "image")
+		}
+	})
+
+	t.Run("editada_devolve_anterior", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-2@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-2"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "texto original", baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		pm := &waProto.ProtocolMessage{
+			Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
+			Key:           &waCommon.MessageKey{ID: proto.String(messageID)},
+			EditedMessage: &waProto.Message{Conversation: proto.String("texto editado")},
+		}
+		applyProtocolMessage(store, chatJID, pm, baseTS.Add(time.Minute), waLog.Noop)
+
+		resp, found, err := getDeletedMessage(store.db, DeletedMessageRequest{MessageID: messageID, ChatJID: chatJID})
+		if err != nil {
+			t.Fatalf("getDeletedMessage: %v", err)
+		}
+		if !found {
+			t.Fatal("getDeletedMessage: found = false, want true for an edited message")
+		}
+		if resp.Content != "texto editado" {
+			t.Errorf("Content = %q, want the latest edit", resp.Content)
+		}
+		if resp.PreviousContent == nil || *resp.PreviousContent != "texto original" {
+			t.Errorf("PreviousContent = %v, want %q", resp.PreviousContent, "texto original")
+		}
+		if resp.EditedAt == nil {
+			t.Error("EditedAt = nil, want it set")
+		}
+	})
+
+	t.Run("comum_recusada", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-3@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-3"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "mensagem comum", baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+
+		_, found, err := getDeletedMessage(store.db, DeletedMessageRequest{MessageID: messageID, ChatJID: chatJID})
+		if err != nil {
+			t.Fatalf("getDeletedMessage: %v", err)
+		}
+		if found {
+			t.Error("found = true, want false for a message that was neither deleted nor edited")
+		}
+	})
+
+	t.Run("download_da_apagada_pela_consulta", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-4@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-4"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "legenda", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+		if err := os.MkdirAll(chatDir, 0755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		cachePath, err := safeMediaPath(chatDir, messageID, "foto.jpg")
+		if err != nil {
+			t.Fatalf("safeMediaPath: %v", err)
+		}
+		if err := os.WriteFile(cachePath, []byte("bytes da foto em cache"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		wantPath, err := filepath.Abs(cachePath)
+		if err != nil {
+			t.Fatalf("filepath.Abs: %v", err)
+		}
+		pm := &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}
+		if !applyProtocolMessage(store, chatJID, pm, baseTS.Add(time.Minute), waLog.Noop) {
+			t.Fatalf("applyProtocolMessage returned false for a REVOKE")
+		}
+
+		ok, _, _, path, err := downloadMedia(nil, store, messageID, chatJID, true)
+		if err != nil {
+			t.Fatalf("downloadMedia(allowRevoked=true): %v", err)
+		}
+		if !ok || path != wantPath {
+			t.Errorf("downloadMedia(allowRevoked=true) ok=%v path=%q, want ok=true path=%q", ok, path, wantPath)
+		}
+
+		if _, _, _, _, err := downloadMedia(nil, store, messageID, chatJID, false); err == nil || !strings.Contains(err.Error(), "deleted by the sender") {
+			t.Errorf("downloadMedia(allowRevoked=false) err = %v, want a refusal saying the message was deleted by the sender", err)
 		}
 	})
 }

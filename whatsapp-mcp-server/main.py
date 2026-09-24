@@ -14,6 +14,7 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
+    get_deleted_message as whatsapp_get_deleted_message,
     create_group as whatsapp_create_group,
     leave_group as whatsapp_leave_group,
     mark_chat_read as whatsapp_mark_chat_read,
@@ -352,6 +353,51 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
         "hint": "The desktop client usually saves received media to the local "
                 "downloads folder - look for the file there before retrying."
     }
+
+@mcp.tool()
+def get_deleted_message(message_id: str, chat_jid: str, download: bool = False, account: Optional[str] = None) -> Dict[str, Any]:
+    """See what a sender deleted, or what a message said before it was edited.
+
+    This is the ONLY way to see a message's withdrawn content: list_messages,
+    get_message_context and every other normal read show "[mensagem apagada]"
+    for a deleted message and only the latest text for an edited one. Use
+    this tool only when the user explicitly asks to see what was deleted or
+    what a message said before an edit - never as a substitute for the
+    normal reads, and never on your own initiative.
+
+    Args:
+        message_id: The ID of the message to look up
+        chat_jid: The JID of the chat containing the message
+        download: If True, also download the message's media - the only
+            path that can fetch media of a deleted message
+        account: Optional account alias to use (defaults to primary account)
+
+    Returns:
+        On success: success=True plus content, previous_content, media_type,
+        revoked_at, edited_at and, when download=True, file_path. On failure
+        (e.g. the message was neither deleted nor edited): success=False and
+        a message explaining why.
+    """
+    result, status_message = whatsapp_get_deleted_message(message_id, chat_jid, download=download, account=account)
+
+    if result is None:
+        return {
+            "success": False,
+            "message": status_message,
+        }
+
+    response = {
+        "success": True,
+        "content": result.get("content"),
+        "previous_content": result.get("previous_content"),
+        "media_type": result.get("media_type"),
+        "revoked_at": result.get("revoked_at"),
+        "edited_at": result.get("edited_at"),
+    }
+    if download:
+        response["downloaded"] = result.get("downloaded", False)
+        response["file_path"] = result.get("path")
+    return response
 
 @mcp.tool()
 def create_group(

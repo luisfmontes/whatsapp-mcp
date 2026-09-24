@@ -286,6 +286,7 @@ func NewMessageStore() (*MessageStore, error) {
 			mentions TEXT,
 			revoked_at TIMESTAMP,
 			edited_at TIMESTAMP,
+			previous_content TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -362,8 +363,8 @@ func NewMessageStore() (*MessageStore, error) {
 
 // ensureMessagesSchema adds to an existing messages table the columns
 // introduced after the CREATE TABLE block above (sender_jid, quoted_message_id,
-// quoted_sender, quoted_content, mentions, revoked_at, edited_at), for databases that were created
-// before those columns existed. Idempotent: reads the table's current columns
+// quoted_sender, quoted_content, mentions, revoked_at, edited_at, previous_content),
+// for databases that were created before those columns existed. Idempotent: reads the table's current columns
 // via PRAGMA table_info and only emits ALTER TABLE ADD COLUMN for the ones
 // still missing, so running it again (or against a brand-new database that
 // already has them from CREATE TABLE) is a no-op.
@@ -391,7 +392,7 @@ func ensureMessagesSchema(db *sql.DB) error {
 	}
 	rows.Close()
 
-	for _, col := range []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at"} {
+	for _, col := range []string{"sender_jid", "quoted_message_id", "quoted_sender", "quoted_content", "mentions", "revoked_at", "edited_at", "previous_content"} {
 		if existing[col] {
 			continue
 		}
@@ -611,39 +612,28 @@ func nullIfEmpty(s string) interface{} {
 }
 
 // MarkMessageRevoked records that the message (id, chat_jid) was deleted for
-// everyone (issue #21). What the sender took back goes with it: content,
-// media reference and keys, and the quoted/mentions context are cleared, and
-// media_type is set to NULL so the transcription sweep and download_media stop
-// treating the row as media. The row itself stays, so the conversation keeps
-// the gap in place and the reader can tell a message was there. Returns the
-// stored filename (for removing the cached media file) and whether a row that
-// was not already revoked matched — a revoke for a message this store never
-// saw is a no-op, not an error.
-func (store *MessageStore) MarkMessageRevoked(id, chatJID string, revokedAt time.Time) (filename string, found bool, err error) {
-	var filenameNull sql.NullString
-	err = store.db.QueryRow(
-		"SELECT filename FROM messages WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
-		id, chatJID,
-	).Scan(&filenameNull)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	_, err = store.db.Exec(`
-		UPDATE messages SET
-			content = '', media_type = NULL, filename = NULL, url = NULL,
-			media_key = NULL, file_sha256 = NULL, file_enc_sha256 = NULL, file_length = NULL,
-			quoted_message_id = NULL, quoted_sender = NULL, quoted_content = NULL, mentions = NULL,
-			revoked_at = ?
-		WHERE id = ? AND chat_jid = ?`,
+// everyone (issue #21). Soft delete (2026-09-24, D1): what the sender took
+// back is no longer erased — content, media reference and keys, and the
+// quoted/mentions context all stay in the row, and the cached file on disk is
+// left alone too. Only revoked_at is stamped; every normal read path hides
+// what's behind it (applyMessageFlags, the search filter, the last_message
+// CASE), and D3's explicit get_deleted_message tool is the one place that
+// still reads it. Returns whether a row that was not already revoked
+// matched — a revoke for a message this store never saw is a no-op, not an
+// error.
+func (store *MessageStore) MarkMessageRevoked(id, chatJID string, revokedAt time.Time) (found bool, err error) {
+	res, err := store.db.Exec(
+		"UPDATE messages SET revoked_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
 		revokedAt, id, chatJID,
 	)
 	if err != nil {
-		return "", false, err
+		return false, err
 	}
-	return filenameNull.String, true, nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // StoreRevokedTombstone leaves a placeholder row for a history-sync REVOKE
@@ -665,13 +655,17 @@ func (store *MessageStore) StoreRevokedTombstone(id, chatJID, sender string, rev
 
 // ApplyMessageEdit replaces the content of (id, chat_jid) with the edited
 // text and stamps edited_at (issue #21). A revoked row is not touched, and an
-// empty newContent is a no-op — an edit never blanks a message.
+// empty newContent is a no-op — an edit never blanks a message. D4 (soft
+// delete, 2026-09-24): before the swap, previous_content is set to the
+// content this row already had — but only the first time (COALESCE), so a
+// second and later edit does not overwrite the original with an
+// intermediate edit; get_deleted_message (D3) is the only place that reads it.
 func (store *MessageStore) ApplyMessageEdit(id, chatJID, newContent string, editedAt time.Time) (bool, error) {
 	if newContent == "" {
 		return false, nil
 	}
 	res, err := store.db.Exec(
-		"UPDATE messages SET content = ?, edited_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
+		"UPDATE messages SET previous_content = COALESCE(previous_content, content), content = ?, edited_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL",
 		newContent, editedAt, id, chatJID,
 	)
 	if err != nil {
@@ -710,19 +704,14 @@ func applyProtocolMessage(messageStore *MessageStore, chatJID string, pm *waProt
 		if targetID == "" {
 			return true
 		}
-		filename, found, err := messageStore.MarkMessageRevoked(targetID, chatJID, at)
+		found, err := messageStore.MarkMessageRevoked(targetID, chatJID, at)
 		if err != nil {
 			logger.Warnf("Failed to mark message %s as revoked: %v", targetID, err)
 			return true
 		}
-		if found && filename != "" {
-			chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
-			if p, err := safeMediaPath(chatDir, targetID, filename); err == nil {
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					logger.Warnf("Failed to remove cached media of revoked message %s: %v", targetID, err)
-				}
-			}
-		}
+		// D1 (soft delete, 2026-09-24): the cached file on disk is left alone —
+		// no os.Remove here anymore. It's what get_deleted_message's
+		// download=true (task 3) serves back.
 		if found {
 			fmt.Printf("[%s] message %s in %s was deleted by the sender\n", at.Format("2006-01-02 15:04:05"), targetID, chatJID)
 		}
@@ -746,16 +735,21 @@ func applyProtocolMessage(messageStore *MessageStore, chatJID string, pm *waProt
 // are "not found for this chat", which is the refusal in effect either way
 // (D12, and the mismatched-chat refusal). senderJID/sender are returned as
 // stored (possibly empty), for the caller to apply the D9 unknown-author check.
-func (store *MessageStore) GetMessageForQuote(id, chatJID string) (senderJID, sender, content string, err error) {
+// revoked reports whether the row is soft-deleted (D2): this method also
+// backs resolveActionParticipant (task 6), which must keep resolving the
+// author of a since-revoked message for react/revoke — the refusal on a
+// revoked target belongs only to the citation caller (buildQuoteContextInfo),
+// which checks this return itself.
+func (store *MessageStore) GetMessageForQuote(id, chatJID string) (senderJID, sender, content string, revoked bool, err error) {
 	var senderJIDNull, senderNull, contentNull sql.NullString
 	err = store.db.QueryRow(
-		"SELECT sender_jid, sender, content FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT sender_jid, sender, content, revoked_at IS NOT NULL FROM messages WHERE id = ? AND chat_jid = ?",
 		id, chatJID,
-	).Scan(&senderJIDNull, &senderNull, &contentNull)
+	).Scan(&senderJIDNull, &senderNull, &contentNull, &revoked)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
-	return senderJIDNull.String, senderNull.String, contentNull.String, nil
+	return senderJIDNull.String, senderNull.String, contentNull.String, revoked, nil
 }
 
 // Get messages from a chat
@@ -965,7 +959,7 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 	if messageStore == nil {
 		return nil, "quoted_message_id given but no message store is available", http.StatusInternalServerError
 	}
-	senderJID, sender, content, err := messageStore.GetMessageForQuote(quotedMessageID, chatJID)
+	senderJID, sender, content, revoked, err := messageStore.GetMessageForQuote(quotedMessageID, chatJID)
 	if err == sql.ErrNoRows {
 		// D12 (id doesn't exist) and the mismatched-chat refusal share this
 		// path: GetMessageForQuote scopes the lookup by chat_jid, so a
@@ -974,6 +968,14 @@ func buildQuoteContextInfo(messageStore *MessageStore, quotedMessageID, chatJID 
 	}
 	if err != nil {
 		return nil, fmt.Sprintf("Error looking up quoted_message_id: %v", err), http.StatusInternalServerError
+	}
+	// D2 (soft delete): citing a revoked message would fill QuotedMessage with
+	// content the sender took back — refused here, the one place this lookup
+	// is used to build an outbound quote. resolveActionParticipant (task 6)
+	// reuses GetMessageForQuote for react/revoke and does not apply this
+	// check, on purpose.
+	if revoked {
+		return nil, "quoted_message_id refers to a message that was deleted by the sender", http.StatusBadRequest
 	}
 	if isUnknownAuthor(senderJID, sender, chatJID) {
 		return nil, "quoted " + unknownAuthorMessage, http.StatusBadRequest
@@ -2611,7 +2613,7 @@ func resolveActionParticipant(messageStore *MessageStore, messageID, chatJID str
 	if messageStore == nil {
 		return types.JID{}, "no message store available", http.StatusInternalServerError
 	}
-	senderJID, sender, _, err := messageStore.GetMessageForQuote(messageID, chatJID)
+	senderJID, sender, _, _, err := messageStore.GetMessageForQuote(messageID, chatJID)
 	if err == sql.ErrNoRows {
 		return types.JID{}, unknownAuthorMessage, http.StatusBadRequest
 	}
@@ -2720,7 +2722,7 @@ func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.Handl
 				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
 				Key:           &waProto.MessageKey{ID: proto.String(req.MessageID)},
 				EditedMessage: newContent,
-			}, time.Now(), waLog.Noop)
+			}, time.Now().Round(0), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s edited", req.MessageID)})
@@ -2779,7 +2781,7 @@ func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.Han
 			applyProtocolMessage(messageStore, localChatKey(client, chatJID), &waProto.ProtocolMessage{
 				Type: waProto.ProtocolMessage_REVOKE.Enum(),
 				Key:  &waProto.MessageKey{ID: proto.String(req.MessageID)},
-			}, time.Now(), waLog.Noop)
+			}, time.Now().Round(0), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s revoked", req.MessageID)})
@@ -4490,7 +4492,10 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 }
 
 // Function to download media from a message
-func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) (bool, string, string, string, error) {
+// downloadMedia serves the media of a stored message. allowRevoked lets one
+// caller through the D2 refusal: get_deleted_message's download=true (D3,
+// task 3) — every other caller passes false and keeps being refused.
+func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string, allowRevoked bool) (bool, string, string, string, error) {
 	// Query the database for the message
 	var mediaType, filename, url string
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
@@ -4503,10 +4508,12 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 	// Issue #21: the sender deleted it for everyone — refuse before anything
 	// else, including the local-cache hit below.
-	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil {
-		return false, "", "", "", fmt.Errorf("failed to check message: %v", err)
-	} else if revoked {
-		return false, "", "", "", fmt.Errorf("message was deleted by the sender")
+	if !allowRevoked {
+		if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil {
+			return false, "", "", "", fmt.Errorf("failed to check message: %v", err)
+		} else if revoked {
+			return false, "", "", "", fmt.Errorf("message was deleted by the sender")
+		}
 	}
 
 	// Get media info from the database
@@ -4712,6 +4719,17 @@ func (m *APIMessage) applyMessageFlags(revoked, edited bool) {
 	}
 }
 
+// lastMessageCaseSQL is the CASE expression for the last_message column of
+// listChats, getContactChats, getChat and getDirectChatByContact (D2, soft
+// delete): those four build their own SELECT by hand — unlike the
+// message-listing endpoints, which go through scanAPIMessageRow/
+// applyMessageFlags — so each needs its own guard against showing a revoked
+// row's real content. col is the SQL alias/table name the messages row is
+// selected under (e.g. "messages" or "m").
+func lastMessageCaseSQL(col string) string {
+	return fmt.Sprintf("CASE WHEN %s.revoked_at IS NOT NULL THEN '%s' ELSE %s.content END", col, revokedPlaceholder, col)
+}
+
 // APIChat is the wire shape for a chat row.
 type APIChat struct {
 	JID             string  `json:"jid"`
@@ -4819,6 +4837,33 @@ func getContactNameFromStore(phone string) string {
 }
 
 // nullTimeToPtr renders a sql.NullTime as an RFC3339 string pointer, or nil.
+// storedTimeToPtr renders a timestamp read back as text (see getDeletedMessage)
+// as RFC3339, like nullTimeToPtr does for a scanned time. The layouts are the
+// ones the SQLite drivers write for a time.Time parameter; a value in none of
+// them is returned as stored rather than dropped.
+func storedTimeToPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	// A time.Now() written before the Round(0) in handleRevoke/handleEdit
+	// carries Go's monotonic reading in its String() form (" m=+58.98...").
+	raw := v.String
+	if i := strings.Index(raw, " m="); i >= 0 {
+		raw = raw[:i]
+	}
+	// The first layout is time.Time.String(), which the Windows driver
+	// (modernc) writes into a TEXT column — the real store holds e.g.
+	// "2026-09-24 15:32:41 -0300 -03".
+	for _, layout := range []string{"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999-07:00", time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			s := t.Format(time.RFC3339)
+			return &s
+		}
+	}
+	s := v.String
+	return &s
+}
+
 func nullTimeToPtr(t sql.NullTime) *string {
 	if !t.Valid {
 		return nil
@@ -4952,16 +4997,16 @@ func listChats(db *sql.DB, req ChatsRequest) (ChatsResponse, error) {
 		FROM chats
 	`
 	if includeLastMessage {
-		selectClause = `
+		selectClause = fmt.Sprintf(`
 			SELECT
 				chats.jid,
 				chats.name,
 				chats.last_message_time,
-				messages.content as last_message,
+				%s as last_message,
 				messages.sender as last_sender,
 				messages.is_from_me as last_is_from_me
 			FROM chats
-		`
+		`, lastMessageCaseSQL("messages"))
 	}
 	queryParts := []string{selectClause}
 	if includeLastMessage {
@@ -5111,7 +5156,7 @@ func listMessages(db *sql.DB, req MessagesRequest) (MessagesResponse, error) {
 		params = append(params, *req.ChatJID)
 	}
 	if req.Query != nil && *req.Query != "" {
-		whereClauses = append(whereClauses, "unaccent(messages.content) LIKE unaccent(?)")
+		whereClauses = append(whereClauses, "unaccent(messages.content) LIKE unaccent(?) AND messages.revoked_at IS NULL")
 		params = append(params, "%"+*req.Query+"%")
 	}
 	if len(whereClauses) > 0 {
@@ -5372,12 +5417,12 @@ func getContactChats(db *sql.DB, req ContactChatsRequest) (ChatsResponse, error)
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := db.Query(`
+	rows, err := db.Query(fmt.Sprintf(`
 		SELECT DISTINCT
 			c.jid,
 			c.name,
 			c.last_message_time,
-			m.content as last_message,
+			%s as last_message,
 			m.sender as last_sender,
 			m.is_from_me as last_is_from_me
 		FROM chats c
@@ -5385,7 +5430,7 @@ func getContactChats(db *sql.DB, req ContactChatsRequest) (ChatsResponse, error)
 		WHERE m.sender = ? OR c.jid = ?
 		ORDER BY c.last_message_time DESC
 		LIMIT ? OFFSET ?
-	`, req.JID, req.JID, limit, req.Page*limit)
+	`, lastMessageCaseSQL("m")), req.JID, req.JID, limit, req.Page*limit)
 	if err != nil {
 		return ChatsResponse{}, err
 	}
@@ -5461,16 +5506,16 @@ func getChat(db *sql.DB, req ChatRequest) (ChatResponse, error) {
 		FROM chats c
 	`
 	if includeLastMessage {
-		query = `
+		query = fmt.Sprintf(`
 			SELECT
 				c.jid,
 				c.name,
 				c.last_message_time,
-				m.content as last_message,
+				%s as last_message,
 				m.sender as last_sender,
 				m.is_from_me as last_is_from_me
 			FROM chats c
-		`
+		`, lastMessageCaseSQL("m"))
 		query += `
 			LEFT JOIN messages m ON c.jid = m.chat_jid
 			AND c.last_message_time = m.timestamp
@@ -5506,13 +5551,13 @@ func getDirectChatByContact(db *sql.DB, req ChatByContactRequest) (ChatResponse,
 
 	query := fmt.Sprintf(`
 		SELECT c.jid, c.name, c.last_message_time,
-		       m.content, m.sender, m.is_from_me
+		       %s, m.sender, m.is_from_me
 		FROM chats c
 		LEFT JOIN messages m ON c.jid = m.chat_jid
 			AND c.last_message_time = m.timestamp
 		WHERE c.jid IN (%s) AND c.jid NOT LIKE '%%@g.us'
 		LIMIT 1
-	`, strings.Join(placeholders, ","))
+	`, lastMessageCaseSQL("m"), strings.Join(placeholders, ","))
 
 	row := db.QueryRow(query, params...)
 	chat, err := scanAPIChatRow(row)
@@ -5547,6 +5592,120 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// ---- /api/deleted_message ----
+
+// DeletedMessageRequest is the body of POST /api/deleted_message (D3): the
+// one explicit path to what a sender deleted, or what a message said before
+// it was edited. Download, when true, also fetches the message's media
+// through the allowRevoked exception in downloadMedia (task 3).
+type DeletedMessageRequest struct {
+	MessageID string `json:"message_id"`
+	ChatJID   string `json:"chat_jid"`
+	Download  bool   `json:"download"`
+}
+
+// DeletedMessageResponse carries what get_deleted_message needs to show: the
+// content as stored (the original caption/text for a revoked row, or the
+// latest edit for one that's only edited), the text before the first edit
+// (nil unless the message was ever edited), the media type, and when it was
+// revoked/edited.
+type DeletedMessageResponse struct {
+	Content         string  `json:"content"`
+	PreviousContent *string `json:"previous_content"`
+	MediaType       *string `json:"media_type"`
+	RevokedAt       *string `json:"revoked_at"`
+	EditedAt        *string `json:"edited_at"`
+	Downloaded      bool    `json:"downloaded,omitempty"`
+	Filename        string  `json:"filename,omitempty"`
+	Path            string  `json:"path,omitempty"`
+	DownloadError   string  `json:"download_error,omitempty"`
+}
+
+// getDeletedMessage answers D3, kept separate from the HTTP handler so it's
+// directly testable. A message that was never revoked nor edited is refused
+// (found=false, no error) — asking to see the withdrawn content has to be an
+// explicit act, not something a normal read stumbles into.
+func getDeletedMessage(db *sql.DB, req DeletedMessageRequest) (DeletedMessageResponse, bool, error) {
+	var content string
+	var previousContent, mediaType sql.NullString
+	// CAST AS TEXT: on a database that predates these columns,
+	// ensureMessagesSchema added them as TEXT, and the driver then hands back a
+	// string that a sql.NullTime cannot scan (seen on the real store: "unsupported
+	// Scan, storing driver.Value type string into type *time.Time"). A fresh
+	// database declares them TIMESTAMP; reading both as text covers either.
+	var revokedAt, editedAt sql.NullString
+	err := db.QueryRow(
+		"SELECT content, previous_content, media_type, CAST(revoked_at AS TEXT), CAST(edited_at AS TEXT) FROM messages WHERE id = ? AND chat_jid = ?",
+		req.MessageID, req.ChatJID,
+	).Scan(&content, &previousContent, &mediaType, &revokedAt, &editedAt)
+	if err == sql.ErrNoRows {
+		return DeletedMessageResponse{}, false, nil
+	}
+	if err != nil {
+		return DeletedMessageResponse{}, false, err
+	}
+	if !revokedAt.Valid && !editedAt.Valid {
+		return DeletedMessageResponse{}, false, nil
+	}
+	return DeletedMessageResponse{
+		Content:         content,
+		PreviousContent: nullStringToPtr(previousContent),
+		MediaType:       nullStringToPtr(mediaType),
+		RevokedAt:       storedTimeToPtr(revokedAt),
+		EditedAt:        storedTimeToPtr(editedAt),
+	}, true, nil
+}
+
+// handleDeletedMessage returns the handler for POST /api/deleted_message
+// (D3). Registered next to /api/revoke and /api/edit — unlike the
+// list/search endpoints under readDB, it looks up a single row by id and
+// needs no unaccent(), so it reads through messageStore.db directly and
+// keeps working even if openUnaccentMessagesDB failed to open.
+func handleDeletedMessage(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		var req DeletedMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MessageID == "" || req.ChatJID == "" {
+			writeJSONError(w, http.StatusBadRequest, "message_id and chat_jid are required")
+			return
+		}
+		if messageStore == nil {
+			writeJSONError(w, http.StatusInternalServerError, "no message store available")
+			return
+		}
+		resp, found, err := getDeletedMessage(messageStore.db, req)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !found {
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("message %s was neither deleted nor edited", req.MessageID))
+			return
+		}
+		if req.Download {
+			ok, _, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID, true)
+			if err != nil || !ok {
+				// The content was already found: hand it back with the reason
+				// the download failed, instead of losing it behind a 500 (a
+				// deleted text message has no media to download).
+				resp.DownloadError = "unknown error"
+				if err != nil {
+					resp.DownloadError = err.Error()
+				}
+				writeJSON(w, resp)
+				return
+			}
+			resp.Downloaded = true
+			resp.Filename = filename
+			resp.Path = path
+		}
+		writeJSON(w, resp)
+	}
 }
 
 // ---- /api/sender_name ----
@@ -5871,7 +6030,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Download the media
-		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID)
+		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID, false)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -6360,6 +6519,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Handler for revoking (deleting for everyone) a previously sent message.
 	http.HandleFunc("/api/revoke", handleRevoke(client, messageStore))
+
+	// Handler for the D3 explicit lookup of a deleted/edited message's
+	// original content (soft delete, 2026-09-24).
+	http.HandleFunc("/api/deleted_message", handleDeletedMessage(client, messageStore))
 
 	// Handler for adding, removing, promoting or demoting group participants.
 	http.HandleFunc("/api/group_participants", handleGroupParticipants(client))
@@ -7324,6 +7487,14 @@ var mediaRetryCache = &retryCache{m: make(map[string]mediaRetryEntry)}
 // expired (download returns 403). The phone responds with an events.MediaRetry
 // carrying a fresh directPath, handled by handleMediaRetry.
 func requestMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) error {
+	// Soft delete keeps the media keys, so the "no media key" refusal below no
+	// longer covers a deleted message: refuse it explicitly, before asking the
+	// phone for anything.
+	if deleted, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil {
+		return fmt.Errorf("failed to check message: %v", err)
+	} else if deleted {
+		return fmt.Errorf("message was deleted by the sender")
+	}
 	mediaType, filename, _, mediaKey, fileSHA256, fileEncSHA256, fileLength, err := messageStore.GetMediaInfo(messageID, chatJID)
 	if err != nil {
 		return fmt.Errorf("failed to get media info: %v", err)

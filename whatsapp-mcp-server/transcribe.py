@@ -178,8 +178,14 @@ def _is_expired(ts):
 
 
 def pending_audios(conn, limit=None):
+    # Soft delete (2026-09-24, D2): a revoked audio still has media_type='audio'
+    # and empty content (MarkMessageRevoked no longer clears the row), so
+    # without this filter the sweep would try to transcribe a message the
+    # sender took back. get_deleted_message (D3) is the only intended path to
+    # a revoked message's media.
     sql = ("SELECT id, chat_jid, hex(file_sha256), timestamp FROM messages "
            "WHERE media_type='audio' AND (content IS NULL OR content='') "
+           "AND revoked_at IS NULL "
            "ORDER BY timestamp DESC")
     if limit:
         sql += f" LIMIT {int(limit)}"
