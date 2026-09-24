@@ -23,7 +23,7 @@ Colunas `revoked_at`/`edited_at` (CREATE TABLE + `ensureMessagesSchema`); `MarkM
 mutacao:
   arquivo: `whatsapp-bridge/main.go`
   de: `} else if revoked {`
-  para: `} else if false {`
+  para: `} else if revoked && false {`
   bateria: `cd whatsapp-bridge && go test -run TestRevokedMessage ./...`
   fixture: `TestRevokedMessage/download_recusado_mesmo_com_cache` — mensagem de imagem salva com arquivo já em cache, REVOKE sintético, `downloadMedia` tem de devolver erro
 
