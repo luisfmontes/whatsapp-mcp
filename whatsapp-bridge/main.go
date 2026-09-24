@@ -7220,16 +7220,23 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 			continue
 		}
 
+		// The sync hands over the raw message, still wrapped in
+		// EphemeralMessage (disappearing-messages chats), DeviceSentMessage
+		// (sent from another of the user's devices), ViewOnce... — the live
+		// path gets it already unwrapped by whatsmeow. Read the content from
+		// the same shape, or a wrapped message looks empty and is dropped (#25).
+		inner := unwrapHistoryMessage(msg.Message.Message)
+
 		// Extract text content (includes media captions)
-		content := extractTextContent(msg.Message.Message)
+		content := extractTextContent(inner)
 
 		// Extract media info
 		var mediaType, filename, url string
 		var mediaKey, fileSHA256, fileEncSHA256 []byte
 		var fileLength uint64
 
-		if msg.Message.Message != nil {
-			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
+		if inner != nil {
+			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(inner)
 		}
 
 		// Log the message content for debugging
