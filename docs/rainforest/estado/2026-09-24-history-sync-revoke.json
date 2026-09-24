@@ -20,7 +20,34 @@
     "em": "2026-09-24"
   },
   "executar": {
-    "status": "pendente"
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "em": "2026-09-24",
+    "commits": [
+      "fb4ace4"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./...",
+    "saida": "ok; TestHistorySyncRevoke 2/2, TestHistorySyncProtocol 3/3",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\t\t\t\tif msg.Message.GetMessageStubType() == waWeb.WebMessageInfo_REVOKE {",
+        "para": "\t\t\t\tif msg.Message.GetMessageStubType() == waWeb.WebMessageInfo_REVOKE && false {",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestHistorySyncRevoke -v .",
+        "resultado": "vermelho",
+        "fixture": "TestHistorySyncRevoke/stub_revoga_linha_existente"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\tfor _, pm := range pending {",
+        "para": "\tfor _, pm := range pending[:0] {",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestHistorySyncProtocol -v .",
+        "resultado": "vermelho",
+        "fixture": "TestHistorySyncProtocol/revoke_antes_do_alvo"
+      }
+    ]
   },
   "revisar": {
     "status": "pendente"
