@@ -45,3 +45,20 @@ mutacao:
   fixture: `TestHistorySyncProtocol/revoke_antes_do_alvo` — conversa na ordem do sync (mais nova primeiro): `ProtocolMessage` REVOKE e depois a mensagem-alvo; o alvo tem de terminar `[mensagem apagada]`
 
 pronto quando: com uma conversa na ordem real do sync (mais nova primeiro) em que um `ProtocolMessage` REVOKE e um MESSAGE_EDIT vêm antes das mensagens que alteram, `storeHistoryConversation` termina com a primeira como `[mensagem apagada]` e a segunda com o texto editado e `edited == true`, e nenhum dos dois protocolos vira linha própria — provado por `cd whatsapp-bridge && go test -count=1 -run TestHistorySyncProtocol -v .` devolvendo `PASS` em `revoke_antes_do_alvo`, `edit_antes_do_alvo` e `protocolo_nao_vira_linha`.
+
+### 3. Protocolo embrulhado no sync é detectado [tipo: implementar]
+atende: D5
+arquivos: `whatsapp-bridge/main.go`, `whatsapp-bridge/main_test.go`
+depende de: 2
+paralela: nao
+
+Achado da revisão: `unwrapHistoryMessage` (via `events.Message.UnwrapRaw`) antes do `GetProtocolMessage()` em `storeHistoryConversation`; subtestes `revoke_embrulhado_em_device_sent` e `protocolo_sem_alvo_nao_cria_linha`.
+
+mutacao:
+  arquivo: `whatsapp-bridge/main.go`
+  de: `	return (&events.Message{RawMessage: m}).UnwrapRaw().Message`
+  para: `	return m`
+  bateria: `cd whatsapp-bridge && go test -count=1 -run TestHistorySyncProtocol -v .`
+  fixture: `TestHistorySyncProtocol/revoke_embrulhado_em_device_sent`
+
+pronto quando: com um REVOKE do sync embrulhado em `DeviceSentMessage` (revogação feita em outro aparelho do usuário) antes do alvo, o alvo termina `[mensagem apagada]`, e um REVOKE cujo alvo não existe não cria linha — provado por `cd whatsapp-bridge && go test -count=1 -run TestHistorySyncProtocol -v .` devolvendo `PASS` em `revoke_embrulhado_em_device_sent` e `protocolo_sem_alvo_nao_cria_linha`.

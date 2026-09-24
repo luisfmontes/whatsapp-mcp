@@ -50,7 +50,19 @@
     ]
   },
   "revisar": {
-    "status": "pendente"
+    "status": "parcial",
+    "snapshot": {
+      "head": "6e3f0b3e8e912d32e55d3add1c7cba85bc7bf6a3",
+      "caminhos_sujos": []
+    },
+    "em_voo": [
+      {
+        "agente": "revisor",
+        "tarefa": "revisao 69e21d7...HEAD",
+        "desde": "2026-09-24"
+      }
+    ],
+    "em": "2026-09-24"
   },
   "verificar": {
     "status": "pendente"

@@ -2874,6 +2874,66 @@ func TestHistorySyncProtocol(t *testing.T) {
 		}
 	})
 
+	t.Run("revoke_embrulhado_em_device_sent", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-PROTO-DEVSENT"
+		// A revoke made from one of the user's other devices: the protocol
+		// message travels inside DeviceSentMessage, as the live path sees it.
+		wrapped := &waProto.Message{DeviceSentMessage: &waProto.DeviceSentMessage{
+			Message: &waProto.Message{ProtocolMessage: &waProto.ProtocolMessage{
+				Type: waProto.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+			}},
+		}}
+		messages := []*waHistorySync.HistorySyncMsg{
+			{Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String("PROTO-" + messageID), FromMe: proto.Bool(true)},
+				MessageTimestamp: proto.Uint64(uint64(baseTS.Add(time.Minute).Unix())),
+				Message:          wrapped,
+			}},
+			targetMsg(messageID, "texto original", baseTS),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1: %+v", len(resp.Messages), resp.Messages)
+		}
+		if msg := resp.Messages[0]; msg.Content != revokedPlaceholder || !msg.Revoked {
+			t.Errorf("target message = %+v, want the revoked placeholder", msg)
+		}
+	})
+
+	t.Run("protocolo_sem_alvo_nao_cria_linha", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		messages := []*waHistorySync.HistorySyncMsg{
+			protocolMsg("PROTO-ORFAO", baseTS, &waProto.ProtocolMessage{
+				Type: waProto.ProtocolMessage_REVOKE.Enum(),
+				Key:  &waCommon.MessageKey{ID: proto.String("MSG-QUE-NAO-EXISTE")},
+			}),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		var n int
+		if err := messageStore.db.QueryRow("SELECT COUNT(*) FROM messages WHERE chat_jid = ?", chatJID).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("got %d rows for a protocol message whose target is nowhere, want 0", n)
+		}
+	})
+
 	t.Run("edit_antes_do_alvo", func(t *testing.T) {
 		messageStore := setupPollStore(t)
 		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
