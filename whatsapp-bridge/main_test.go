@@ -3166,6 +3166,15 @@ func TestDeletedMessageEndpoint(t *testing.T) {
 		}
 	})
 
+	t.Run("horario_com_leitura_monotonica", func(t *testing.T) {
+		// What the real "trabalho" store holds for a revoke made through
+		// /api/revoke before the Round(0): time.Time.String() of a time.Now().
+		got := storedTimeToPtr(sql.NullString{String: "2026-09-24 15:32:41.5852521 -0300 -03 m=+58.988151001", Valid: true})
+		if got == nil || *got != "2026-09-24T15:32:41-03:00" {
+			t.Errorf("storedTimeToPtr = %v, want %q", got, "2026-09-24T15:32:41-03:00")
+		}
+	})
+
 	t.Run("mediaretry_recusa_apagada", func(t *testing.T) {
 		store := setupPollStore(t)
 		const chatJID = "grupo-deleted-endpoint-retry@g.us"

@@ -2722,7 +2722,7 @@ func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.Handl
 				Type:          waProto.ProtocolMessage_MESSAGE_EDIT.Enum(),
 				Key:           &waProto.MessageKey{ID: proto.String(req.MessageID)},
 				EditedMessage: newContent,
-			}, time.Now(), waLog.Noop)
+			}, time.Now().Round(0), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s edited", req.MessageID)})
@@ -2781,7 +2781,7 @@ func handleRevoke(client *whatsmeow.Client, messageStore *MessageStore) http.Han
 			applyProtocolMessage(messageStore, localChatKey(client, chatJID), &waProto.ProtocolMessage{
 				Type: waProto.ProtocolMessage_REVOKE.Enum(),
 				Key:  &waProto.MessageKey{ID: proto.String(req.MessageID)},
-			}, time.Now(), waLog.Noop)
+			}, time.Now().Round(0), waLog.Noop)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: fmt.Sprintf("Message %s revoked", req.MessageID)})
@@ -4845,11 +4845,17 @@ func storedTimeToPtr(v sql.NullString) *string {
 	if !v.Valid {
 		return nil
 	}
+	// A time.Now() written before the Round(0) in handleRevoke/handleEdit
+	// carries Go's monotonic reading in its String() form (" m=+58.98...").
+	raw := v.String
+	if i := strings.Index(raw, " m="); i >= 0 {
+		raw = raw[:i]
+	}
 	// The first layout is time.Time.String(), which the Windows driver
 	// (modernc) writes into a TEXT column — the real store holds e.g.
 	// "2026-09-24 15:32:41 -0300 -03".
 	for _, layout := range []string{"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999-07:00", time.RFC3339Nano, "2006-01-02 15:04:05"} {
-		if t, err := time.Parse(layout, v.String); err == nil {
+		if t, err := time.Parse(layout, raw); err == nil {
 			s := t.Format(time.RFC3339)
 			return &s
 		}
