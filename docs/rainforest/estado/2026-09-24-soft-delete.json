@@ -20,7 +20,57 @@
     "em": "2026-09-24"
   },
   "executar": {
-    "status": "pendente"
+    "status": "ok",
+    "catraca_mutacao": "2026-09-24",
+    "em": "2026-09-24",
+    "commits": [
+      "652ae67"
+    ],
+    "comando": "cd whatsapp-bridge && go test -count=1 ./... ; cd whatsapp-mcp-server && uv run python -m unittest discover",
+    "saida": "go ok; python OK",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\t\twhereClauses = append(whereClauses, \"unaccent(messages.content) LIKE unaccent(?) AND messages.revoked_at IS NULL\")",
+        "para": "\t\twhereClauses = append(whereClauses, \"unaccent(messages.content) LIKE unaccent(?)\")",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestSoftDelete -v .",
+        "resultado": "vermelho",
+        "fixture": "TestSoftDelete/busca_nao_casa_com_apagada"
+      },
+      {
+        "tarefa": 2,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\t\t\"UPDATE messages SET previous_content = COALESCE(previous_content, content), content = ?, edited_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL\",",
+        "para": "\t\t\"UPDATE messages SET previous_content = COALESCE(previous_content, NULL), content = ?, edited_at = ? WHERE id = ? AND chat_jid = ? AND revoked_at IS NULL\",",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestEditPreservesOriginal -v .",
+        "resultado": "vermelho",
+        "fixture": "TestEditPreservesOriginal/duas_edicoes_guardam_o_original"
+      },
+      {
+        "tarefa": 3,
+        "arquivo": "whatsapp-bridge/main.go",
+        "de": "\tif !allowRevoked {",
+        "para": "\tif true {",
+        "bateria": "cd whatsapp-bridge && go test -count=1 -run TestDeletedMessageEndpoint -v .",
+        "resultado": "vermelho",
+        "fixture": "TestDeletedMessageEndpoint/download_da_apagada_pela_consulta"
+      },
+      {
+        "tarefa": 4,
+        "arquivo": "whatsapp-mcp-server/transcribe.py",
+        "de": "AND revoked_at IS NULL",
+        "para": "",
+        "bateria": "cd whatsapp-mcp-server && uv run python -m unittest test_deleted_message -v",
+        "resultado": "vermelho",
+        "fixture": "test_deleted_message.TestSweepSkipsRevoked.test_audio_apagado_fora_da_varredura"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "n/a",
+        "motivo": "validacao de ambiente real"
+      }
+    ]
   },
   "revisar": {
     "status": "pendente"
