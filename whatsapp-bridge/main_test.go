@@ -2642,10 +2642,29 @@ func TestSoftDelete(t *testing.T) {
 		if chatResp.Chat.LastMessage == nil || *chatResp.Chat.LastMessage != revokedPlaceholder {
 			t.Errorf("getChat last_message = %v, want %q", chatResp.Chat.LastMessage, revokedPlaceholder)
 		}
+
+		contactResp, err := getContactChats(store.db, ContactChatsRequest{JID: "autor-a"})
+		if err != nil {
+			t.Fatalf("getContactChats: %v", err)
+		}
+		if len(contactResp.Chats) != 1 {
+			t.Fatalf("getContactChats: got %d chats, want 1: %+v", len(contactResp.Chats), contactResp.Chats)
+		}
+		if lm := contactResp.Chats[0].LastMessage; lm == nil || *lm != revokedPlaceholder {
+			t.Errorf("getContactChats last_message = %v, want %q", lm, revokedPlaceholder)
+		}
 	})
 
 	t.Run("citar_apagada_recusa", func(t *testing.T) {
 		store := newFixture(t)
+		// A known author, so the unknown-author refusal (D9) cannot be what
+		// answers here — only the deleted-message one can.
+		if err := store.StoreMessageSenderJID(messageID, chatJID, "autor-a@s.whatsapp.net"); err != nil {
+			t.Fatalf("StoreMessageSenderJID: %v", err)
+		}
+		if _, errMsg, _ := buildQuoteContextInfo(store, messageID, chatJID); errMsg != "" {
+			t.Fatalf("before the revoke the quote must be accepted, got %q", errMsg)
+		}
 		revoke(t, store, baseTS.Add(time.Minute))
 
 		ctxInfo, errMsg, status := buildQuoteContextInfo(store, messageID, chatJID)
@@ -2657,6 +2676,9 @@ func TestSoftDelete(t *testing.T) {
 		}
 		if status < 400 || status >= 500 {
 			t.Errorf("status = %d, want 4xx; msg=%q", status, errMsg)
+		}
+		if !strings.Contains(errMsg, "deleted by the sender") {
+			t.Errorf("errMsg = %q, want the deleted-message refusal", errMsg)
 		}
 	})
 }
@@ -3057,6 +3079,72 @@ func TestHistorySyncRevoke(t *testing.T) {
 // message.
 func TestDeletedMessageEndpoint(t *testing.T) {
 	baseTS := time.Date(2026, 9, 24, 13, 0, 0, 0, time.UTC)
+
+	// storeRevokedText saves a text message and revokes it — no media at all.
+	storeRevokedText := func(t *testing.T, store *MessageStore, chatJID, messageID, text string) {
+		t.Helper()
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", text, baseTS, false,
+			"", "", "", nil, nil, nil, 0); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+	}
+
+	t.Run("download_de_texto_apagado_mantem_o_conteudo", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-texto@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-TEXTO"
+		storeRevokedText(t, store, chatJID, messageID, "texto que a pessoa apagou")
+
+		body := strings.NewReader(`{"message_id":"` + messageID + `","chat_jid":"` + chatJID + `","download":true}`)
+		rec := httptest.NewRecorder()
+		handleDeletedMessage(nil, store)(rec, httptest.NewRequest(http.MethodPost, "/api/deleted_message", body))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp DeletedMessageResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		if resp.Content != "texto que a pessoa apagou" {
+			t.Errorf("Content = %q, want the original text even though the download failed", resp.Content)
+		}
+		if resp.Downloaded || resp.DownloadError == "" {
+			t.Errorf("Downloaded = %v, DownloadError = %q; want false and the reason", resp.Downloaded, resp.DownloadError)
+		}
+	})
+
+	t.Run("mediaretry_recusa_apagada", func(t *testing.T) {
+		store := setupPollStore(t)
+		const chatJID = "grupo-deleted-endpoint-retry@g.us"
+		const messageID = "MSG-DELETED-ENDPOINT-RETRY"
+		if err := store.StoreChat(chatJID, "Grupo", baseTS); err != nil {
+			t.Fatalf("StoreChat: %v", err)
+		}
+		if err := store.StoreMessage(messageID, chatJID, "autor-a", "", baseTS, false,
+			"image", "foto.jpg", "https://example.invalid/media",
+			[]byte("mediakey"), []byte("filesha"), []byte("fileencsha"), 1234); err != nil {
+			t.Fatalf("StoreMessage: %v", err)
+		}
+		applyProtocolMessage(store, chatJID, &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_REVOKE.Enum(),
+			Key:  &waCommon.MessageKey{ID: proto.String(messageID)},
+		}, baseTS.Add(time.Minute), waLog.Noop)
+
+		// The media keys survive the soft delete, so only the explicit check
+		// stops the retry receipt from going out (client stays unused).
+		err := requestMediaRetry(nil, store, messageID, chatJID)
+		if err == nil || !strings.Contains(err.Error(), "deleted by the sender") {
+			t.Fatalf("requestMediaRetry err = %v, want the deleted-message refusal", err)
+		}
+	})
 
 	t.Run("apagada_devolve_original", func(t *testing.T) {
 		store := setupPollStore(t)

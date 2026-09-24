@@ -5593,6 +5593,7 @@ type DeletedMessageResponse struct {
 	Downloaded      bool    `json:"downloaded,omitempty"`
 	Filename        string  `json:"filename,omitempty"`
 	Path            string  `json:"path,omitempty"`
+	DownloadError   string  `json:"download_error,omitempty"`
 }
 
 // getDeletedMessage answers D3, kept separate from the HTTP handler so it's
@@ -5657,11 +5658,14 @@ func handleDeletedMessage(client *whatsmeow.Client, messageStore *MessageStore) 
 		if req.Download {
 			ok, _, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID, true)
 			if err != nil || !ok {
-				errMsg := "unknown error"
+				// The content was already found: hand it back with the reason
+				// the download failed, instead of losing it behind a 500 (a
+				// deleted text message has no media to download).
+				resp.DownloadError = "unknown error"
 				if err != nil {
-					errMsg = err.Error()
+					resp.DownloadError = err.Error()
 				}
-				writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to download media: %s", errMsg))
+				writeJSON(w, resp)
 				return
 			}
 			resp.Downloaded = true
@@ -7451,6 +7455,14 @@ var mediaRetryCache = &retryCache{m: make(map[string]mediaRetryEntry)}
 // expired (download returns 403). The phone responds with an events.MediaRetry
 // carrying a fresh directPath, handled by handleMediaRetry.
 func requestMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) error {
+	// Soft delete keeps the media keys, so the "no media key" refusal below no
+	// longer covers a deleted message: refuse it explicitly, before asking the
+	// phone for anything.
+	if deleted, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil {
+		return fmt.Errorf("failed to check message: %v", err)
+	} else if deleted {
+		return fmt.Errorf("message was deleted by the sender")
+	}
 	mediaType, filename, _, mediaKey, fileSHA256, fileEncSHA256, fileLength, err := messageStore.GetMediaInfo(messageID, chatJID)
 	if err != nil {
 		return fmt.Errorf("failed to get media info: %v", err)
