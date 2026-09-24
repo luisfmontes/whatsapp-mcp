@@ -6981,6 +6981,20 @@ func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.Me
 	return sender, isFromMe
 }
 
+// unwrapHistoryMessage peels the same wrappers the live path gets peeled by
+// events.Message.UnwrapRaw (DeviceSentMessage, EphemeralMessage, ViewOnce,
+// EditedMessage...). A revoke or edit made from one of the user's own other
+// devices reaches the history sync inside DeviceSentMessage, and reading
+// GetProtocolMessage() off the outer message would miss it (review of #23).
+// It matters for every edit, too: BuildEdit sends MESSAGE_EDIT inside
+// EditedMessage, never as a bare ProtocolMessage.
+func unwrapHistoryMessage(m *waProto.Message) *waProto.Message {
+	if m == nil {
+		return nil
+	}
+	return (&events.Message{RawMessage: m}).UnwrapRaw().Message
+}
+
 // storeHistoryConversation stores the messages of one history-sync
 // conversation (issue #23). The sync delivers newest-first, so a
 // ProtocolMessage REVOKE/MESSAGE_EDIT arrives before the message it targets —
@@ -6999,18 +7013,6 @@ func historySyncSender(client *whatsmeow.Client, jid types.JID, key *waCommon.Me
 // makes the call a no-op for the case the row already exists.
 //
 // Returns how many rows it stored.
-// unwrapHistoryMessage peels the same wrappers the live path gets peeled by
-// events.Message.UnwrapRaw (DeviceSentMessage, EphemeralMessage, ViewOnce,
-// EditedMessage...). A revoke or edit made from one of the user's own other
-// devices reaches the history sync inside DeviceSentMessage, and reading
-// GetProtocolMessage() off the outer message would miss it (review of #23).
-func unwrapHistoryMessage(m *waProto.Message) *waProto.Message {
-	if m == nil {
-		return nil
-	}
-	return (&events.Message{RawMessage: m}).UnwrapRaw().Message
-}
-
 func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, messages []*waHistorySync.HistorySyncMsg, logger waLog.Logger) int {
 	syncedCount := 0
 	var pending []*pendingHistorySyncProtocolMsg

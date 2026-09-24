@@ -2911,6 +2911,42 @@ func TestHistorySyncProtocol(t *testing.T) {
 		}
 	})
 
+	t.Run("edit_no_formato_do_buildedit", func(t *testing.T) {
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		const messageID = "MSG-HIST-PROTO-BUILDEDIT"
+		// The wire shape of a real edit: whatsmeow's own BuildEdit wraps the
+		// MESSAGE_EDIT ProtocolMessage in EditedMessage (FutureProofMessage).
+		chat := types.JID{User: "grupo-history-protocol", Server: types.GroupServer}
+		wire := (&whatsmeow.Client{}).BuildEdit(chat, messageID, &waProto.Message{Conversation: proto.String("texto editado")})
+		if wire.GetProtocolMessage() != nil || wire.GetEditedMessage() == nil {
+			t.Fatalf("BuildEdit shape changed: %+v", wire)
+		}
+		messages := []*waHistorySync.HistorySyncMsg{
+			{Message: &waWeb.WebMessageInfo{
+				Key:              &waCommon.MessageKey{ID: proto.String("PROTO-" + messageID), FromMe: proto.Bool(true)},
+				MessageTimestamp: proto.Uint64(uint64(baseTS.Add(time.Minute).Unix())),
+				Message:          wire,
+			}},
+			targetMsg(messageID, "texto original", baseTS),
+		}
+
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		if len(resp.Messages) != 1 {
+			t.Fatalf("got %d messages, want 1: %+v", len(resp.Messages), resp.Messages)
+		}
+		if msg := resp.Messages[0]; msg.Content != "texto editado" || !msg.Edited {
+			t.Errorf("target message = %+v, want the edited text with edited=true", msg)
+		}
+	})
+
 	t.Run("protocolo_sem_alvo_nao_cria_linha", func(t *testing.T) {
 		messageStore := setupPollStore(t)
 		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
