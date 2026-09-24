@@ -2336,7 +2336,15 @@ func TestRevokedMessage(t *testing.T) {
 		store := newFixture(t)
 		revoke(t, store, chatJID, baseTS.Add(time.Minute))
 
-		resp, err := listMessages(store.db, MessagesRequest{ChatJID: proto.String(chatJID), Query: proto.String("legenda")})
+		// The text search calls unaccent(), which only the read handle carries
+		// on the CGO driver (Linux/macOS) — the same handle the endpoint uses.
+		readDB, err := openUnaccentMessagesDB()
+		if err != nil {
+			t.Fatalf("openUnaccentMessagesDB: %v", err)
+		}
+		defer readDB.Close()
+
+		resp, err := listMessages(readDB, MessagesRequest{ChatJID: proto.String(chatJID), Query: proto.String("legenda")})
 		if err != nil {
 			t.Fatalf("listMessages: %v", err)
 		}
