@@ -255,7 +255,7 @@ class TestDownloadMediaIndicatesOtherAccount:
         bridge_response = 'HTTP 500 - {"success":false,"message":"Failed to download media: failed to find message: sql: no rows in result set"}'
         
         with mock.patch.object(main, "whatsapp_download_media", return_value=(None, bridge_response)):
-            with mock.patch.object(accounts, "find_message_accounts", return_value=[]):
+            with mock.patch.object(accounts, "find_message_accounts", return_value=[]),                  mock.patch.object(accounts, "known_aliases", return_value=["pessoal", "trabalho"]):
                 out = main.download_media("MSG-123", "test-jid-1@g.us")
         
         assert out["success"] is False
@@ -342,7 +342,7 @@ class TestGetDeletedMessageIndicatesOtherAccount:
         
         with mock.patch.object(main, "whatsapp_get_deleted_message", return_value=(None, bridge_response)):
             with mock.patch.object(accounts, "find_message_accounts", return_value=[]):
-                with mock.patch.object(accounts, "message_in_account", return_value=False):
+                with mock.patch.object(accounts, "message_in_account", return_value=False),                      mock.patch.object(accounts, "known_aliases", return_value=["pessoal", "trabalho"]):
                     out = main.get_deleted_message("MSG-123", "test-jid-1@g.us")
         
         assert out["success"] is False
