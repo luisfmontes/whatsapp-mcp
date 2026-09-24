@@ -7281,7 +7281,11 @@ func requestMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, mes
 // phone's asynchronous retry response must not resurrect bytes on disk for a
 // message the store no longer carries (D1, follow-up to issue #21).
 func writeRecoveredMedia(messageStore *MessageStore, messageID, chatJID, filename string, data []byte) (string, error) {
-	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil || revoked {
+	deleted, err := messageStore.IsMessageRevoked(messageID, chatJID)
+	if err != nil {
+		return "", fmt.Errorf("failed to check message: %v", err)
+	}
+	if deleted {
 		return "", fmt.Errorf("message was deleted by the sender")
 	}
 	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))

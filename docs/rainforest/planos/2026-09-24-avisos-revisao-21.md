@@ -20,8 +20,8 @@ Extrair de `handleMediaRetry` a gravação para `writeRecoveredMedia(messageStor
 
 mutacao:
   arquivo: `whatsapp-bridge/main.go`
-  de: `	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil || revoked {`
-  para: `	if revoked, err := messageStore.IsMessageRevoked(messageID, chatJID); err != nil || (revoked && false) {`
+  de: `	if deleted {`
+  para: `	if deleted && false {`
   bateria: `cd whatsapp-bridge && go test -count=1 -run TestWriteRecoveredMedia -v .`
   fixture: `TestWriteRecoveredMedia/apagada_nao_grava` — mensagem de imagem salva, REVOKE aplicado, `writeRecoveredMedia` tem de devolver erro e o arquivo não pode existir
 
