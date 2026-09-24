@@ -5557,3 +5557,70 @@ func TestFillSenderNamesPorLID(t *testing.T) {
 		}
 	})
 }
+
+// TestHistorySyncUnwrap covers issue #25: an ordinary message the history
+// sync delivers wrapped (EphemeralMessage in a disappearing-messages chat,
+// DeviceSentMessage from another of the user's devices) is stored with its
+// text and media, instead of looking empty and being dropped.
+func TestHistorySyncUnwrap(t *testing.T) {
+	const chatJID = "grupo-history-unwrap@g.us"
+	baseTS := time.Date(2026, 9, 24, 16, 0, 0, 0, time.UTC)
+	jid := types.JID{User: "au" + "tor" + "-hist" + "-unwrap", Server: types.DefaultUserServer}
+	client := &whatsmeow.Client{Store: &store.Device{ID: &jid}}
+
+	entry := func(id string, ts time.Time, fromMe bool, m *waProto.Message) *waHistorySync.HistorySyncMsg {
+		return &waHistorySync.HistorySyncMsg{Message: &waWeb.WebMessageInfo{
+			Key:              &waCommon.MessageKey{ID: proto.String(id), FromMe: proto.Bool(fromMe)},
+			MessageTimestamp: proto.Uint64(uint64(ts.Unix())),
+			Message:          m,
+		}}
+	}
+	run := func(t *testing.T, messages []*waHistorySync.HistorySyncMsg) []APIMessage {
+		t.Helper()
+		messageStore := setupPollStore(t)
+		if err := messageStore.EnsureChat(chatJID, baseTS); err != nil {
+			t.Fatalf("EnsureChat: %v", err)
+		}
+		storeHistoryConversation(client, messageStore, jid, chatJID, messages, waLog.Noop)
+		resp, err := listMessages(messageStore.db, MessagesRequest{ChatJID: proto.String(chatJID)})
+		if err != nil {
+			t.Fatalf("listMessages: %v", err)
+		}
+		return resp.Messages
+	}
+
+	t.Run("texto_em_ephemeral", func(t *testing.T) {
+		got := run(t, []*waHistorySync.HistorySyncMsg{entry("MSG-UNWRAP-EPH-TXT", baseTS, false, &waProto.Message{
+			EphemeralMessage: &waProto.FutureProofMessage{Message: &waProto.Message{Conversation: proto.String("mensagem temporaria")}},
+		})})
+		if len(got) != 1 || got[0].Content != "mensagem temporaria" {
+			t.Fatalf("got %+v, want the ephemeral text stored", got)
+		}
+	})
+
+	t.Run("imagem_com_legenda_em_ephemeral", func(t *testing.T) {
+		got := run(t, []*waHistorySync.HistorySyncMsg{entry("MSG-UNWRAP-EPH-IMG", baseTS, false, &waProto.Message{
+			EphemeralMessage: &waProto.FutureProofMessage{Message: &waProto.Message{ImageMessage: &waProto.ImageMessage{
+				Caption:       proto.String("legenda temporaria"),
+				Mimetype:      proto.String("image/jpeg"),
+				URL:           proto.String("https://example.invalid/media"),
+				MediaKey:      []byte("mediakey"),
+				FileSHA256:    []byte("filesha"),
+				FileEncSHA256: []byte("fileencsha"),
+				FileLength:    proto.Uint64(1234),
+			}}},
+		})})
+		if len(got) != 1 || got[0].Content != "legenda temporaria" || got[0].MediaType == nil || *got[0].MediaType != "image" {
+			t.Fatalf("got %+v, want the caption and media_type image", got)
+		}
+	})
+
+	t.Run("texto_em_device_sent", func(t *testing.T) {
+		got := run(t, []*waHistorySync.HistorySyncMsg{entry("MSG-UNWRAP-DEVSENT", baseTS, true, &waProto.Message{
+			DeviceSentMessage: &waProto.DeviceSentMessage{Message: &waProto.Message{Conversation: proto.String("enviada do celular")}},
+		})})
+		if len(got) != 1 || got[0].Content != "enviada do celular" || !got[0].IsFromMe {
+			t.Fatalf("got %+v, want the device-sent text stored as from me", got)
+		}
+	})
+}
