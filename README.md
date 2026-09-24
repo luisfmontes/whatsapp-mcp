@@ -368,6 +368,20 @@ Remove-Item env:GOOS
 
 ---
 
+## Watching a conversation (`/whatsapp:vigiar`)
+
+`/whatsapp:vigiar <contact> [--auto]` watches one WhatsApp conversation without spending tokens while nobody writes, and wakes the agent up when the other person sends something.
+
+Under the hood, `scripts/watch_chat.py` polls the bridge's `messages.db` (read-only) and prints one `NEW MESSAGES (n), last <timestamp>: ...` line per burst — waiting for `--quiet` seconds (default 25s) of silence before reporting, since one message is often followed by two or three more within seconds. It never exits after printing (the same person can send several bursts); it only exits, with an `END:` line, after `--idle` seconds (default 2h) with nothing new at all. State (which message ids were already reported) lives in a JSON file, so re-arming the watch later reuses it without repeating or losing a message.
+
+- Default mode drafts a reply per the `message-standards` skill and waits for approval before sending.
+- `--auto` sends directly, with a footer marking the reply as unreviewed; a destructive or unverified request still stops and asks regardless of `--auto`.
+- Say "stop watching" to end it early, or it stops on its own after the idle timeout.
+
+See `commands/vigiar.md` for the full flow (contact resolution across multiple accounts, `@lid` chat JIDs, media download).
+
+---
+
 ## Architecture
 
 ```
