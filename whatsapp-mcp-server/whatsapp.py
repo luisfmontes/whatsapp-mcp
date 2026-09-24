@@ -1071,6 +1071,70 @@ def download_media(message_id: str, chat_jid: str, account: Optional[str] = None
         return None, f"Unexpected error: {str(e)}"
 
 
+def get_deleted_message(message_id: str, chat_jid: str, download: bool = False, account: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Fetch what a sender deleted, or the text before an edit (D3).
+
+    The one explicit path to a message's withdrawn content — every normal
+    read (list_messages, get_message_context, a chat's last_message, search,
+    quoting) keeps hiding it. Mirrors download_media's contract (raw request,
+    branch on status code) rather than _api_post, which collapses every 4xx
+    response into None and would swallow the "neither deleted nor edited" 404
+    refusal along with a genuine transport failure — this tool exists
+    specifically to surface that refusal, not lose it.
+
+    Args:
+        message_id: The ID of the message to look up
+        chat_jid: The JID of the chat containing the message
+        download: If True, also fetch the message's media — the only path
+            that can download media of a message the sender deleted
+        account: Optional account alias to use (defaults to primary account)
+
+    Returns:
+        A tuple of (result dict or None, status message). On success the dict
+        has content, previous_content, media_type, revoked_at, edited_at and,
+        when download=True, downloaded/filename/path.
+    """
+    if account is not None:
+        base_url = _resolve_and_check_account_explicit(account)
+    else:
+        base_url = accounts.resolve_account(account)
+    try:
+        url = f"{base_url}/deleted_message"
+        payload = {
+            "message_id": message_id,
+            "chat_jid": chat_jid,
+            "download": download,
+        }
+
+        response = requests.post(url, json=payload, headers=_auth_headers())
+
+        if response.status_code == 200:
+            result = response.json()
+            return result, "OK"
+        elif response.status_code == 401:
+            reason = (
+                "HTTP 401 - check WHATSAPP_API_AUTH_TOKEN matches the bridge's "
+                f"API_AUTH_TOKEN ({response.text})"
+            )
+            logger.warning("get_deleted_message auth error: %s", reason)
+            return None, reason
+        else:
+            body = response.json()
+            reason = body.get("error", f"HTTP {response.status_code} - {response.text}")
+            logger.warning("get_deleted_message error: %s", reason)
+            return None, reason
+
+    except requests.RequestException as e:
+        logger.warning("get_deleted_message request error: %s", e)
+        return None, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        logger.warning("Error parsing get_deleted_message response: %s", response.text)
+        return None, f"Error parsing response: {response.text}"
+    except Exception as e:
+        logger.warning("Unexpected get_deleted_message error: %s", e)
+        return None, f"Unexpected error: {str(e)}"
+
+
 def create_group(
     name: str,
     participants: List[str],

@@ -50,8 +50,13 @@ def log(msg):
 
 
 def unavailable_audios(conn, limit):
+    # Soft delete (2026-09-24, D2): a message can carry the "unavailable"
+    # marker from a past failed download and later be revoked — the marker in
+    # content does not change on revoke (D1), so without this filter a
+    # revoked audio would still queue for a media retry.
     sql = ("SELECT id, chat_jid FROM messages "
            "WHERE media_type='audio' AND content LIKE '[áudio indisponível%' "
+           "AND revoked_at IS NULL "
            "ORDER BY timestamp DESC")
     if limit:
         sql += f" LIMIT {int(limit)}"
