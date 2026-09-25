@@ -265,5 +265,115 @@ class TestBurstDetection(WatchChatTestCase):
         self.assert_no_line(timeout=1.0)
 
 
+def _status_body(healthy):
+    """The bridge's real /api/status shape (captured 2026-09-25 from a live
+    bridge), with the account JID swapped for a synthetic, digit-free one."""
+    return {
+        "success": True, "healthy": healthy, "connected": healthy, "logged_in": True,
+        "jid": "conta-teste@s.whatsapp.net",
+        "last_successful_connect": "2026-09-24T19:10:33-03:00",
+        "auto_reconnect_errors": 0,
+        "last_event_at": "2026-09-25T06:46:22-03:00",
+        "uptime_seconds": 47557,
+        "watchdog": {"interval_seconds": 60, "reconnects": 0, "last_tick_at": "2026-09-25T06:46:18-03:00"},
+    }
+
+
+class FakeBridge:
+    """A stand-in for the bridge's /api/status on a free local port. `healthy`
+    flips what it answers; stop() closes the socket so the next check is a
+    refused connection; `hits` counts requests, to prove a watch without
+    --status-url never calls it."""
+
+    def __init__(self):
+        import http.server
+        import json as _json
+        bridge = self
+        self.healthy = True
+        self.hits = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                bridge.hits += 1
+                body = _json.dumps(_status_body(bridge.healthy)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api/status"
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+        self._stopped = False
+
+    def stop(self):
+        if not self._stopped:
+            self._stopped = True
+            self.server.shutdown()
+            self.server.server_close()
+
+
+class TestBridgeStatus(WatchChatTestCase):
+    """--status-url: a dead bridge leaves messages.db readable, so without
+    this the watch cannot tell "nobody answered" from "the bridge is down"."""
+
+    def setUp(self):
+        super().setUp()
+        self.bridge = FakeBridge()
+        self.addCleanup(self.bridge.stop)
+
+    def start_status_watch(self):
+        # idle long enough that no END line interferes with the assertions
+        return self.start_watch(idle=30, extra_args=[
+            "--status-url", self.bridge.url, "--status-interval", "0.1",
+        ])
+
+    def test_h_bridge_caida_gera_uma_linha_so(self):
+        self.start_status_watch()
+        self.assert_no_line(timeout=0.5)  # healthy at start: nothing to say
+        self.bridge.healthy = False
+        line = self.next_line(timeout=5)
+        self.assertIsNotNone(line)
+        self.assertTrue(line.startswith("BRIDGE: desconectada (healthy:false)"), line)
+        self.assertIn("a espera está cega", line)
+        # Many more checks happen while it stays down; none of them repeats the line.
+        self.assert_no_line(timeout=1.0)
+
+    def test_i_bridge_volta_gera_conectada(self):
+        self.start_status_watch()
+        self.bridge.healthy = False
+        self.assertIn("BRIDGE: desconectada", self.next_line(timeout=5) or "")
+        self.bridge.healthy = True
+        line = self.next_line(timeout=5)
+        self.assertIsNotNone(line)
+        self.assertTrue(line.startswith("BRIDGE: conectada"), line)
+
+    def test_j_porta_recusada_gera_desconectada(self):
+        self.start_status_watch()
+        self.assert_no_line(timeout=0.5)
+        self.bridge.stop()
+        line = self.next_line(timeout=10)
+        self.assertIsNotNone(line)
+        self.assertTrue(line.startswith("BRIDGE: desconectada (sem resposta"), line)
+        # And the watch itself stays up: a dead bridge is news, not a crash.
+        self.assertIsNone(self.proc.poll())
+
+    def test_k_sem_status_url_nao_chama_a_bridge(self):
+        self.start_watch(idle=30)
+        self.bridge.healthy = False
+        self.assert_no_line(timeout=1.0)
+        self.assertEqual(self.bridge.hits, 0)
+        # Positive control: the plain watch still reports messages.
+        self.insert("mensagem recebida")
+        line = self.next_line(timeout=5)
+        self.assertIsNotNone(line)
+        self.assertIn("NEW MESSAGES (1)", line)
+
+
 if __name__ == "__main__":
     unittest.main()

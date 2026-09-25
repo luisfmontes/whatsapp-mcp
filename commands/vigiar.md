@@ -24,11 +24,13 @@ Carry the resolved account alias (or server) and the contact's canonical `jid` t
 
 ## 3. Arm the watch
 
-Script path: prefer `${CLAUDE_PLUGIN_ROOT}/scripts/watch_chat.py` when set, else this repo's `scripts/watch_chat.py`. State file: a path under the session's scratchpad directory, named deterministically from the chat's jid (e.g. `vigiar-<jid-sanitized>.json`) so re-arming later in the same conversation reuses it instead of starting a fresh watch by accident.
+Script path: if whoever sent you here already resolved it (the `rainforest-mind` plugin's `vigiar` skill passes `script`, `status_url` and `db` ready), use those as given. Otherwise prefer `${CLAUDE_PLUGIN_ROOT}/scripts/watch_chat.py` **only if that file exists** — when this command is followed from another plugin, `CLAUDE_PLUGIN_ROOT` points at that plugin, not this repo — else this repo's `scripts/watch_chat.py`. State file: a path under the session's scratchpad directory, named deterministically from the chat's jid (e.g. `vigiar-<jid-sanitized>.json`) so re-arming later in the same conversation reuses it instead of starting a fresh watch by accident.
 
 ```bash
-python "<script>" --db "<messages.db>" --chat "<jid>" [--chat "<jid-lid>"] --state "<state file>" [--include-unanswered]
+python "<script>" --db "<messages.db>" --chat "<jid>" [--chat "<jid-lid>"] --state "<state file>" --status-url "<status url>" [--include-unanswered]
 ```
+
+`<status url>` is the `/api/status` of **the bridge of the account resolved in step 1**, never a fixed port: multi-account, `http://127.0.0.1:<accounts.json[alias].port>/api/status`; single account, the server's `WHATSAPP_API_BASE_URL` with `/status` appended (e.g. `http://localhost:3005/api` → `http://localhost:3005/api/status`). Without it the watch cannot tell a quiet chat from a dead bridge: `messages.db` stays readable when the bridge dies, and the wait just goes silent.
 
 Arm it with Monitor, `timeout_ms: 1800000` (30 minutes — Monitor's own cap), description naming the contact. **Do not** use an unbounded shell wrapper; `watch_chat.py` already runs its own loop and exits on its own via its `END:` line, so the command Monitor runs is exactly the one above.
 
@@ -39,6 +41,11 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 1. Call `get_message_context` on the newest message id in the line (or, if the line doesn't carry ids, `list_messages`/`get_last_interaction` on the chat) to read the full burst with surrounding context.
 2. For any message with a `media_type`, call `download_media` to pull the file before drafting a reply that references it.
 3. Decide the reply per step 5/6 below.
+
+## 4b. On a `BRIDGE: ...` event
+
+- `BRIDGE: desconectada (<reason>)` → tell Luís right away, in one line, that the watch on this contact is blind until the bridge comes back (and the reason). **Do not** disarm or re-arm: the watch keeps running and will report the return. Messages sent while the bridge is down normally reach `messages.db` when it reconnects (WhatsApp delivers them then), and the watch picks them up as usual.
+- `BRIDGE: conectada` → one line saying the watch is valid again.
 
 ## 5. Default mode: draft and ask
 

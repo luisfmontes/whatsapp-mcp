@@ -22,6 +22,16 @@ is no "already reported" history yet:
 A database read error prints one ERROR line and keeps polling; it never
 brings the watch down.
 
+A dead bridge does not look like a database error: messages.db stays
+readable, the SELECT just keeps coming back empty, and "nobody answered"
+becomes indistinguishable from "the bridge is down". --status-url (the
+account's bridge /api/status) closes that gap: every --status-interval
+seconds the watch asks the bridge whether it is healthy and prints one
+"BRIDGE: desconectada" line when it goes down and one "BRIDGE: conectada"
+line when it comes back -- once per transition, never once per check.
+Without --status-url nothing touches the network and the output is the
+same as before the flag existed.
+
 Usage:
   python watch_chat.py --db <messages.db> --chat <jid> [--chat <jid-lid>] --state <state.json>
 """
@@ -32,10 +42,14 @@ import pathlib
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
 
 DEFAULT_INTERVAL = 3
 DEFAULT_QUIET = 25
 DEFAULT_IDLE = 7200
+DEFAULT_STATUS_INTERVAL = 60
+STATUS_TIMEOUT = 3
 
 # No outgoing message ever recorded for this chat: treat the whole history as
 # unanswered rather than refusing to start.
@@ -78,6 +92,32 @@ def _last_outgoing_timestamp(db_path, chats):
         return row[0] if row else None
     finally:
         conn.close()
+
+
+def bridge_health(status_url):
+    """(healthy, reason) from the bridge's /api/status. Healthy only on HTTP
+    200 with a JSON body whose "healthy" is true; anything else -- refused
+    connection, timeout, bad JSON, healthy:false -- is down, with a short
+    reason for the BRIDGE line."""
+    try:
+        with urllib.request.urlopen(status_url, timeout=STATUS_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except (urllib.error.URLError, OSError) as e:
+        # The OS message is long and localized (and mis-encoded on a Windows
+        # console); the line only needs which of the two it was.
+        cause = getattr(e, "reason", e)
+        if isinstance(cause, ConnectionRefusedError):
+            return False, "sem resposta: conexão recusada"
+        return False, f"sem resposta em {STATUS_TIMEOUT}s"
+    except ValueError:
+        return False, "resposta sem JSON"
+    if isinstance(body, dict) and body.get("healthy") is True:
+        return True, ""
+    if isinstance(body, dict) and body.get("logged_in") is False:
+        return False, "deslogada"
+    return False, "healthy:false"
 
 
 def load_state(state_path):
@@ -130,6 +170,14 @@ def parse_args(argv=None):
         "--idle", type=float, default=DEFAULT_IDLE,
         help="seconds with nothing new at all before the watch exits on its own",
     )
+    p.add_argument(
+        "--status-url",
+        help="the account's bridge /api/status; when set, a BRIDGE line reports the bridge going down and coming back",
+    )
+    p.add_argument(
+        "--status-interval", type=float, default=DEFAULT_STATUS_INTERVAL,
+        help="seconds between bridge status checks (only with --status-url)",
+    )
     seeding = p.add_mutually_exclusive_group()
     seeding.add_argument(
         "--from-now", action="store_true",
@@ -150,7 +198,25 @@ def run(args, out=None):
         save_state(args.state, since, seen, last_activity)
 
     pending, last_new, failures = [], 0.0, 0
+    # Assume healthy at start: the caller only arms the watch after checking
+    # the bridge, so the first line worth printing is the first drop.
+    last_healthy, last_status_check = True, None
     while True:
+        if args.status_url and (
+            last_status_check is None or time.time() - last_status_check >= args.status_interval
+        ):
+            last_status_check = time.time()
+            healthy, reason = bridge_health(args.status_url)
+            if healthy != last_healthy:
+                if healthy:
+                    print("BRIDGE: conectada — a espera voltou a valer", file=out, flush=True)
+                else:
+                    print(
+                        f"BRIDGE: desconectada ({reason}) — a espera está cega: "
+                        "mensagem nova não chega enquanto a bridge estiver fora",
+                        file=out, flush=True,
+                    )
+                last_healthy = healthy
         try:
             fresh = [row for row in _select_incoming(args.db, args.chat, since) if row[0] not in seen]
             failures = 0
