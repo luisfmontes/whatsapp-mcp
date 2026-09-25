@@ -290,6 +290,7 @@ class FakeBridge:
         import json as _json
         bridge = self
         self.healthy = True
+        self.truncate = False
         self.hits = 0
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -298,9 +299,13 @@ class FakeBridge:
                 body = _json.dumps(_status_body(bridge.healthy)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                # truncate: promise the full length, send half, close -- a
+                # bridge dying mid-response (http.client.IncompleteRead).
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(body[: len(body) // 2] if bridge.truncate else body)
+                if bridge.truncate:
+                    self.close_connection = True
 
             def log_message(self, *a):
                 pass
@@ -362,6 +367,15 @@ class TestBridgeStatus(WatchChatTestCase):
         self.assertTrue(line.startswith("BRIDGE: desconectada (sem resposta"), line)
         # And the watch itself stays up: a dead bridge is news, not a crash.
         self.assertIsNone(self.proc.poll())
+
+    def test_l_resposta_cortada_gera_desconectada_sem_derrubar(self):
+        self.start_status_watch()
+        self.assert_no_line(timeout=0.5)
+        self.bridge.truncate = True
+        line = self.next_line(timeout=5)
+        self.assertIsNotNone(line)
+        self.assertTrue(line.startswith("BRIDGE: desconectada (resposta cortada)"), line)
+        self.assertIsNone(self.proc.poll(), "a cut-off response must not kill the watch")
 
     def test_k_sem_status_url_nao_chama_a_bridge(self):
         self.start_watch(idle=30)

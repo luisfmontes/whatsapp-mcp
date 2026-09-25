@@ -36,6 +36,7 @@ Usage:
   python watch_chat.py --db <messages.db> --chat <jid> [--chat <jid-lid>] --state <state.json>
 """
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -104,6 +105,10 @@ def bridge_health(status_url):
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}"
+    except http.client.HTTPException:
+        # e.g. IncompleteRead: the bridge died mid-response. Not an OSError,
+        # and uncaught it would take the whole watch down with no line.
+        return False, "resposta cortada"
     except (urllib.error.URLError, OSError) as e:
         # The OS message is long and localized (and mis-encoded on a Windows
         # console); the line only needs which of the two it was.
