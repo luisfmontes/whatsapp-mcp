@@ -1,6 +1,6 @@
 # WhatsApp MCP Server
 
-> Independent, actively maintained project, originally based on [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) (frozen since early 2025). It keeps the bridge working against the current WhatsApp protocol and adds LID contact resolution, security hardening, audio transcription and more.
+> Independent, maintained project originally based on [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp).
 
 This is a Model Context Protocol (MCP) server for WhatsApp.
 

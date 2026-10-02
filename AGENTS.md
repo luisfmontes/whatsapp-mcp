@@ -21,7 +21,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - Re-parear/re-sync: `StoreMessage` preserva `content` existente via `COALESCE(NULLIF(...))` (não sobrescreve transcrição com string vazia do sync) — mas faça backup de `messages.db`/`whatsapp.db` antes de qualquer re-pareamento de qualquer forma, é operação real de produção.
 - Transcrição é **opt-in**; sem engine, sweep deve ser no-op (não marcar áudios).
 - `transcription.env` **nunca** commitado (gitignored).
-- Repo próprio (independente do projeto original): `origin` = `rodrigopg/whatsapp-mcp`. Push direto só quando o usuário pedir.
+- Repo próprio (independente do projeto original): `origin` = `rodrigopg/whatsapp-mcp`.
 
 ## Checklist antes de abrir PR
 
