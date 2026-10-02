@@ -86,4 +86,4 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
 
 ## Git
 
-- Remotes: `rodrigopg` = fork (push aqui), `origin` = lharries upstream. main rastreia `rodrigopg/main`.
+- Remote: `origin` = `rodrigopg/whatsapp-mcp`. main rastreia `origin/main`.
