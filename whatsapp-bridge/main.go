@@ -4072,7 +4072,7 @@ func handleMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, evt 
 	newPath := retryData.GetDirectPath()
 	data, err := client.DownloadMediaWithPath(context.Background(), newPath,
 		entry.fileEncSHA256, entry.fileSHA256, entry.mediaKey,
-		int(entry.fileLength), waMediaType, "")
+		waMediaType, "", false)
 	if err != nil {
 		fmt.Printf("MEDIA RETRY %s: ERROR download with fresh path failed: %v\n", evt.MessageID, err)
 		return
