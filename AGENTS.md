@@ -1,4 +1,4 @@
-# WhatsApp MCP Server (community fork)
+# WhatsApp MCP Server
 
 MCP server pra WhatsApp pessoal. Bridge Go/whatsmeow (`whatsapp-bridge/`) + servidor MCP Python (`whatsapp-mcp-server/`), SQLite local, transcrição de áudio opt-in.
 
@@ -21,7 +21,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - Re-parear/re-sync: `StoreMessage` preserva `content` existente via `COALESCE(NULLIF(...))` (não sobrescreve transcrição com string vazia do sync) — mas faça backup de `messages.db`/`whatsapp.db` antes de qualquer re-pareamento de qualquer forma, é operação real de produção.
 - Transcrição é **opt-in**; sem engine, sweep deve ser no-op (não marcar áudios).
 - `transcription.env` **nunca** commitado (gitignored).
-- Push em `rodrigopg` (fork), não `origin` (upstream).
+- Repo próprio (independente do projeto original): `origin` = `rodrigopg/whatsapp-mcp`. Push direto só quando o usuário pedir.
 
 ## Checklist antes de abrir PR
 

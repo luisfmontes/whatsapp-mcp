@@ -1,6 +1,6 @@
-# WhatsApp MCP Server (Community Fork)
+# WhatsApp MCP Server
 
-> **Why this fork?** The [upstream repo](https://github.com/lharries/whatsapp-mcp) has been frozen since early 2025 — over 30 open PRs with critical fixes (broken whatsmeow API, LID contact migration, security hardening) were left unmerged. This fork cherry-picks the best of those PRs and keeps the bridge working against current WhatsApp protocol.
+> Independent, actively maintained project, originally based on [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) (frozen since early 2025). It keeps the bridge working against the current WhatsApp protocol and adds LID contact resolution, security hardening, audio transcription and more.
 
 This is a Model Context Protocol (MCP) server for WhatsApp.
 
@@ -12,7 +12,7 @@ It connects to your **personal WhatsApp account** directly via the WhatsApp web 
 
 ---
 
-## What's new in this fork
+## Highlights
 
 ### Bug fixes & compatibility
 - **whatsmeow API updated** — the upstream bridge broke when whatsmeow added `context.Context` to all API calls. Fixed across all call sites.
@@ -270,6 +270,6 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 
 ## Credits
 
-- Original project: [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp)
+- Originally based on [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) by Luke Harries (MIT)
 - WhatsApp web protocol library: [whatsmeow](https://github.com/tulir/whatsmeow)
 - PRs cherry-picked from: #209 (coucaj), #221 (fpto), #239 (jayeshkaithwas), #244 (realitix)
