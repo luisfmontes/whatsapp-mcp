@@ -1733,10 +1733,11 @@ func extractDirectPathFromURL(url string) string {
 
 	pathPart := parts[1]
 
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
+	// Keep the query string: ccb/oh/oe/_nc_sid carry the CDN authorization and
+	// whatsmeow appends "&hash=..." to this path. Only the URL-level mms3 flag
+	// is not part of the message's direct path.
+	pathPart = strings.TrimSuffix(pathPart, "&mms3=true")
 
-	// Create proper direct path format
 	return "/" + pathPart
 }
 
@@ -4072,7 +4073,7 @@ func handleMediaRetry(client *whatsmeow.Client, messageStore *MessageStore, evt 
 	newPath := retryData.GetDirectPath()
 	data, err := client.DownloadMediaWithPath(context.Background(), newPath,
 		entry.fileEncSHA256, entry.fileSHA256, entry.mediaKey,
-		int(entry.fileLength), waMediaType, "")
+		waMediaType, "", false)
 	if err != nil {
 		fmt.Printf("MEDIA RETRY %s: ERROR download with fresh path failed: %v\n", evt.MessageID, err)
 		return
