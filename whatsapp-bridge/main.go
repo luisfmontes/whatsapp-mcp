@@ -74,7 +74,9 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	// busy_timeout: transcribe.py writes into this same file, so there are two
+	// writers; without it a concurrent write fails at once with SQLITE_BUSY.
+	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -2099,7 +2101,9 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 // messageStore.db (which uses the plain "sqlite3" driver) to avoid touching
 // the existing write path.
 func openUnaccentMessagesDB() (*sql.DB, error) {
-	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on")
+	// busy_timeout: while history sync writes, a long read would otherwise fail
+	// at once with "database is locked (SQLITE_BUSY)" instead of waiting.
+	return sql.Open("sqlite3_unaccent", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 }
 
 // openStoreDBReadOnly opens a read-only connection to whatsmeow's own
