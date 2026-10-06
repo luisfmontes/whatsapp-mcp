@@ -93,7 +93,7 @@ The optional `notice` is a text message sent right before the voice note, and on
   ```sh
   export TTS_ENGINE=local
   export TTS_CLI=/path/to/piper
-  export TTS_MODEL=/path/to/pt_BR-faber-medium.onnx
+  export TTS_MODEL=/path/to/pt_BR-cadu-medium.onnx
   ```
 - **API (any OpenAI-compatible `/audio/speech` endpoint)** — audio is generated remotely:
   ```sh
@@ -105,7 +105,7 @@ The optional `notice` is a text message sent right before the voice note, and on
   #   TTS_API_VOICE=alloy
   ```
 
-The voice model is never part of this repo. For Brazilian Portuguese, [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices) has `pt/pt_BR` voices (faber, cadu, jeff, edresson). They are fine-tunes of the `lessac` (en_US) voice, whose dataset carries its own license (Blizzard 2013), so check the terms before using one for anything beyond personal use.
+The voice model is never part of this repo. For Brazilian Portuguese, [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices) has `pt/pt_BR` voices (cadu, used in the example above, plus faber, jeff and edresson). They are fine-tunes of the `lessac` (en_US) voice, whose dataset carries its own license (Blizzard 2013), so check the terms before using one for anything beyond personal use.
 
 ### Configuration
 - `WHATSAPP_BRIDGE_PORT` env var — change the REST API port (default `8080`)
