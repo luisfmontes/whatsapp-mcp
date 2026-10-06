@@ -43,16 +43,31 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
    - Call `download_media` to pull the file before drafting a reply that references it.
    - **If the message is audio** (`media_type` `audio`), understand it before replying.
      - States of the audio's `content` field: real text = transcribed, done; `""` (empty) = pending transcription; `[áudio sem transcrição]` or `[áudio indisponível: mídia expirada no servidor]` = no usable transcript — do not interpret these markers as speech, and alert Luís with the one that appeared.
-     - For a pending audio (empty content), transcribe only that audio: load `transcription.env` from the server's config, override `TRANSCRIPTION_ENGINE=local`, and run:
-       - Server directory: multi-account setup (`~/.whatsapp-mcp/accounts.json` exists), use `<accounts.json[alias].dir>/../whatsapp-mcp-server`; single account, it's the root where `whatsapp-bridge` and `whatsapp-mcp-server` live (same as the `--directory` value that resolved `messages.db` in step 2).
-       - `source` the `transcription.env` file if it exists at `<server dir>/../transcription.env`, following the `export VAR=value` format (use `set -a && source transcription.env && set +a` on Bash/Git Bash). Confirm `TRANSCRIPTION_ENGINE=local` after sourcing (the file may have `off`).
-       - Port: multi-account, `accounts.json[alias].port`; single account, the port from `WHATSAPP_API_BASE_URL` in the server (parse URL if needed) or `WHATSAPP_BRIDGE_PORT` if set.
-       - If the bridge requires auth: pass `WHATSAPP_API_AUTH_TOKEN` (see `setup.md` for how the server gets it).
-       - Run (Git Bash on Windows, Bash elsewhere):
+     - For a pending audio (empty content), transcribe only that audio with the server's `transcribe.py`:
+       - `<server dir>`: the `--directory` of this repo's MCP server entry in `~/.claude.json` (it is `<install dir>/whatsapp-mcp-server`, the same for every account). `<install dir>` is its parent.
+       - `<port>`: multi-account, `accounts.json[alias].port`; single account, the port of the server's `WHATSAPP_API_BASE_URL` (same rule as step 3). If that bridge has `API_AUTH_TOKEN` set (non-loopback `BIND_ADDR`, see `commands/setup.md`), also export `WHATSAPP_API_AUTH_TOKEN` with the same token.
+       - `transcription.env` carries `WHISPER_CLI`, `WHISPER_MODEL` and `FFMPEG_BIN`, which `transcribe.py` doesn't load by itself; `TRANSCRIPTION_ENGINE=local` comes after it because the file may say `off`, which only disables the automatic sweep.
+       - On Windows, run it with PowerShell — Bash would strip the unquoted `\` from the Windows paths in that file and the engine would look missing:
+         ```powershell
+         $envFile = "<install dir>/transcription.env"
+         if (Test-Path $envFile) {
+           Get-Content $envFile | ForEach-Object {
+             if ($_ -match '^\s*export\s+(\w+)=(.+)$') {
+               Set-Item -Path "env:$($matches[1])" -Value ($matches[2] -replace '^["'']|["'']$')
+             }
+           }
+         }
+         $env:TRANSCRIPTION_ENGINE = "local"
+         $env:WHATSAPP_MESSAGES_DB = "<messages.db from step 2>"
+         $env:WHATSAPP_API_BASE_URL = "http://127.0.0.1:<port>/api"
+         uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
+         ```
+       - On macOS/Linux, with Bash:
          ```bash
-         WHATSAPP_MESSAGES_DB="<that path from step 2>" \
+         set -a; [ -f "<install dir>/transcription.env" ] && . "<install dir>/transcription.env"; set +a
+         TRANSCRIPTION_ENGINE=local \
+         WHATSAPP_MESSAGES_DB="<messages.db from step 2>" \
          WHATSAPP_API_BASE_URL="http://127.0.0.1:<port>/api" \
-         [WHATSAPP_API_AUTH_TOKEN="<token>" \] \
          uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
          ```
        - Then call `get_message_context` on that message again to read the transcript. If the log says "Transcription not active", don't re-run — tell Luís with the reason printed (`WHISPER_CLI`/`WHISPER_MODEL` missing or not configured), and skip any reply that depends on hearing the audio.
