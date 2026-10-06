@@ -39,8 +39,15 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 ## 4. On each `NEW MESSAGES (...)` event
 
 1. Call `get_message_context` on the newest message id in the line (or, if the line doesn't carry ids, `list_messages`/`get_last_interaction` on the chat) to read the full burst with surrounding context.
-2. For any message with a `media_type`, call `download_media` to pull the file before drafting a reply that references it.
-3. Decide the reply per step 5/6 below.
+2. For any message with a `media_type`:
+   - Call `download_media` to pull the file before drafting a reply that references it.
+   - **If the message is audio** (`media_type: audio`), transcribe before replying:
+     - First, check if the `transcription` field is already in the message context (MCP transcription engine may have already transcribed it).
+     - If not, use local transcription: invoke whisper.cpp via `WHISPER_CLI` and `WHISPER_MODEL` environment variables on the downloaded file. Whisper prompt is `WHISPER_PROMPT`, and output format is JSON (`-oj`).
+     - If `TRANSCRIPTION_ENGINE` is set to `off` or not configured, **always attempt local transcription** — never reply with "I cannot hear audio" without trying whisper.cpp first.
+     - If no transcription engine is available (neither MCP nor local `WHISPER_CLI` configured), tell Luís directly rather than replying to the contact; include the audio file path and a note about which transcription method is missing.
+3. For any message that references a prior topic ("that document", "what we discussed earlier", etc.), check the chat history first: call `list_messages` with a wide time window or use `get_message_context` with additional parameters to search for related messages. If no prior reference is found in history, ask either the contact or Luís for clarification instead of assuming.
+4. Decide the reply per step 5/6 below.
 
 ## 4b. On a `BRIDGE: ...` event
 
@@ -49,17 +56,19 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 
 ## 5. Default mode: draft and ask
 
-Follow the `message-standards` skill in full — relation → intent → draft → self-check — using the resolved contact as the relationship. Show Luís the draft block (`Para:` / body with footer) and wait for his go-ahead before calling `send_message`. Never send on this path without that confirmation, even if the draft looks obviously right.
+Load the `message-standards` skill before drafting any reply. Follow it in full — relation → intent → draft → self-check — using the resolved contact as the relationship. Show Luís the draft block (`Para:` / body with footer) and wait for his go-ahead before calling `send_message` or `send_file`. Never send on this path without that confirmation, even if the draft looks obviously right.
 
 ## 6. `--auto` mode: send directly, with limits
 
-Skip the approval step and call `send_message` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped. The footer is **not** the standard skill footer; use exactly:
+Load the `message-standards` skill before drafting any reply. Skip the approval step and call `send_message` or `send_file` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped. 
+
+The footer is **not** the standard skill footer; use exactly:
 
 ```
 🤖 _Resposta automática do assistente do Luís Montes, sem revisão dele._
 ```
 
-(This command's brief calls for a stronger disclaimer than the skill's default footer, since nobody reviewed this specific reply before it went out.)
+(This command's brief calls for a stronger disclaimer than the skill's default footer, since nobody reviewed this specific reply before it went out.) Note: the skill's rule against first-person call-to-action still applies — do not ask the contact to "message me" or "let me know" before the footer; instead, if contact interaction is needed, address it directly by name or as a statement, then attach the footer.
 
 **Always stop and ask instead of sending**, `--auto` or not, when the reply would:
 - Take a destructive or hard-to-reverse action (delete/revoke a message, send money or a commitment of money, share a credential, anything the recipient could act on immediately and badly if it's wrong).
