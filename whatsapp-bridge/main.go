@@ -4282,6 +4282,24 @@ type DownloadMediaResponse struct {
 	Message  string `json:"message"`
 	Filename string `json:"filename,omitempty"`
 	Path     string `json:"path,omitempty"`
+	// Reason is set only when the CDN itself reported the media gone
+	// (403/404/410), so callers can tell an expired file from an unrelated
+	// failure. See mediaGoneOnCDN.
+	Reason string `json:"reason,omitempty"`
+}
+
+// downloadReasonMediaGone is the DownloadMediaResponse.Reason value for media
+// the CDN no longer serves.
+const downloadReasonMediaGone = "media_gone"
+
+// mediaGoneOnCDN reports whether err means the CDN answered 403, 404 or 410 for
+// the media: the file expired or was removed, and retrying will not help.
+// Anything else (network, decrypt, incomplete DB row, ...) is not evidence about
+// the media.
+func mediaGoneOnCDN(err error) bool {
+	return errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith403) ||
+		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
+		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410)
 }
 
 // Store additional media info in the database
@@ -4600,7 +4618,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Download the media using whatsmeow client
 	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
-		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
+		return false, "", "", "", fmt.Errorf("failed to download media: %w", err)
 	}
 
 	// Save the downloaded media to file
@@ -6042,11 +6060,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				errMsg = err.Error()
 			}
 
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(DownloadMediaResponse{
+			resp := DownloadMediaResponse{
 				Success: false,
 				Message: fmt.Sprintf("Failed to download media: %s", errMsg),
-			})
+			}
+			if mediaGoneOnCDN(err) {
+				resp.Reason = downloadReasonMediaGone
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
@@ -6801,6 +6823,9 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
+	// A message we cannot decrypt (e.g. "old counter" after a Signal session desync) is otherwise
+	// dropped for good: ask the primary phone to resend it.
+	client.AutomaticMessageRerequestFromPhone = true
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()

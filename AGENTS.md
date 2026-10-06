@@ -21,7 +21,7 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
 - Re-parear/re-sync: `StoreMessage` preserva `content` existente via `COALESCE(NULLIF(...))` (não sobrescreve transcrição com string vazia do sync) — mas faça backup de `messages.db`/`whatsapp.db` antes de qualquer re-pareamento de qualquer forma, é operação real de produção.
 - Transcrição é **opt-in**; sem engine, sweep deve ser no-op (não marcar áudios).
 - `transcription.env` **nunca** commitado (gitignored).
-- Push em `origin` (`luisfmontes/whatsapp-mcp`, este fork), **não** em `upstream` (`rodrigopg/whatsapp-mcp`, que é só fetch para sincronizar).
+- Push em `origin` (`luisfmontes/whatsapp-mcp`, este fork), **não** em `upstream` (`rodrigopg/whatsapp-mcp`: só fetch, e destino de PR aberto a partir de branch do fork).
 
 ## Checklist antes de abrir PR
 
@@ -34,7 +34,16 @@ Tarefa multi-área: leia os arquivos relevantes em paralelo.
       `scripts/personal-data-baseline.txt` que ele e sintetico.
 - [ ] Mudou comportamento de sync/escrita? Conferir impacto em transcrições existentes.
 - [ ] README/install.sh coerentes se mudou onboarding (versão Go, env vars, troubleshooting).
-- [ ] PR contra `origin/main`. Nada de PR **novo** para `upstream` (rodrigopg) — o destino é este fork. Os dois que já existem lá seguem seu curso: o #15 foi mesclado em 26/08/2026, e o #14 foi aprovado, rebaseado a pedido do dono do repo (31/08/2026) e espera o merge dele. Se o Rodrigo pedir ajuste em algum, atender é trabalho legítimo; fechá-los sem motivo técnico é ruído no repositório de outra pessoa.
+- [ ] PR contra `origin/main`. Trabalho do fork vai para o fork.
+- [ ] Correção que também vale no `upstream` (rodrigopg) volta para lá como PR
+      **pequeno, um assunto por PR**, decidido em 06/10/2026 (antes era "nada de PR
+      novo lá"). Antes de abrir: confirmar que o bug existe no código **dele**, não pelo
+      título do commit — ele reimplementou por conta própria enquete, edit/revoke e
+      mais. Branch `up/<assunto>` a partir de `upstream/main`, seguindo a seção
+      "Higiene de PRs paralelos" do AGENTS.md dele (teste novo em arquivo novo; PR
+      sempre contra `main`, então PR que depende de outro espera o merge do primeiro).
+      Push da branch em `origin`; o PR é que aponta para o `upstream`.
+      Abertos em 06/10/2026: #14 (refeito após revisão), #35, #36, #37.
 
 ## Comandos essenciais
 
