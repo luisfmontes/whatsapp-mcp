@@ -41,9 +41,22 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 1. Call `get_message_context` on the newest message id in the line (or, if the line doesn't carry ids, `list_messages`/`get_last_interaction` on the chat) to read the full burst with surrounding context.
 2. For any message with a `media_type`:
    - Call `download_media` to pull the file before drafting a reply that references it.
-   - **If the message is audio** (`media_type` `audio`), understand it before replying. A transcribed audio already shows its text as the message content; an audio with empty content is still pending.
-     - For a pending audio, run the local whisper.cpp backfill against the chat's `messages.db` from step 2: `TRANSCRIPTION_ENGINE=local WHATSAPP_MESSAGES_DB=<that path> WHATSAPP_BRIDGE_PORT=<that account's port in accounts.json> uv run --directory whatsapp-mcp-server python transcribe.py --limit 5`, then re-read the message. Do this even when `TRANSCRIPTION_ENGINE` is `off` in the server's config: `off` only means the bridge doesn't transcribe on its own, not that no engine exists on this machine.
-     - Never tell the contact you can't listen to audio. If the backfill reports no usable engine (`WHISPER_CLI`/`WHISPER_MODEL` missing), tell Luís, with the reason it printed, and don't reply to that audio.
+   - **If the message is audio** (`media_type` `audio`), understand it before replying.
+     - States of the audio's `content` field: real text = transcribed, done; `""` (empty) = pending transcription; `[áudio sem transcrição]` or `[áudio indisponível: mídia expirada no servidor]` = no usable transcript — do not interpret these markers as speech, and alert Luís with the one that appeared.
+     - For a pending audio (empty content), transcribe only that audio: load `transcription.env` from the server's config, override `TRANSCRIPTION_ENGINE=local`, and run:
+       - Server directory: multi-account setup (`~/.whatsapp-mcp/accounts.json` exists), use `<accounts.json[alias].dir>/../whatsapp-mcp-server`; single account, it's the root where `whatsapp-bridge` and `whatsapp-mcp-server` live (same as the `--directory` value that resolved `messages.db` in step 2).
+       - `source` the `transcription.env` file if it exists at `<server dir>/../transcription.env`, following the `export VAR=value` format (use `set -a && source transcription.env && set +a` on Bash/Git Bash). Confirm `TRANSCRIPTION_ENGINE=local` after sourcing (the file may have `off`).
+       - Port: multi-account, `accounts.json[alias].port`; single account, the port from `WHATSAPP_API_BASE_URL` in the server (parse URL if needed) or `WHATSAPP_BRIDGE_PORT` if set.
+       - If the bridge requires auth: pass `WHATSAPP_API_AUTH_TOKEN` (see `setup.md` for how the server gets it).
+       - Run (Git Bash on Windows, Bash elsewhere):
+         ```bash
+         WHATSAPP_MESSAGES_DB="<that path from step 2>" \
+         WHATSAPP_API_BASE_URL="http://127.0.0.1:<port>/api" \
+         [WHATSAPP_API_AUTH_TOKEN="<token>" \] \
+         uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
+         ```
+       - Then call `get_message_context` on that message again to read the transcript. If the log says "Transcription not active", don't re-run — tell Luís with the reason printed (`WHISPER_CLI`/`WHISPER_MODEL` missing or not configured), and skip any reply that depends on hearing the audio.
+     - Never tell the contact you can't listen to audio; report the issue to Luís instead.
 3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
 4. Decide the reply per step 5/6 below.
 
@@ -66,7 +79,9 @@ The footer is **not** the standard skill footer; use exactly:
 🤖 _Resposta automática do assistente do Luís Montes, sem revisão dele._
 ```
 
-(This command's brief calls for a stronger disclaimer than the skill's default footer, since nobody reviewed this specific reply before it went out.) Note: the skill's rule against first-person call-to-action still applies — do not ask the contact to "message me" or "let me know" before the footer; instead, if contact interaction is needed, address it directly by name or as a statement, then attach the footer.
+(This command's brief calls for a stronger disclaimer than the skill's default footer, since nobody reviewed this specific reply before it went out.)
+
+**First-person call-to-action rule (message-standards, rule 2):** avoid phrases like "message me" or "let me know" right before the footer — the "me" becomes ambiguous between the contact and the assistant that just identified itself below. Two solutions: (a) end the message at the content without any call-to-action, and let the footer close it; or (b) name Luís explicitly ("any questions, message Luís" or, in Portuguese, "Qualquer dúvida, chama o Luís").
 
 **Always stop and ask instead of sending**, `--auto` or not, when the reply would:
 - Take a destructive or hard-to-reverse action (delete/revoke a message, send money or a commitment of money, share a credential, anything the recipient could act on immediately and badly if it's wrong).
