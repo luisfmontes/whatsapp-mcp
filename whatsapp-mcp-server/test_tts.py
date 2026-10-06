@@ -31,6 +31,9 @@ with wave.open(out, "wb") as w:
     w.setsampwidth(2)
     w.setframerate(22050)
     w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 20.0))) for i in range(11025)))
+marker = os.environ.get("FAKE_TTS_MARKER")
+if marker:
+    open(marker, "w").close()
 '''
 
 
@@ -376,6 +379,70 @@ class TestRobustness(TTSTestCase):
             self.assertIn("encoded", message)
             self.assertEqual(server.requests, [])
             self.assertNoLeftovers()
+
+
+class TestNotice(TTSTestCase):
+    RECIPIENT = TestSendVoiceMessage.RECIPIENT
+    bridge = TestSendVoiceMessage.bridge
+
+    def call(self, server, text, notice):
+        with patch.object(whatsapp, "WHATSAPP_API_BASE_URL", server.url + "/api"):
+            return whatsapp.send_voice_message(self.RECIPIENT, text, notice)
+
+    @needs_ffmpeg
+    def test_notice_is_sent_after_synthesis_right_before_audio(self):
+        marker = os.path.join(self.work, "synthesis.done")
+        seen = []
+
+        def respond(req):
+            payload = json.loads(req["body"])
+            seen.append({"payload": payload, "marker_existed": os.path.exists(marker)})
+            return 200, "application/json", json.dumps({"success": True, "message": "Message sent"}).encode()
+
+        with FakeServer(respond) as server, self.local(), patch.dict(os.environ, {"FAKE_TTS_MARKER": marker}):
+            success, message = self.call(server, "Olá", "aviso")
+        self.assertTrue(success, message)
+        self.assertEqual([r["path"] for r in server.requests], ["/api/send", "/api/send"])
+        first, second = seen
+        self.assertEqual(first["payload"]["message"], "aviso")
+        self.assertNotIn("media_path", first["payload"])
+        self.assertTrue(second["payload"]["media_path"].endswith(".ogg"))
+        self.assertTrue(first["marker_existed"], "the speech must be generated before the notice is sent")
+        self.assertNoLeftovers()
+
+    @needs_ffmpeg
+    def test_notice_with_engine_failure_sends_nothing(self):
+        with self.bridge() as server, self.local(), patch.dict(os.environ, {"FAKE_TTS_FAIL": "1"}):
+            success, message = self.call(server, "Olá", "aviso")
+        self.assertFalse(success)
+        self.assertEqual(server.requests, [])
+        self.assertNoLeftovers()
+
+    @needs_ffmpeg
+    def test_notice_rejected_by_bridge_skips_audio(self):
+        def respond(req):
+            payload = json.loads(req["body"])
+            if payload.get("media_path"):
+                return 200, "application/json", json.dumps({"success": True, "message": "Message sent"}).encode()
+            return 200, "application/json", json.dumps({"success": False, "message": "notice refused"}).encode()
+
+        with FakeServer(respond) as server, self.local():
+            success, message = self.call(server, "Olá", "aviso")
+        self.assertFalse(success)
+        self.assertIn("notice refused", message)
+        self.assertEqual(len(server.requests), 1)
+        self.assertNotIn("media_path", json.loads(server.requests[0]["body"]))
+        self.assertNoLeftovers()
+
+    @needs_ffmpeg
+    def test_no_notice_sends_only_the_audio(self):
+        with self.bridge() as server, self.local():
+            success, message = self.call(server, "Olá", "")
+        self.assertTrue(success, message)
+        self.assertEqual(len(server.seen), 1)
+        self.assertTrue(server.seen[0]["payload"]["media_path"].endswith(".ogg"))
+        self.assertNotIn("message", server.seen[0]["payload"])
+        self.assertNoLeftovers()
 
 
 if __name__ == "__main__":

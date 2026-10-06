@@ -257,18 +257,19 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     }
 
 @write_tool
-def send_voice_message(recipient: str, text: str) -> Dict[str, Any]:
+def send_voice_message(recipient: str, text: str, notice: str = "") -> Dict[str, Any]:
     """Convert text to speech and send it as a WhatsApp voice message. For group messages use the JID. Requires TTS_ENGINE to be configured (see README); otherwise nothing is sent and the reason is returned. Text is limited to 4096 characters.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         text: The text to speak (max 4096 characters)
+        notice: Optional text message sent right before the voice note, only after the speech was generated (nothing is sent if generation fails; if the notice cannot be sent, the voice note is not sent either)
 
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_send_voice_message(recipient, text)
+    success, status_message = whatsapp_send_voice_message(recipient, text, notice)
     return {
         "success": success,
         "message": status_message

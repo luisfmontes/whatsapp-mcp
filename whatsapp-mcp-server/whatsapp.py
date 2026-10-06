@@ -521,8 +521,12 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_voice_message(recipient: str, text: str) -> Tuple[bool, str]:
-    """Synthesize text to speech and send it as a WhatsApp voice message."""
+def send_voice_message(recipient: str, text: str, notice: str = "") -> Tuple[bool, str]:
+    """Synthesize text to speech and send it as a WhatsApp voice message.
+
+    If notice is given, it is sent as a text message right before the audio, only after the
+    speech was generated (so the two arrive together); if it fails, the audio is not sent.
+    """
     if not recipient:
         return False, "Recipient must be provided"
     if not text or not text.strip():
@@ -538,6 +542,10 @@ def send_voice_message(recipient: str, text: str) -> Tuple[bool, str]:
         return False, f"Text-to-speech failed: {e}"
 
     try:
+        if notice:
+            sent, reason = send_message(recipient, notice)
+            if not sent:
+                return False, f"Notice not sent, voice message skipped: {reason}"
         return send_audio_message(recipient, ogg_path)
     finally:
         try:
