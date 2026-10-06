@@ -243,7 +243,12 @@ class TestAccountTaskName:
 
     def test_get_named_task_name(self, monkeypatch):
         """account_task_name(alias) returns task name of the named account."""
-        assert accounts.account_task_name("trabalho") == "WhatsAppMCPBridge-trabalho"
+        # Isolate from real accounts.json in the environment
+        monkeypatch.delenv("WHATSAPP_ACCOUNTS_FILE", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.setenv("HOME", tmpdir)
+            monkeypatch.setenv("USERPROFILE", tmpdir)
+            assert accounts.account_task_name("trabalho") == "WhatsAppMCPBridge-trabalho"
 
     def test_task_name_without_config(self, monkeypatch):
         """account_task_name(alias) works without accounts.json when alias is provided."""
@@ -251,6 +256,77 @@ class TestAccountTaskName:
         with tempfile.TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("HOME", tmpdir)
             monkeypatch.setenv("USERPROFILE", tmpdir)
+            assert accounts.account_task_name("trabalho") == "WhatsAppMCPBridge-trabalho"
+
+    def test_legacy_account_task_name_default(self, monkeypatch):
+        """When default account's dir is the root bridge, task name is WhatsAppMCPBridge."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Compute the anchor as Path(accounts.__file__).resolve().parent.parent / "whatsapp-bridge"
+            root_bridge = Path(accounts.__file__).resolve().parent.parent / "whatsapp-bridge"
+            accounts_file = Path(tmpdir) / "accounts.json"
+            accounts_file.write_text(
+                json.dumps({
+                    "default": "pessoal",
+                    "accounts": {
+                        "pessoal": {"dir": str(root_bridge), "port": 3005, "jid": None},
+                        "trabalho": {"dir": str(Path(tmpdir) / "trabalho"), "port": 3006, "jid": None}
+                    }
+                })
+            )
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+            assert accounts.account_task_name(None) == "WhatsAppMCPBridge"
+
+    def test_legacy_account_task_name_explicit_alias(self, monkeypatch):
+        """When account's dir is the root bridge (by explicit alias), task name is WhatsAppMCPBridge."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_bridge = Path(accounts.__file__).resolve().parent.parent / "whatsapp-bridge"
+            accounts_file = Path(tmpdir) / "accounts.json"
+            accounts_file.write_text(
+                json.dumps({
+                    "default": "pessoal",
+                    "accounts": {
+                        "pessoal": {"dir": str(root_bridge), "port": 3005, "jid": None},
+                        "trabalho": {"dir": str(Path(tmpdir) / "trabalho"), "port": 3006, "jid": None}
+                    }
+                })
+            )
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+            assert accounts.account_task_name("pessoal") == "WhatsAppMCPBridge"
+
+    def test_legacy_account_task_name_normalized_path(self, monkeypatch):
+        """When root bridge dir has different separators or trailing slash, still recognized as legacy."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_bridge = Path(accounts.__file__).resolve().parent.parent / "whatsapp-bridge"
+            # Write the path with swapped separators (forward slashes on Windows) and trailing slash
+            root_bridge_str = str(root_bridge).replace("\\", "/") + "/"
+            accounts_file = Path(tmpdir) / "accounts.json"
+            accounts_file.write_text(
+                json.dumps({
+                    "default": "pessoal",
+                    "accounts": {
+                        "pessoal": {"dir": root_bridge_str, "port": 3005, "jid": None}
+                    }
+                })
+            )
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
+            assert accounts.account_task_name(None) == "WhatsAppMCPBridge"
+
+    def test_secondary_account_task_name(self, monkeypatch):
+        """Secondary account with dir in accounts/<alias> gets WhatsAppMCPBridge-<alias>."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_bridge = Path(accounts.__file__).resolve().parent.parent / "whatsapp-bridge"
+            trabalho_dir = str(Path(tmpdir) / "accounts" / "trabalho")
+            accounts_file = Path(tmpdir) / "accounts.json"
+            accounts_file.write_text(
+                json.dumps({
+                    "default": "pessoal",
+                    "accounts": {
+                        "pessoal": {"dir": str(root_bridge), "port": 3005, "jid": None},
+                        "trabalho": {"dir": trabalho_dir, "port": 3006, "jid": None}
+                    }
+                })
+            )
+            monkeypatch.setenv("WHATSAPP_ACCOUNTS_FILE", str(accounts_file))
             assert accounts.account_task_name("trabalho") == "WhatsAppMCPBridge-trabalho"
 
 

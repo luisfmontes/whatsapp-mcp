@@ -219,19 +219,35 @@ def account_task_name(alias: Optional[str] = None) -> str:
 
     Returns:
         The task name (e.g., "WhatsAppMCPBridge-pessoal", or "WhatsAppMCPBridge"
-        for the legacy single-account case when no accounts.json exists).
+        for the legacy single-account case when the account's directory is the
+        installation root's whatsapp-bridge, or when no accounts.json exists).
 
     Raises:
         ValueError: If accounts are configured but the alias is unknown.
     """
+    accounts_map = _load_accounts_map()
+
     if alias is None:
-        accounts_map = _load_accounts_map()
         if accounts_map is None:
             # No accounts.json: fall back to default task name (legacy single-account case)
             return "WhatsAppMCPBridge"
         alias = accounts_map.get("default")
         if not alias:
             raise ValueError("No default account set")
+
+    # Check if this account's dir matches the legacy root bridge (installation root)
+    if accounts_map is not None:
+        accounts = accounts_map.get("accounts", {})
+        if alias in accounts and isinstance(accounts[alias], dict):
+            account = accounts[alias]
+            dir_path = account.get("dir")
+            if dir_path:
+                # Windows paths are case-insensitive and mix separators; compare normalized.
+                account_dir_normalized = os.path.normcase(os.path.normpath(str(dir_path)))
+                root_bridge = Path(__file__).resolve().parent.parent / "whatsapp-bridge"
+                root_bridge_normalized = os.path.normcase(os.path.normpath(str(root_bridge)))
+                if account_dir_normalized == root_bridge_normalized:
+                    return "WhatsAppMCPBridge"
 
     return f"WhatsAppMCPBridge-{alias}"
 
