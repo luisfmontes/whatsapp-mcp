@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
 import tts
+import whatsapp
 
 FAKE_TTS_SCRIPT = '''\
 import os, struct, sys, wave, math
@@ -257,6 +258,81 @@ class TestNotConfiguredAndLimits(TTSTestCase):
             path = tts.synthesize("a" * 4096)
         self.assertEqual(codec_name(path), "opus")
         os.remove(path)
+
+
+class TestSendVoiceMessage(TTSTestCase):
+    RECIPIENT = "5511999990000"
+
+    def bridge(self):
+        """Fake bridge: records each request and whether its media file existed."""
+        seen = []
+
+        def respond(req):
+            payload = json.loads(req["body"])
+            media = payload.get("media_path")
+            seen.append({"path": req["path"], "payload": payload,
+                         "existed": bool(media) and os.path.isfile(media)})
+            return 200, "application/json", json.dumps({"success": True, "message": "Message sent"}).encode()
+
+        server = FakeServer(respond)
+        server.seen = seen
+        return server
+
+    def call(self, server, text):
+        with patch.object(whatsapp, "WHATSAPP_API_BASE_URL", server.url + "/api"):
+            return whatsapp.send_voice_message(self.RECIPIENT, text)
+
+    def test_send_voice_not_configured_sends_nothing(self):
+        with self.bridge() as server, patch.multiple(tts, TTS_ENGINE=""):
+            success, message = self.call(server, "Olá")
+        self.assertFalse(success)
+        self.assertIn("not configured", message)
+        self.assertEqual(server.requests, [])
+        self.assertNoLeftovers()
+
+    def test_send_voice_sends_one_existing_ogg_then_deletes_it(self):
+        with self.bridge() as server, self.local():
+            success, message = self.call(server, "Olá")
+        self.assertTrue(success, message)
+        self.assertEqual(len(server.seen), 1)
+        sent = server.seen[0]
+        self.assertEqual(sent["path"], "/api/send")
+        self.assertEqual(sent["payload"]["recipient"], self.RECIPIENT)
+        self.assertTrue(sent["payload"]["media_path"].endswith(".ogg"))
+        self.assertTrue(sent["existed"], "the .ogg must exist when the bridge is called")
+        self.assertFalse(os.path.exists(sent["payload"]["media_path"]))
+        self.assertNoLeftovers()
+
+    def test_send_voice_text_over_limit_sends_nothing(self):
+        with self.bridge() as server, self.local():
+            success, message = self.call(server, "a" * 4097)
+        self.assertFalse(success)
+        self.assertIn("4096", message)
+        self.assertEqual(server.requests, [])
+        self.assertNoLeftovers()
+
+    def test_send_voice_engine_failure_sends_nothing(self):
+        with self.bridge() as server, self.local(), patch.dict(os.environ, {"FAKE_TTS_FAIL": "1"}):
+            success, message = self.call(server, "Olá")
+        self.assertFalse(success)
+        self.assertIn("voice model exploded", message)
+        self.assertEqual(server.requests, [])
+        self.assertNoLeftovers()
+
+    def test_send_voice_deletes_temp_even_when_bridge_rejects(self):
+        server = FakeServer(lambda req: (500, "text/plain", b"boom"))
+        with server, self.local():
+            success, message = self.call(server, "Olá")
+        self.assertFalse(success)
+        self.assertEqual(len(server.requests), 1)
+        self.assertNoLeftovers()
+
+    def test_send_voice_requires_recipient_and_text(self):
+        with self.bridge() as server, self.local():
+            with patch.object(whatsapp, "WHATSAPP_API_BASE_URL", server.url + "/api"):
+                self.assertFalse(whatsapp.send_voice_message("", "Olá")[0])
+                self.assertFalse(whatsapp.send_voice_message(self.RECIPIENT, "   ")[0])
+        self.assertEqual(server.requests, [])
 
 
 if __name__ == "__main__":
