@@ -72,10 +72,10 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
          ```
        - Then call `get_message_context` on that message again and apply the `content` states above. Run the command once per audio; don't loop on it. Report to Luís, with the log's last lines, instead of replying about the audio when:
          - the log says "Transcription not active" (no usable engine — the reason names what is missing);
-         - `content` is still empty (the `DONE.` line shows `errors=` or a `SHA MISMATCH` — usually the download failed and the next sweep may retry);
+         - `content` is still empty, whatever the `DONE.` line says (a failed download, a `SHA MISMATCH` or a `FATAL` from the engine all leave it empty);
          - the log says the message "is not pending" and `content` is a marker, or the message was revoked.
      - Never tell the contact you can't listen to audio; report the issue to Luís instead.
-3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
+3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. `query` only matches message text, so a file sent without a caption (`[document - Message ID: …]`, `[image - …]`) never shows up in it: when the reference is to a file, also list the chat without `query` over the same window and look for those media lines. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
 4. Decide the reply per step 5/6 below.
 
 ## 4b. On a `BRIDGE: ...` event
