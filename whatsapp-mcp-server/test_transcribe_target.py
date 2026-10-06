@@ -208,6 +208,37 @@ class MainTargetedTranscriptionTest(unittest.TestCase):
 
         self.assertEqual(len(rows_all), 3)
 
+    def test_main_transcribes_only_the_target(self):
+        """main() with a valid target downloads and writes only that message,
+        even with newer pending audios in other chats."""
+        self._insert_audio("msg1", "123@s.whatsapp.net", timestamp="2026-10-01 12:00:00")
+        self._insert_audio("msg2", "456@s.whatsapp.net", timestamp="2026-10-01 11:00:00")
+        self._insert_audio("msg3", "789@s.whatsapp.net", timestamp="2026-10-01 13:00:00")
+        self.conn.execute("UPDATE messages SET file_sha256=NULL")  # skip the sha check
+        self.conn.commit()
+
+        fd, audio = tempfile.mkstemp(suffix=".ogg")
+        os.close(fd)
+        self.addCleanup(os.unlink, audio)
+        downloads = []
+
+        def fake_download(message_id, chat_jid):
+            downloads.append((message_id, chat_jid))
+            return audio, None, False
+
+        argv = ['transcribe.py', '--message-id', 'msg2', '--chat-jid', '456@s.whatsapp.net']
+        with mock.patch('sys.argv', argv), \
+                mock.patch('transcribe.DB_PATH', self.db_path), \
+                mock.patch('transcribe.engine_ready', return_value=(True, "local")), \
+                mock.patch('transcribe.download', side_effect=fake_download), \
+                mock.patch('transcribe.transcribe', return_value="texto do audio"), \
+                mock.patch('transcribe.log'):
+            main()
+
+        self.assertEqual(downloads, [("msg2", "456@s.whatsapp.net")])
+        contents = dict(self.conn.execute("SELECT id, content FROM messages").fetchall())
+        self.assertEqual(contents, {"msg1": "", "msg2": "texto do audio", "msg3": ""})
+
 
 if __name__ == "__main__":
     unittest.main()

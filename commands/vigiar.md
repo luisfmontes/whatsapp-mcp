@@ -46,7 +46,7 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
      - For a pending audio (empty content), transcribe only that audio with the server's `transcribe.py`:
        - `<server dir>`: the `--directory` of this repo's MCP server entry in `~/.claude.json` (it is `<install dir>/whatsapp-mcp-server`, the same for every account). `<install dir>` is its parent.
        - `<port>`: multi-account, `accounts.json[alias].port`; single account, the port of the server's `WHATSAPP_API_BASE_URL` (same rule as step 3). If that bridge has `API_AUTH_TOKEN` set (non-loopback `BIND_ADDR`, see `commands/setup.md`), also export `WHATSAPP_API_AUTH_TOKEN` with the same token.
-       - `transcription.env` carries `WHISPER_CLI`, `WHISPER_MODEL` and `FFMPEG_BIN`, which `transcribe.py` doesn't load by itself; `TRANSCRIPTION_ENGINE=local` comes after it because the file may say `off`, which only disables the automatic sweep.
+       - `transcription.env` carries `WHISPER_CLI`, `WHISPER_MODEL` and `FFMPEG_BIN`, which `transcribe.py` doesn't load by itself; after loading it, an engine of `off` (or none) becomes `local`, because `off` only disables the automatic sweep; `local` or `api` set in the file stays as is.
        - On Windows, run it with PowerShell — Bash would strip the unquoted `\` from the Windows paths in that file and the engine would look missing:
          ```powershell
          $envFile = "<install dir>/transcription.env"
@@ -57,7 +57,7 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
              }
            }
          }
-         $env:TRANSCRIPTION_ENGINE = "local"
+         if (-not $env:TRANSCRIPTION_ENGINE -or $env:TRANSCRIPTION_ENGINE -eq "off") { $env:TRANSCRIPTION_ENGINE = "local" }
          $env:WHATSAPP_MESSAGES_DB = "<messages.db from step 2>"
          $env:WHATSAPP_API_BASE_URL = "http://127.0.0.1:<port>/api"
          uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
@@ -65,12 +65,15 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
        - On macOS/Linux, with Bash:
          ```bash
          set -a; [ -f "<install dir>/transcription.env" ] && . "<install dir>/transcription.env"; set +a
-         TRANSCRIPTION_ENGINE=local \
+         case "${TRANSCRIPTION_ENGINE:-off}" in off) export TRANSCRIPTION_ENGINE=local ;; esac
          WHATSAPP_MESSAGES_DB="<messages.db from step 2>" \
          WHATSAPP_API_BASE_URL="http://127.0.0.1:<port>/api" \
          uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
          ```
-       - Then call `get_message_context` on that message again to read the transcript. If the log says "Transcription not active", don't re-run — tell Luís with the reason printed (`WHISPER_CLI`/`WHISPER_MODEL` missing or not configured), and skip any reply that depends on hearing the audio.
+       - Then call `get_message_context` on that message again and apply the `content` states above. Run the command once per audio; don't loop on it. Report to Luís, with the log's last lines, instead of replying about the audio when:
+         - the log says "Transcription not active" (no usable engine — the reason names what is missing);
+         - `content` is still empty (the `DONE.` line shows `errors=` or a `SHA MISMATCH` — usually the download failed and the next sweep may retry);
+         - the log says the message "is not pending" and `content` is a marker, or the message was revoked.
      - Never tell the contact you can't listen to audio; report the issue to Luís instead.
 3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
 4. Decide the reply per step 5/6 below.
