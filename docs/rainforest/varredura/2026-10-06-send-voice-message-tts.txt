@@ -1,0 +1,118 @@
+Data: 2026-10-06
+Termos: tts, voz, voice, send_audio_message, narrar, sherpa, piper
+
+$ gh issue list --state all --search "tts" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "voz" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "voice" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "send_audio_message" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "narrar" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "sherpa" --limit 200 --json number,title,state
+[]
+
+
+$ gh issue list --state all --search "piper" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "tts" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "voz" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "voice" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "send_audio_message" --limit 200 --json number,title,state
+[{"number":8,"state":"MERGED","title":"fix(mcp): download_media devolve o motivo real da falha"}]
+
+
+$ gh pr list --state all --search "narrar" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "sherpa" --limit 200 --json number,title,state
+[]
+
+
+$ gh pr list --state all --search "piper" --limit 200 --json number,title,state
+[]
+
+
+$ git ls-remote --heads origin | grep -F "tts"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "voz"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "voice"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "send_audio_message"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "narrar"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "sherpa"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "piper"
+(vazio)
+
+$ git log --all --grep="tts" --oneline
+(vazio)
+
+$ git log --all --grep="voz" --oneline
+(vazio)
+
+$ git log --all --grep="voice" --oneline
+cb451ea feat: multi-account setup wizard + /whats:doctor + /whats:style commands
+fdd244f feat: multi-account setup wizard + /whats:doctor + /whats:style commands
+5a09ae2 Audio transcription + search fixes (captions, accents, full history sync) (#2)
+cf77c4a Audio transcription + search fixes (captions, accents, full history sync) (#2)
+
+$ git log --all --grep="send_audio_message" --oneline
+bf6c48c fix(mcp): download_media returns the real reason for the failure
+ba849ff fix(mcp): download_media returns the real reason for the failure
+f03e752 feat: implement D2 write operation guard for multiconta routing
+ed9514f fix(mcp): download_media returns the real reason for the failure
+edd81a5 fix(mcp): download_media devolve o motivo real da falha (#8)
+92e3d5e added send_file and send_audio_message
+26961cd added send_file and send_audio_message
+
+$ git log --all --grep="narrar" --oneline
+(vazio)
+
+$ git log --all --grep="sherpa" --oneline
+(vazio)
+
+$ git log --all --grep="piper" --oneline
+(vazio)
+
+$ cat <dados>/ideias.jsonl
+{"id":"pilha-de-voz-local-voicestudio","titulo":"Pilha de voz local com VoiceStudio: áudio para texto com templates, e texto para áudio como mensagem de voz"}
+{"id":"voicestudio-tts-mandar-audio-whatsapp","titulo":"Gerar áudio com VoiceStudio para mandar mensagem de voz pelo WhatsApp"}
+{"id":"sabia-teste-do-caminho-feliz-do-narrar","titulo":"Nenhum teste exercita o caminho de sucesso do narrar.py -- so' as recusas e o transformador"}
+{"id":"whatsapp-mensagem-de-voz-em-nome-do-luis","titulo":"Mandar mensagem de voz por WhatsApp em nome do Luis: o gerador ja existe (narrar.py), falta o envio e a regra de anuncio no canal"}
+{"id":"sabia-cadastrar-vozes-com-amostra-presencial","titulo":"Sabia: cadastro de voz feito em reuniao remota nao sustenta gravacao presencial -- 40% das falas ficaram sem lado"}
+
+

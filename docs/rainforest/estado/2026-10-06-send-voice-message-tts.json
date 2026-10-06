@@ -1,0 +1,153 @@
+{
+  "slug": "2026-10-06-send-voice-message-tts",
+  "titulo": "send_voice_message: texto vira mensagem de voz (upstream)",
+  "criado_em": "2026-10-06",
+  "arqueologia": {
+    "status": "pendente"
+  },
+  "design": {
+    "status": "aprovado",
+    "doc": "docs/rainforest/design/2026-10-06-send-voice-message-tts.md",
+    "em": "2026-10-06"
+  },
+  "plano": {
+    "status": "ok",
+    "arquivo": "docs/rainforest/planos/2026-10-06-send-voice-message-tts.md",
+    "tarefas": 3,
+    "paralelas": [
+      1
+    ],
+    "em": "2026-10-06"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-10-06",
+    "tarefas_ok": 6,
+    "tarefas": 6,
+    "carimbos": [
+      {
+        "tarefa": 1,
+        "hash_base": "b76398a1b5e50ee3be991b7c06e66b06e02ec588",
+        "iteracao": 1,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T15:48:28.845Z"
+      },
+      {
+        "tarefa": 2,
+        "hash_base": "b76398a1b5e50ee3be991b7c06e66b06e02ec588",
+        "iteracao": 1,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T15:48:28.845Z"
+      },
+      {
+        "tarefa": 3,
+        "hash_base": "b76398a1b5e50ee3be991b7c06e66b06e02ec588",
+        "iteracao": 1,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T15:48:28.845Z"
+      },
+      {
+        "tarefa": 1,
+        "hash_base": "79a88ff85cc380df85e5e3f860aca6ace011a184",
+        "iteracao": 2,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T16:03:34.308Z"
+      },
+      {
+        "tarefa": 2,
+        "hash_base": "79a88ff85cc380df85e5e3f860aca6ace011a184",
+        "iteracao": 2,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T16:03:34.308Z"
+      },
+      {
+        "tarefa": 3,
+        "hash_base": "79a88ff85cc380df85e5e3f860aca6ace011a184",
+        "iteracao": 2,
+        "sessao": "b52c7e3f-dcdf-44bd-a708-6876cfaf3237",
+        "ts": "2026-10-06T16:03:34.308Z"
+      }
+    ],
+    "em": "2026-10-06",
+    "branch": "up/send-voice-message-6",
+    "head": "fbc5769",
+    "comando": "conferir-mutacao.cjs tarefas 1,2,5,6 + conferir-entrega.cjs",
+    "saida": "mut6 exit=0 bateria VERMELHA; entrega APROVADO; suite 52 OK",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "vermelho",
+        "fixture": "test_tts.py test_rejects_text_over_limit"
+      },
+      {
+        "tarefa": 2,
+        "resultado": "vermelho",
+        "fixture": "test_tts.py test_send_voice_not_configured_sends_nothing"
+      },
+      {
+        "tarefa": 3,
+        "resultado": "n/a",
+        "motivo": "README, sem comportamento a inverter"
+      },
+      {
+        "tarefa": 4,
+        "resultado": "n/a",
+        "motivo": "configuracao de CI; prova e o job python do PR"
+      },
+      {
+        "tarefa": 5,
+        "resultado": "vermelho",
+        "fixture": "test_tts.py test_api_auth_error_does_not_echo_body"
+      },
+      {
+        "tarefa": 6,
+        "resultado": "vermelho",
+        "fixture": "test_tts.py test_notice_is_sent_after_synthesis_right_before_audio"
+      }
+    ]
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "6f306fbf672c93ef2dee3056383875def18f14b1",
+      "caminhos_sujos": [
+        "docs/rainforest/design/2026-10-06-send-voice-message-tts.md",
+        "docs/rainforest/estado/2026-10-06-send-voice-message-tts.json",
+        "docs/rainforest/planos/2026-10-06-send-voice-message-tts.md",
+        "docs/rainforest/varredura/",
+        "whatsapp-bridge/whatsapp-bridge.exe.bak-20261006"
+      ]
+    },
+    "vereditos": [
+      {
+        "agente": "rainforest-mind:revisor",
+        "agente_id": "a183af12934e9116a",
+        "veredito": "ok",
+        "em": "2026-10-06",
+        "transcrito": "~/.claude/projects/C--Projetos-whatsapp-mcp/b52c7e3f-dcdf-44bd-a708-6876cfaf3237/subagents/agent-a183af12934e9116a.jsonl"
+      }
+    ],
+    "achados": 0,
+    "em": "2026-10-06",
+    "base": "79a88ff85cc380df85e5e3f860aca6ace011a184",
+    "head": "fbc5769",
+    "observacoes": [
+      "notice so com espacos vai como texto em branco",
+      "notice enviado + audio falhando deixa texto sem audio (limite inerente)",
+      "README: paragrafo do notice entre a frase das variaveis e a lista de motores"
+    ]
+  },
+  "verificar": {
+    "status": "parcial",
+    "pendentes": [
+      "catraca de mutacoes do verificar nao roda com codigo em branch do upstream (rainforest-mind issue aberta); mutacoes 1,2,5,6 re-rodadas a mao com --raiz do worktree, todas exit 0"
+    ],
+    "comando": "gh run view 37501028182 -R rodrigopg/whatsapp-mcp --log",
+    "saida": "Ran 52 tests OK sem skipped",
+    "sensor_externo": "gh run view 37501028182 -R rodrigopg/whatsapp-mcp --log",
+    "em": "2026-10-06"
+  },
+  "fechar": {
+    "status": "pendente"
+  }
+}
