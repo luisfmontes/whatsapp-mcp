@@ -41,12 +41,10 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 1. Call `get_message_context` on the newest message id in the line (or, if the line doesn't carry ids, `list_messages`/`get_last_interaction` on the chat) to read the full burst with surrounding context.
 2. For any message with a `media_type`:
    - Call `download_media` to pull the file before drafting a reply that references it.
-   - **If the message is audio** (`media_type: audio`), transcribe before replying:
-     - First, check if the `transcription` field is already in the message context (MCP transcription engine may have already transcribed it).
-     - If not, use local transcription: invoke whisper.cpp via `WHISPER_CLI` and `WHISPER_MODEL` environment variables on the downloaded file. Whisper prompt is `WHISPER_PROMPT`, and output format is JSON (`-oj`).
-     - If `TRANSCRIPTION_ENGINE` is set to `off` or not configured, **always attempt local transcription** — never reply with "I cannot hear audio" without trying whisper.cpp first.
-     - If no transcription engine is available (neither MCP nor local `WHISPER_CLI` configured), tell Luís directly rather than replying to the contact; include the audio file path and a note about which transcription method is missing.
-3. For any message that references a prior topic ("that document", "what we discussed earlier", etc.), check the chat history first: call `list_messages` with a wide time window or use `get_message_context` with additional parameters to search for related messages. If no prior reference is found in history, ask either the contact or Luís for clarification instead of assuming.
+   - **If the message is audio** (`media_type` `audio`), understand it before replying. A transcribed audio already shows its text as the message content; an audio with empty content is still pending.
+     - For a pending audio, run the local whisper.cpp backfill against the chat's `messages.db` from step 2: `TRANSCRIPTION_ENGINE=local WHATSAPP_MESSAGES_DB=<that path> WHATSAPP_BRIDGE_PORT=<that account's port in accounts.json> uv run --directory whatsapp-mcp-server python transcribe.py --limit 5`, then re-read the message. Do this even when `TRANSCRIPTION_ENGINE` is `off` in the server's config: `off` only means the bridge doesn't transcribe on its own, not that no engine exists on this machine.
+     - Never tell the contact you can't listen to audio. If the backfill reports no usable engine (`WHISPER_CLI`/`WHISPER_MODEL` missing), tell Luís, with the reason it printed, and don't reply to that audio.
+3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
 4. Decide the reply per step 5/6 below.
 
 ## 4b. On a `BRIDGE: ...` event
@@ -60,7 +58,7 @@ Load the `message-standards` skill before drafting any reply. Follow it in full 
 
 ## 6. `--auto` mode: send directly, with limits
 
-Load the `message-standards` skill before drafting any reply. Skip the approval step and call `send_message` or `send_file` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped. 
+Load the `message-standards` skill before drafting any reply. Skip the approval step and call `send_message` or `send_file` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped.
 
 The footer is **not** the standard skill footer; use exactly:
 
