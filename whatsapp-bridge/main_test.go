@@ -202,7 +202,7 @@ func TestHandleReact(t *testing.T) {
 // TestHandleEdit covers /api/edit request validation. Edit has no group guard
 // (WhatsApp only allows editing your own messages), so it isn't tested here.
 func TestHandleEdit(t *testing.T) {
-	handler := handleEdit(nil)
+	handler := handleEdit(nil, nil)
 
 	t.Run("non-POST returns 405", func(t *testing.T) {
 		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
@@ -230,7 +230,7 @@ func TestHandleEdit(t *testing.T) {
 // TestHandleRevoke covers /api/revoke request validation: same shape as
 // TestHandleReact, including the group + from_me=false rejection.
 func TestHandleRevoke(t *testing.T) {
-	handler := handleRevoke(nil)
+	handler := handleRevoke(nil, nil)
 
 	t.Run("non-POST returns 405", func(t *testing.T) {
 		rec := doHandlerRequest(t, handler, http.MethodGet, nil)
