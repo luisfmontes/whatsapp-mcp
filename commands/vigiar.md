@@ -39,8 +39,44 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 ## 4. On each `NEW MESSAGES (...)` event
 
 1. Call `get_message_context` on the newest message id in the line (or, if the line doesn't carry ids, `list_messages`/`get_last_interaction` on the chat) to read the full burst with surrounding context.
-2. For any message with a `media_type`, call `download_media` to pull the file before drafting a reply that references it.
-3. Decide the reply per step 5/6 below.
+2. For any message with a `media_type`:
+   - Call `download_media` to pull the file before drafting a reply that references it.
+   - **If the message is audio** (`media_type` `audio`), understand it before replying.
+     - States of the audio's `content` field: real text = transcribed, done; `""` (empty) = pending transcription; `[áudio sem transcrição]` or `[áudio indisponível: mídia expirada no servidor]` = no usable transcript — do not interpret these markers as speech, and alert Luís with the one that appeared.
+     - For a pending audio (empty content), transcribe only that audio with the server's `transcribe.py`:
+       - `<server dir>`: the `--directory` of this repo's MCP server entry in `~/.claude.json` (it is `<install dir>/whatsapp-mcp-server`, the same for every account). `<install dir>` is its parent.
+       - `<port>`: multi-account, `accounts.json[alias].port`; single account, the port of the server's `WHATSAPP_API_BASE_URL` (same rule as step 3). If that bridge has `API_AUTH_TOKEN` set (non-loopback `BIND_ADDR`, see `commands/setup.md`), also export `WHATSAPP_API_AUTH_TOKEN` with the same token.
+       - `transcription.env` carries `WHISPER_CLI`, `WHISPER_MODEL` and `FFMPEG_BIN`, which `transcribe.py` doesn't load by itself; after loading it, an engine of `off` (or none) becomes `local`, because `off` only disables the automatic sweep; `local` or `api` set in the file stays as is.
+       - On Windows, run it with PowerShell — Bash would strip the unquoted `\` from the Windows paths in that file and the engine would look missing:
+         ```powershell
+         $envFile = "<install dir>/transcription.env"
+         if (Test-Path $envFile) {
+           Get-Content $envFile | ForEach-Object {
+             if ($_ -match '^\s*export\s+(\w+)=(.+)$') {
+               Set-Item -Path "env:$($matches[1])" -Value ($matches[2] -replace '^["'']|["'']$')
+             }
+           }
+         }
+         if (-not $env:TRANSCRIPTION_ENGINE -or $env:TRANSCRIPTION_ENGINE -eq "off") { $env:TRANSCRIPTION_ENGINE = "local" }
+         $env:WHATSAPP_MESSAGES_DB = "<messages.db from step 2>"
+         $env:WHATSAPP_API_BASE_URL = "http://127.0.0.1:<port>/api"
+         uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
+         ```
+       - On macOS/Linux, with Bash:
+         ```bash
+         set -a; [ -f "<install dir>/transcription.env" ] && . "<install dir>/transcription.env"; set +a
+         case "${TRANSCRIPTION_ENGINE:-off}" in off) export TRANSCRIPTION_ENGINE=local ;; esac
+         WHATSAPP_MESSAGES_DB="<messages.db from step 2>" \
+         WHATSAPP_API_BASE_URL="http://127.0.0.1:<port>/api" \
+         uv run --directory "<server dir>" python transcribe.py --message-id "<msg id>" --chat-jid "<chat jid>"
+         ```
+       - Then call `get_message_context` on that message again and apply the `content` states above. Run the command once per audio; don't loop on it. Report to Luís, with the log's last lines, instead of replying about the audio when:
+         - the log says "Transcription not active" (no usable engine — the reason names what is missing);
+         - `content` is still empty, whatever the `DONE.` line says (a failed download, a `SHA MISMATCH` or a `FATAL` from the engine all leave it empty);
+         - the log says the message "is not pending" and `content` is a marker, or the message was revoked.
+     - Never tell the contact you can't listen to audio; report the issue to Luís instead.
+3. For any message that refers to an earlier topic ("aquele documento", "o que a gente falou"), search the chat history before drafting or summarizing: `list_messages` on the chat with `query=<key term>`, widening `after` if needed. `query` only matches message text, so a file sent without a caption (`[document - Message ID: …]`, `[image - …]`) never shows up in it: when the reference is to a file, also list the chat without `query` over the same window and look for those media lines. If nothing in the history matches, ask (the contact in default mode, Luís in `--auto`) instead of guessing.
+4. Decide the reply per step 5/6 below.
 
 ## 4b. On a `BRIDGE: ...` event
 
@@ -49,17 +85,21 @@ When the Monitor call reports its timeout expired with **no** `END:` event seen,
 
 ## 5. Default mode: draft and ask
 
-Follow the `message-standards` skill in full — relation → intent → draft → self-check — using the resolved contact as the relationship. Show Luís the draft block (`Para:` / body with footer) and wait for his go-ahead before calling `send_message`. Never send on this path without that confirmation, even if the draft looks obviously right.
+Load the `message-standards` skill before drafting any reply. Follow it in full — relation → intent → draft → self-check — using the resolved contact as the relationship. Show Luís the draft block (`Para:` / body with footer) and wait for his go-ahead before calling `send_message` or `send_file`. Never send on this path without that confirmation, even if the draft looks obviously right.
 
 ## 6. `--auto` mode: send directly, with limits
 
-Skip the approval step and call `send_message` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped. The footer is **not** the standard skill footer; use exactly:
+Load the `message-standards` skill before drafting any reply. Skip the approval step and call `send_message` or `send_file` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped.
+
+The footer is **not** the standard skill footer; use exactly:
 
 ```
 🤖 _Resposta automática do assistente do Luís Montes, sem revisão dele._
 ```
 
 (This command's brief calls for a stronger disclaimer than the skill's default footer, since nobody reviewed this specific reply before it went out.)
+
+**First-person call-to-action rule (message-standards, rule 2):** avoid phrases like "message me" or "let me know" right before the footer — the "me" becomes ambiguous between the contact and the assistant that just identified itself below. Two solutions: (a) end the message at the content without any call-to-action, and let the footer close it; or (b) name Luís explicitly ("any questions, message Luís" or, in Portuguese, "Qualquer dúvida, chama o Luís").
 
 **Always stop and ask instead of sending**, `--auto` or not, when the reply would:
 - Take a destructive or hard-to-reverse action (delete/revoke a message, send money or a commitment of money, share a credential, anything the recipient could act on immediately and badly if it's wrong).
