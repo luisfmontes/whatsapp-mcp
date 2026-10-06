@@ -107,6 +107,11 @@ class FakeServer:
         self.httpd.server_close()
 
 
+needs_ffmpeg = unittest.skipUnless(
+    shutil.which("ffmpeg") and shutil.which("ffprobe"),
+    "ffmpeg and ffprobe are required to convert and inspect audio; not found on PATH")
+
+
 def codec_name(path):
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
@@ -144,6 +149,7 @@ class TTSTestCase(unittest.TestCase):
 
 
 class TestLocalEngine(TTSTestCase):
+    @needs_ffmpeg
     def test_local_engine_produces_opus_ogg(self):
         record = os.path.join(self.work, "stdin.txt")
         with self.local(), patch.dict(os.environ, {"FAKE_TTS_RECORD": record}):
@@ -186,6 +192,7 @@ class TestLocalEngine(TTSTestCase):
 
 
 class TestApiEngine(TTSTestCase):
+    @needs_ffmpeg
     def test_api_engine_posts_speech_request_and_produces_opus_ogg(self):
         wav = make_wav_bytes()
         with FakeServer(lambda req: (200, "audio/wav", wav)) as server:
@@ -253,6 +260,7 @@ class TestNotConfiguredAndLimits(TTSTestCase):
         self.assertFalse(os.path.exists(record), "the engine must not be called")
         self.assertNoLeftovers()
 
+    @needs_ffmpeg
     def test_accepts_text_at_limit(self):
         with self.local():
             path = tts.synthesize("a" * 4096)
@@ -290,6 +298,7 @@ class TestSendVoiceMessage(TTSTestCase):
         self.assertEqual(server.requests, [])
         self.assertNoLeftovers()
 
+    @needs_ffmpeg
     def test_send_voice_sends_one_existing_ogg_then_deletes_it(self):
         with self.bridge() as server, self.local():
             success, message = self.call(server, "Olá")
@@ -303,6 +312,7 @@ class TestSendVoiceMessage(TTSTestCase):
         self.assertFalse(os.path.exists(sent["payload"]["media_path"]))
         self.assertNoLeftovers()
 
+    @needs_ffmpeg
     def test_send_voice_text_over_limit_sends_nothing(self):
         with self.bridge() as server, self.local():
             success, message = self.call(server, "a" * 4097)
@@ -311,6 +321,7 @@ class TestSendVoiceMessage(TTSTestCase):
         self.assertEqual(server.requests, [])
         self.assertNoLeftovers()
 
+    @needs_ffmpeg
     def test_send_voice_engine_failure_sends_nothing(self):
         with self.bridge() as server, self.local(), patch.dict(os.environ, {"FAKE_TTS_FAIL": "1"}):
             success, message = self.call(server, "Olá")
@@ -319,6 +330,7 @@ class TestSendVoiceMessage(TTSTestCase):
         self.assertEqual(server.requests, [])
         self.assertNoLeftovers()
 
+    @needs_ffmpeg
     def test_send_voice_deletes_temp_even_when_bridge_rejects(self):
         server = FakeServer(lambda req: (500, "text/plain", b"boom"))
         with server, self.local():
