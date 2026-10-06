@@ -177,7 +177,7 @@ def _is_expired(ts):
     return datetime.now(timezone.utc) - dt > CDN_EXPIRY
 
 
-def pending_audios(conn, limit=None):
+def pending_audios(conn, limit=None, message_id=None, chat_jid=None):
     # Soft delete (2026-09-24, D2): a revoked audio still has media_type='audio'
     # and empty content (MarkMessageRevoked no longer clears the row), so
     # without this filter the sweep would try to transcribe a message the
@@ -185,10 +185,19 @@ def pending_audios(conn, limit=None):
     # a revoked message's media.
     sql = ("SELECT id, chat_jid, hex(file_sha256), timestamp FROM messages "
            "WHERE media_type='audio' AND (content IS NULL OR content='') "
-           "AND revoked_at IS NULL "
-           "ORDER BY timestamp DESC")
+           "AND revoked_at IS NULL")
+    params = []
+
+    if message_id is not None and chat_jid is not None:
+        sql += " AND id=? AND chat_jid=?"
+        params = [message_id, chat_jid]
+
+    sql += " ORDER BY timestamp DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
+
+    if params:
+        return conn.execute(sql, params).fetchall()
     return conn.execute(sql).fetchall()
 
 
@@ -343,7 +352,13 @@ def write_content(message_id, chat_jid, content):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--message-id", type=str, default=None)
+    ap.add_argument("--chat-jid", type=str, default=None)
     args = ap.parse_args()
+
+    # Validate that both --message-id and --chat-jid are provided together
+    if (args.message_id is None) != (args.chat_jid is None):
+        ap.error("--message-id and --chat-jid must be provided together")
 
     # If no engine is configured, do nothing and touch zero rows. "Not
     # configured" is not "failed" — marking audios here would permanently skip
@@ -356,8 +371,19 @@ def main():
     log(f"Engine: {reason}")
 
     conn = sqlite3.connect(DB_PATH, timeout=10)
-    rows = pending_audios(conn, args.limit)
+    rows = pending_audios(conn, args.limit, args.message_id, args.chat_jid)
     conn.close()
+
+    # If targeting a specific message that is not pending, log and exit
+    if args.message_id is not None:
+        if not rows:
+            log(f"Message {args.message_id} is not pending (does not exist, "
+                "already transcribed, is revoked, or is not audio).")
+            return
+        if len(rows) > 1:
+            log(f"ERROR: Expected at most 1 message with id={args.message_id} "
+                f"and chat_jid={args.chat_jid}, got {len(rows)}")
+            return
 
     total = len(rows)
     log(f"Pending audios: {total}")
