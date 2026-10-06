@@ -269,7 +269,8 @@ class TestNotConfiguredAndLimits(TTSTestCase):
 
 
 class TestSendVoiceMessage(TTSTestCase):
-    RECIPIENT = "5511999990000"
+    # Same placeholder JID the tool docstrings use; never a phone-shaped number.
+    RECIPIENT = "123456789@s.whatsapp.net"
 
     def bridge(self):
         """Fake bridge: records each request and whether its media file existed."""
@@ -345,6 +346,36 @@ class TestSendVoiceMessage(TTSTestCase):
                 self.assertFalse(whatsapp.send_voice_message("", "Olá")[0])
                 self.assertFalse(whatsapp.send_voice_message(self.RECIPIENT, "   ")[0])
         self.assertEqual(server.requests, [])
+
+
+class TestRobustness(TTSTestCase):
+    """Failures that must come back as (False, reason), never as an exception."""
+
+    RECIPIENT = TestSendVoiceMessage.RECIPIENT
+    bridge = TestSendVoiceMessage.bridge
+    call = TestSendVoiceMessage.call
+
+    def test_api_auth_error_does_not_echo_body(self):
+        api = FakeServer(lambda req: (401, "application/json",
+                                      b'{"error": {"message": "Incorrect API key provided: sk-...abcd"}}'))
+        with self.bridge() as server, api, self.api(api.url),                 patch.object(tts.shutil, "which", return_value="ffmpeg"):
+            success, message = self.call(server, "Olá")
+        self.assertFalse(success)
+        self.assertIn("401", message)
+        self.assertIn("TTS_API_KEY", message)
+        self.assertNotIn("sk-", message)
+        self.assertEqual(server.requests, [])
+        self.assertNoLeftovers()
+
+    def test_lone_surrogate_is_refused_without_exception(self):
+        for engine in (self.local, lambda: self.api("http://127.0.0.1:9")):
+            with self.subTest(engine=engine), self.bridge() as server, engine(), \
+                    patch.object(tts.shutil, "which", return_value="ffmpeg"):
+                success, message = self.call(server, "oi \ud83d")
+            self.assertFalse(success)
+            self.assertIn("encoded", message)
+            self.assertEqual(server.requests, [])
+            self.assertNoLeftovers()
 
 
 if __name__ == "__main__":

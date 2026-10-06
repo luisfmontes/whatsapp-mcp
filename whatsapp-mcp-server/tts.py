@@ -73,6 +73,11 @@ def synthesize(text):
     if len(text) > MAX_TTS_CHARS:
         raise TTSError(f"text is {len(text)} characters; the limit is {MAX_TTS_CHARS}")
 
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise TTSError("text has characters that cannot be encoded (lone surrogate?)")
+
     tmpdir = tempfile.mkdtemp(prefix="wa_tts_")
     try:
         if TTS_ENGINE == "api":
@@ -115,6 +120,9 @@ def _synthesize_api(text, tmpdir):
         )
     except requests.RequestException as e:
         raise TTSError(f"TTS API request failed: {e}")
+    if r.status_code in (401, 403):
+        # The body can echo the (masked) key, so it is deliberately left out.
+        raise TTSError(f"TTS API rejected the credentials (HTTP {r.status_code}); check TTS_API_KEY")
     if r.status_code != 200:
         raise TTSError(f"TTS API returned HTTP {r.status_code}: {r.text[:200]}")
     if not r.content:
