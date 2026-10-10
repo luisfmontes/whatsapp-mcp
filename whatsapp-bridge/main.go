@@ -6546,6 +6546,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	// original content (soft delete, 2026-09-24).
 	http.HandleFunc("/api/deleted_message", handleDeletedMessage(client, messageStore))
 
+	// On-demand history from the phone (issue #40): recovers messages missing from the store.
+	http.HandleFunc("/api/history_request", handleHistoryRequest(client, messageStore))
+
 	// Handler for adding, removing, promoting or demoting group participants.
 	http.HandleFunc("/api/group_participants", handleGroupParticipants(client))
 
@@ -7338,7 +7341,6 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 	return syncedCount
 }
 
-// Request history sync from the server
 // requestHistorySync asks the primary device (phone) for `count` messages
 // immediately BEFORE lastKnown, via whatsmeow's on-demand history sync
 // (BuildHistorySyncRequest + SendPeerMessage — see
@@ -7347,24 +7349,123 @@ func storeHistoryConversation(client *whatsmeow.Client, messageStore *MessageSto
 // call dereferences it unconditionally and panics on nil. The response
 // arrives later as a normal *events.HistorySync (type ON_DEMAND), handled by
 // the same handleHistorySync used for the initial pairing sync — no separate
-// handler needed.
-func requestHistorySync(client *whatsmeow.Client, lastKnown *types.MessageInfo, count int) {
+// handler needed. Issue #40: the error is returned so /api/history_request
+// can tell "sent" from "failed"; the log line below is the stable contract.
+func requestHistorySync(client *whatsmeow.Client, lastKnown *types.MessageInfo, count int) error {
 	if client == nil || !client.IsConnected() || client.Store.ID == nil {
-		fmt.Println("Client not ready for history sync request.")
-		return
+		return errHistoryClientNotReady
 	}
 	if lastKnown == nil {
-		fmt.Println("requestHistorySync: lastKnown message info is required (whatsmeow dereferences it unconditionally).")
-		return
+		return fmt.Errorf("lastKnown message info is required (whatsmeow dereferences it unconditionally)")
 	}
 
 	historyMsg := client.BuildHistorySyncRequest(lastKnown, count)
-	_, err := client.SendPeerMessage(context.Background(), historyMsg)
-	if err != nil {
+	if _, err := client.SendPeerMessage(context.Background(), historyMsg); err != nil {
 		fmt.Printf("Failed to request history sync: %v\n", err)
-	} else {
-		fmt.Printf("History sync requested for %d messages before %s in %s. Waiting for server response...\n",
-			count, lastKnown.ID, lastKnown.Chat.String())
+		return err
+	}
+	fmt.Printf("History sync requested for %d messages before %s in %s. Waiting for server response...\n",
+		count, lastKnown.ID, lastKnown.Chat.String())
+	return nil
+}
+
+// errHistoryClientNotReady is requestHistorySync's "can't send now" — the
+// handler maps it to 503, same as every other action on a disconnected client.
+var errHistoryClientNotReady = errors.New("WhatsApp client not connected")
+
+// historyRequestDefaultCount is whatsmeow's recommended batch (send.go,
+// BuildHistorySyncRequest doc); historyRequestMaxCount bounds a single ask.
+const (
+	historyRequestDefaultCount = 50
+	historyRequestMaxCount     = 100
+)
+
+// HistoryRequest is the body of POST /api/history_request (issue #40).
+type HistoryRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	Count     int    `json:"count"`
+}
+
+// GetMessageAnchor returns what BuildHistorySyncRequest needs about an
+// already-stored message besides its chat and ID: who sent it and when.
+func (store *MessageStore) GetMessageAnchor(id, chatJID string) (isFromMe bool, timestamp time.Time, err error) {
+	err = store.db.QueryRow(
+		"SELECT is_from_me, timestamp FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	).Scan(&isFromMe, &timestamp)
+	return isFromMe, timestamp, err
+}
+
+// handleHistoryRequest returns the handler for POST /api/history_request
+// (issue #40): asks the phone for up to `count` messages before message_id,
+// recovering messages that never reached the store (e.g. a decrypt failure
+// during a reconnect storm). The anchor must already be stored — whatsmeow
+// needs its from_me and timestamp — so an unknown anchor is a 404. The answer
+// is asynchronous: 202 means the request went out, and the messages land via
+// handleHistorySync (ON_DEMAND) a few seconds later, if the phone is online.
+func handleHistoryRequest(client *whatsmeow.Client, messageStore *MessageStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req HistoryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Invalid request: chat_jid and message_id required", http.StatusBadRequest)
+			return
+		}
+		reply := func(status int, success bool, msg string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(MarkChatResponse{Success: success, Message: msg})
+		}
+		count := req.Count
+		if count == 0 {
+			count = historyRequestDefaultCount
+		}
+		if count < 1 || count > historyRequestMaxCount {
+			reply(http.StatusBadRequest, false, fmt.Sprintf("count must be between 1 and %d", historyRequestMaxCount))
+			return
+		}
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			reply(http.StatusBadRequest, false, fmt.Sprintf("Invalid chat_jid: %v", err))
+			return
+		}
+		if messageStore == nil {
+			reply(http.StatusInternalServerError, false, "no message store available")
+			return
+		}
+		// Rows are stored PN-normalized; an @lid input must land on the same row.
+		chatKey := localChatKey(client, chatJID)
+		isFromMe, timestamp, err := messageStore.GetMessageAnchor(req.MessageID, chatKey)
+		if err == sql.ErrNoRows {
+			reply(http.StatusNotFound, false, fmt.Sprintf("Anchor message %s not found in chat %s — the anchor must be a message already in the store", req.MessageID, chatKey))
+			return
+		}
+		if err != nil {
+			reply(http.StatusInternalServerError, false, fmt.Sprintf("Error looking up anchor message: %v", err))
+			return
+		}
+		anchorChat, _ := types.ParseJID(chatKey)
+		anchor := &types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: anchorChat, IsFromMe: isFromMe},
+			ID:            types.MessageID(req.MessageID),
+			Timestamp:     timestamp,
+		}
+		if err := requestHistorySync(client, anchor, count); err != nil {
+			if errors.Is(err, errHistoryClientNotReady) {
+				reply(http.StatusServiceUnavailable, false, err.Error())
+				return
+			}
+			reply(http.StatusInternalServerError, false, fmt.Sprintf("SendPeerMessage error: %v", err))
+			return
+		}
+		reply(http.StatusAccepted, true, fmt.Sprintf(
+			"History requested: up to %d messages before %s in %s. The phone answers asynchronously; "+
+				"messages land in the store within seconds if the phone is online — re-run list_messages to see them.",
+			count, req.MessageID, chatKey))
 	}
 }
 

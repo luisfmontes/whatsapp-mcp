@@ -1338,6 +1338,32 @@ def react_to_message(chat_jid: str, message_id: str, emoji: str, from_me: bool =
         return False, f"Unexpected error: {str(e)}"
 
 
+def request_history(chat_jid: str, message_id: str, count: int = 50, account: Optional[str] = None) -> Tuple[bool, str]:
+    """Ask the phone for up to `count` messages before message_id (issue #40).
+
+    The anchor must already be in the store. The answer is asynchronous: success
+    means the request went out, and the messages land in the store later.
+    """
+    _require_account(account)
+    base_url = accounts.resolve_account(account)
+    try:
+        if not chat_jid or not chat_jid.strip():
+            return False, "chat_jid is required"
+        if not message_id or not message_id.strip():
+            return False, "message_id is required"
+        payload = {"chat_jid": chat_jid, "message_id": message_id, "count": count}
+        response = _api_request("POST", "/history_request", base_url, json=payload)
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            return False, f"Error parsing response: {response.text}"
+        return bool(result.get("success", False)), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def edit_message(chat_jid: str, message_id: str, new_text: str, from_me: bool = True, account: Optional[str] = None) -> Tuple[bool, str]:
     """Edit the text of a previously sent message.
 

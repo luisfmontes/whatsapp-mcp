@@ -24,6 +24,7 @@ from whatsapp import (
     archive_chat as whatsapp_archive_chat,
     resolve_contact as whatsapp_resolve_contact,
     react_to_message as whatsapp_react_to_message,
+    request_history as whatsapp_request_history,
     edit_message as whatsapp_edit_message,
     delete_message as whatsapp_delete_message,
     update_group_participants as whatsapp_update_group_participants,
@@ -592,6 +593,32 @@ def react_to_message(
         account: Optional account alias to use (defaults to primary account)
     """
     success, message = whatsapp_react_to_message(chat_jid, message_id, emoji, from_me=from_me, account=account)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def request_history(
+    chat_jid: str,
+    message_id: str,
+    count: int = 50,
+    account: Optional[str] = None
+) -> Dict[str, Any]:
+    """Ask the phone to resend messages that are missing from the local store.
+
+    Use when a conversation has a gap - e.g. a reply is stored but the message
+    it answers is not. The phone sends up to `count` messages immediately
+    before the anchor message. The result is ASYNCHRONOUS: success=True only
+    means the request went out. Wait a few seconds and re-run list_messages to
+    see the recovered messages. Requires the phone to be online.
+
+    Args:
+        chat_jid: The JID of the chat (<phone>@s.whatsapp.net or group@g.us)
+        message_id: ID of a message already in the store; history is fetched
+            from just before it
+        count: How many messages to fetch, 1 to 100 (defaults to 50)
+        account: Optional account alias to use (defaults to primary account)
+    """
+    success, message = whatsapp_request_history(chat_jid, message_id, count=count, account=account)
     return {"success": success, "message": message}
 
 

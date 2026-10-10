@@ -416,6 +416,7 @@ Go WhatsApp Bridge (whatsapp-bridge/)
 | `send_file` | Send image, video, document, or audio file |
 | `send_audio_message` | Send audio as a WhatsApp voice message |
 | `download_media` | Download media from a message, get local path |
+| `request_history` | Ask the phone for messages missing from the store, before a known message (async) |
 | `mark_chat_as_read` | Mark a chat as read |
 | `mark_chat_as_unread` | Mark a chat as unread |
 | `archive_chat` | Archive or unarchive a chat |

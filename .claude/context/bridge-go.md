@@ -59,6 +59,7 @@ Bridge Go (`whatsapp-bridge/main.go`) — conecta ao WhatsApp via whatsmeow, exp
 ## History sync
 
 - `store.DeviceProps.RequireFullSync = proto.Bool(true)` + `HistorySyncConfig{FullSyncDaysLimit:365,...}` **antes de `NewClient`**. Sem isso só vem histórico recente. Recupera ~1 ano.
+- **Histórico sob demanda** (issue #40): `POST /api/history_request {chat_jid, message_id, count}` → `requestHistorySync` (`BuildHistorySyncRequest` + `SendPeerMessage`). A âncora precisa estar no store (from_me + timestamp); 202 = pedido enviado, a resposta chega depois como `events.HistorySync` tipo `ON_DEMAND` e cai no mesmo `handleHistorySync`. Log contract: `History sync requested for N messages before <id>` e `Received history sync event (ON_DEMAND) ...`. Ferramenta MCP: `request_history`.
 - **Armadilha:** `INSERT OR REPLACE INTO messages` (main.go:221) sobrescreve a linha inteira no sync. Re-parear/re-sync **apaga transcrições** (content volta a ''). COALESCE em messages ainda não existe (só em senders/chats). Backup `messages.db` antes de re-parear.
 
 ## LID→PN
