@@ -7085,7 +7085,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
-	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
+	fmt.Printf("Received history sync event (%s) with %d conversations\n", historySync.Data.GetSyncType(), len(historySync.Data.Conversations))
 
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
@@ -7112,6 +7112,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 
 		// Process messages
 		messages := conversation.Messages
+		if historySync.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+			fmt.Printf("On-demand history for %s: %d messages\n", chatJID, len(messages))
+		}
 		if len(messages) > 0 {
 			// Update chat with latest message timestamp
 			latestMsg := messages[0]
@@ -7380,6 +7383,21 @@ const (
 	historyRequestMaxCount     = 100
 )
 
+// historyRequestChat returns the chat JID to put in an on-demand history
+// request: the LID when one is mapped for a 1:1 PN chat, since the phone
+// indexes migrated chats by LID — the store keys rows by PN (resolveToPN).
+func historyRequestChat(client *whatsmeow.Client, chat types.JID) types.JID {
+	if client == nil || client.Store == nil || client.Store.LIDs == nil || chat.Server != types.DefaultUserServer {
+		return chat
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if lid, err := client.Store.LIDs.GetLIDForPN(ctx, chat); err == nil && !lid.IsEmpty() {
+		return lid
+	}
+	return chat
+}
+
 // HistoryRequest is the body of POST /api/history_request (issue #40).
 type HistoryRequest struct {
 	ChatJID   string `json:"chat_jid"`
@@ -7450,7 +7468,7 @@ func handleHistoryRequest(client *whatsmeow.Client, messageStore *MessageStore) 
 		}
 		anchorChat, _ := types.ParseJID(chatKey)
 		anchor := &types.MessageInfo{
-			MessageSource: types.MessageSource{Chat: anchorChat, IsFromMe: isFromMe},
+			MessageSource: types.MessageSource{Chat: historyRequestChat(client, anchorChat), IsFromMe: isFromMe},
 			ID:            types.MessageID(req.MessageID),
 			Timestamp:     timestamp,
 		}
