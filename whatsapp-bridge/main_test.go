@@ -225,6 +225,16 @@ func TestHandleEdit(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 		}
 	})
+
+	for name, text := range map[string]string{"empty": "", "whitespace": "   "} {
+		t.Run(name+" new_text returns 400", func(t *testing.T) {
+			body, _ := json.Marshal(EditRequest{ChatJID: "123@s.whatsapp.net", MessageID: "MSG1", NewText: text})
+			rec := doHandlerRequest(t, handler, http.MethodPost, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+		})
+	}
 }
 
 // TestHandleRevoke covers /api/revoke request validation: same shape as

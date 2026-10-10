@@ -35,6 +35,13 @@ func TestApplyOwnProtocolAction(t *testing.T) {
 	if got := get("r"); got != revokedContent {
 		t.Errorf("own revoke: content = %q, want %q", got, revokedContent)
 	}
+	t.Run("edit_empty_text_keeps_row", func(t *testing.T) {
+		applyOwnProtocolAction(nil, store, chat, "e", "")
+		applyOwnProtocolAction(nil, store, chat, "e", "   ")
+		if got := get("e"); got != "new text" {
+			t.Errorf("empty own edit: content = %q, want %q", got, "new text")
+		}
+	})
 	// A nil store (handler built without one) must not panic.
 	applyOwnProtocolAction(nil, nil, chat, "e", "x")
 }

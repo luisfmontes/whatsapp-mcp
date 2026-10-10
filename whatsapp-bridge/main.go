@@ -1055,15 +1055,20 @@ func handleReact(client *whatsmeow.Client) http.HandlerFunc {
 // copy. WhatsApp does not echo our own edit/revoke back on a single-device
 // account, so handleMessage never sees it. Same semantics and chat-key
 // normalization as the incoming path; failures are logged, not fatal, because
-// the message was already sent.
+// the message was already sent. Empty content is skipped: like the incoming
+// path, an edit must never blank a stored row.
 func applyOwnProtocolAction(client *whatsmeow.Client, messageStore *MessageStore, chat types.JID, id, content string) {
-	if messageStore == nil {
+	if messageStore == nil || strings.TrimSpace(content) == "" {
 		return
 	}
 	if err := messageStore.ApplyEdit(id, resolveToPN(client, chat).String(), content, true, ""); err != nil {
-		fmt.Printf("Failed to apply own edit/revoke locally: %v\n", err)
+		ownActionLogger.Warnf("Failed to apply own edit/revoke locally: %v", err)
 	}
 }
+
+// ownActionLogger logs applyOwnProtocolAction failures. The REST handlers are
+// built without the client logger, so this one mirrors its module and level.
+var ownActionLogger = waLog.Stdout("Client", "INFO", true)
 
 // handleEdit returns the handler for POST /api/edit. Editing is always the
 // caller's own message (WhatsApp only allows editing your own messages), so
@@ -1077,6 +1082,12 @@ func handleEdit(client *whatsmeow.Client, messageStore *MessageStore) http.Handl
 		var req EditRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" || req.MessageID == "" {
 			http.Error(w, "Invalid request: chat_jid and message_id required", http.StatusBadRequest)
+			return
+		}
+		// An edit must never blank the message (or a media caption), here or in
+		// the local row applyOwnProtocolAction updates.
+		if strings.TrimSpace(req.NewText) == "" {
+			http.Error(w, "Invalid request: new_text must not be empty", http.StatusBadRequest)
 			return
 		}
 		chatJID, err := types.ParseJID(req.ChatJID)
