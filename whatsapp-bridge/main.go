@@ -3908,6 +3908,107 @@ func handlePollResults(messageStore *MessageStore) http.HandlerFunc {
 }
 
 // ChatPresenceRequest represents a request to send a typing/recording indicator.
+// presenceSender is the slice of *whatsmeow.Client that pulsePresence needs,
+// so the pulse can be tested without a live connection.
+type presenceSender interface {
+	SendPresence(ctx context.Context, state types.Presence) error
+}
+
+// presenceKeepaliveInterval is how often the bridge marks itself in use. A
+// companion that never goes "available" gets "will be disconnected today,
+// open WhatsApp on this device" on the phone and is then unlinked (seen
+// 2026-10-10 on both accounts); one pulse cleared the warning.
+const presenceKeepaliveInterval = 12 * time.Hour
+
+// presenceOnce guards against launching the keepalive more than once, since
+// events.Connected fires on every reconnect.
+var presenceOnce sync.Once
+
+// pulsePresence marks the companion available and, after hold, unavailable
+// again: available is what WhatsApp counts as the device being used, and
+// staying available would make the phone stop showing notifications.
+// Unavailable is not sent if available failed — there is nothing to undo.
+func pulsePresence(sender presenceSender, hold time.Duration) error {
+	if err := sender.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+		return fmt.Errorf("available: %w", err)
+	}
+	time.Sleep(hold)
+	if err := sender.SendPresence(context.Background(), types.PresenceUnavailable); err != nil {
+		return fmt.Errorf("unavailable: %w", err)
+	}
+	return nil
+}
+
+// presenceKeepalive pulses presence once shortly after the first connect and
+// then every interval, skipping a tick while the client is disconnected.
+func presenceKeepalive(client *whatsmeow.Client, interval time.Duration) {
+	pulse := func() {
+		if !client.IsConnected() {
+			return
+		}
+		if err := pulsePresence(client, 5*time.Second); err != nil {
+			fmt.Printf("Presence keepalive failed: %v\n", err)
+			return
+		}
+		fmt.Println("Presence keepalive sent (available -> unavailable).")
+	}
+	time.Sleep(30 * time.Second)
+	pulse()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		pulse()
+	}
+}
+
+// PresenceRequest is the body of POST /api/presence: the account-wide
+// available/unavailable state, not the per-chat typing indicator.
+type PresenceRequest struct {
+	State string `json:"state"`
+}
+
+// handlePresence returns the handler for POST /api/presence. Marking the
+// companion "available" is what WhatsApp counts as the device being used; a
+// bridge that never does it gets the "will be disconnected today, open
+// WhatsApp on this device" warning on the phone. While available, the phone
+// may stop showing notifications, so callers should go back to unavailable.
+func handlePresence(client *whatsmeow.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req PresenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+		var state types.Presence
+		switch req.State {
+		case "available":
+			state = types.PresenceAvailable
+		case "unavailable":
+			state = types.PresenceUnavailable
+		default:
+			http.Error(w, "Invalid state: must be one of available, unavailable", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if client == nil || !client.IsConnected() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: "WhatsApp client not connected"})
+			return
+		}
+		if err := client.SendPresence(r.Context(), state); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(MarkChatResponse{Success: false, Message: fmt.Sprintf("SendPresence error: %v", err)})
+			return
+		}
+		fmt.Printf("Presence sent: %s\n", req.State)
+		json.NewEncoder(w).Encode(MarkChatResponse{Success: true, Message: "presence sent: " + req.State})
+	}
+}
+
 type ChatPresenceRequest struct {
 	ChatJID string `json:"chat_jid"`
 	State   string `json:"state"`
@@ -6569,6 +6670,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Handler for sending a typing/recording indicator to a chat.
 	http.HandleFunc("/api/chat_presence", handleChatPresence(client))
+	http.HandleFunc("/api/presence", handlePresence(client))
 
 	// Handler for checking whether phone numbers are registered on WhatsApp.
 	http.HandleFunc("/api/is_on_whatsapp", handleIsOnWhatsApp(client))
@@ -6862,6 +6964,7 @@ func main() {
 			logger.Infof("Connected to WhatsApp")
 			go SyncAllContacts(client, messageStore, logger)
 			sweepOnce.Do(func() { startTranscriptionSweep(5 * time.Minute) })
+			presenceOnce.Do(func() { go presenceKeepalive(client, presenceKeepaliveInterval) })
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")

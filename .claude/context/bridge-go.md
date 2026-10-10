@@ -61,6 +61,12 @@ Bridge Go (`whatsapp-bridge/main.go`) — conecta ao WhatsApp via whatsmeow, exp
 - `store.DeviceProps.RequireFullSync = proto.Bool(true)` + `HistorySyncConfig{FullSyncDaysLimit:365,...}` **antes de `NewClient`**. Sem isso só vem histórico recente. Recupera ~1 ano.
 - **Armadilha:** `INSERT OR REPLACE INTO messages` (main.go:221) sobrescreve a linha inteira no sync. Re-parear/re-sync **apaga transcrições** (content volta a ''). COALESCE em messages ainda não existe (só em senders/chats). Backup `messages.db` antes de re-parear.
 
+## Presença (aparelho "em uso")
+
+- Aparelho vinculado que nunca fica `available` recebe no celular "Será desconectado hoje — abra o WhatsApp neste dispositivo" e é desvinculado (visto em 10/10/2026 nas duas contas). Ficar conectado não basta.
+- `presenceKeepalive` (no primeiro `events.Connected`, `presenceOnce`): 30 s após conectar e a cada 12 h, `available` → 5 s → `unavailable`. Termina sempre `unavailable`: aparelho `available` faz o celular parar de notificar.
+- `POST /api/presence {state: available|unavailable}` para pulso manual.
+
 ## LID→PN
 
 - `resolveToPN` normaliza LID→PN na escrita (mesmo contato não racha em dois `chat_jid`).

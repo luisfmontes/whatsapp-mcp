@@ -1,0 +1,9 @@
+{
+  "slug": "2026-10-10-presenca-companion",
+  "titulo": "fix/presenca-companion",
+  "criado_em": "2026-10-10",
+  "leve": {
+    "motivo": "teste de presenca para aviso de desconexao do aparelho, autorizado pelo usuario",
+    "data": "2026-10-10"
+  }
+}
