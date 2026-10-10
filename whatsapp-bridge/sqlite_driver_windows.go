@@ -99,6 +99,12 @@ func openStoreDBReadOnly() (*sql.DB, error) {
 
 // storeDSN is the DSN handed to sqlstore.New (which supplies "sqlite3" as the
 // dialect/driver name separately).
+//
+// busy_timeout and WAL are not optional (issue #41): without them, any reader
+// on this file (openStoreDBReadOnly, contact/LID lookups) made whatsmeow's
+// writes fail instantly with SQLITE_BUSY — "failed to save identity" aborts
+// decryption and the incoming message is lost. WAL lets readers and the
+// writer proceed together; busy_timeout absorbs writer-vs-writer contention.
 func storeDSN() string {
-	return "file:store/whatsapp.db?_fk=on"
+	return "file:store/whatsapp.db?_fk=on&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }

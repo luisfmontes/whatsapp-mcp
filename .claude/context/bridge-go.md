@@ -26,6 +26,9 @@ Bridge Go (`whatsapp-bridge/main.go`) — conecta ao WhatsApp via whatsmeow, exp
   `GOOS=darwin go build ./...` e `GOOS=linux go build ./...` (não precisa de toolchain C).
 - `busy_timeout` nas duas conexões de `messages.db` não é opcional: sem ele, buscas durante history
   sync falham com `database is locked (5) (SQLITE_BUSY)` como 500.
+- `storeDSN()` (`whatsapp.db`, do whatsmeow) leva `busy_timeout` **e WAL** (#41): sem isso, qualquer leitor
+  no arquivo fazia a gravação do whatsmeow falhar na hora — `failed to save identity ... SQLITE_BUSY`
+  aborta a decriptação e a mensagem recebida some. `TestStoreDSNLockContention` reproduz o erro.
 - **REST API liga em `127.0.0.1` por padrão.** Upstream ligava `0.0.0.0` (qualquer um na LAN mandava mensagem como você). `BIND_ADDR=<ip>` (ex. `0.0.0.0`, ou um IP específico como um endereço Tailscale) reabre.
 - **Porta** via `WHATSAPP_BRIDGE_PORT` (default 8080; este setup usa 8081).
 - **`API_AUTH_TOKEN`**: se `BIND_ADDR` não é `127.0.0.1`/`localhost`, o processo **recusa subir**
