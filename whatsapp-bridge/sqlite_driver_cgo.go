@@ -92,6 +92,10 @@ func openStoreDBReadOnly() (*sql.DB, error) {
 // storeDSN returns the database connection string for whatsmeow's sqlstore.New().
 // Must use "sqlite3" as the driver name (not "sqlite") so whatsmeow's dialect detection
 // works correctly and chooses the SQLite UPSERT syntax.
+//
+// busy_timeout and WAL are not optional (issue #41): without them, any reader
+// on this file made whatsmeow's writes fail instantly with SQLITE_BUSY —
+// "failed to save identity" aborts decryption and the incoming message is lost.
 func storeDSN() string {
-	return "file:store/whatsapp.db?_foreign_keys=on"
+	return "file:store/whatsapp.db?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL"
 }
