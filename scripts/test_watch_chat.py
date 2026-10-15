@@ -291,11 +291,18 @@ class FakeBridge:
         bridge = self
         self.healthy = True
         self.truncate = False
+        # slow: seconds to sleep before answering; slow_times: how many
+        # requests get the delay (None = every one).
+        self.slow, self.slow_times = 0, None
         self.hits = 0
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 bridge.hits += 1
+                if bridge.slow and bridge.slow_times != 0:
+                    if bridge.slow_times is not None:
+                        bridge.slow_times -= 1
+                    time.sleep(bridge.slow)
                 body = _json.dumps(_status_body(bridge.healthy)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -376,6 +383,25 @@ class TestBridgeStatus(WatchChatTestCase):
         self.assertIsNotNone(line)
         self.assertTrue(line.startswith("BRIDGE: desconectada (resposta cortada)"), line)
         self.assertIsNone(self.proc.poll(), "a cut-off response must not kill the watch")
+
+    def test_m_um_timeout_isolado_nao_gera_linha(self):
+        # Issue #45: one /api/status slower than STATUS_TIMEOUT while the
+        # bridge is fine must not cry "desconectada".
+        self.start_status_watch()
+        self.assert_no_line(timeout=0.5)
+        hits = self.bridge.hits
+        self.bridge.slow, self.bridge.slow_times = 4, 1
+        self.assert_no_line(timeout=6.0)
+        # Control: the slow request happened and checks kept going after it.
+        self.assertGreater(self.bridge.hits, hits + 1)
+
+    def test_n_timeouts_seguidos_geram_desconectada(self):
+        self.start_status_watch()
+        self.assert_no_line(timeout=0.5)
+        self.bridge.slow, self.bridge.slow_times = 4, None
+        line = self.next_line(timeout=12)
+        self.assertIsNotNone(line)
+        self.assertTrue(line.startswith("BRIDGE: desconectada (sem resposta em"), line)
 
     def test_k_sem_status_url_nao_chama_a_bridge(self):
         self.start_watch(idle=30)

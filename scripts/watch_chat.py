@@ -29,6 +29,11 @@ account's bridge /api/status) closes that gap: every --status-interval
 seconds the watch asks the bridge whether it is healthy and prints one
 "BRIDGE: desconectada" line when it goes down and one "BRIDGE: conectada"
 line when it comes back -- once per transition, never once per check.
+A single status timeout is not a transition: a busy machine can push
+/api/status past STATUS_TIMEOUT once while the bridge keeps delivering, so
+"desconectada" on a timeout waits for STATUS_STRIKES checks in a row. Every
+other failure (refused connection, HTTP error, healthy:false) is an answer
+from the machine and still goes out on the first check.
 Without --status-url nothing touches the network and the output is the
 same as before the flag existed.
 
@@ -51,6 +56,8 @@ DEFAULT_QUIET = 25
 DEFAULT_IDLE = 7200
 DEFAULT_STATUS_INTERVAL = 60
 STATUS_TIMEOUT = 3
+# Timeouts in a row before a timeout counts as the bridge being down.
+STATUS_STRIKES = 2
 
 # No outgoing message ever recorded for this chat: treat the whole history as
 # unanswered rather than refusing to start.
@@ -96,33 +103,34 @@ def _last_outgoing_timestamp(db_path, chats):
 
 
 def bridge_health(status_url):
-    """(healthy, reason) from the bridge's /api/status. Healthy only on HTTP
-    200 with a JSON body whose "healthy" is true; anything else -- refused
-    connection, timeout, bad JSON, healthy:false -- is down, with a short
-    reason for the BRIDGE line."""
+    """(healthy, reason, timed_out) from the bridge's /api/status. Healthy
+    only on HTTP 200 with a JSON body whose "healthy" is true; anything else
+    -- refused connection, timeout, bad JSON, healthy:false -- is down, with a
+    short reason for the BRIDGE line. timed_out flags the one failure that
+    can be a slow machine rather than a dead bridge."""
     try:
         with urllib.request.urlopen(status_url, timeout=STATUS_TIMEOUT) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}"
+        return False, f"HTTP {e.code}", False
     except http.client.HTTPException:
         # e.g. IncompleteRead: the bridge died mid-response. Not an OSError,
         # and uncaught it would take the whole watch down with no line.
-        return False, "resposta cortada"
+        return False, "resposta cortada", False
     except (urllib.error.URLError, OSError) as e:
         # The OS message is long and localized (and mis-encoded on a Windows
         # console); the line only needs which of the two it was.
         cause = getattr(e, "reason", e)
         if isinstance(cause, ConnectionRefusedError):
-            return False, "sem resposta: conexão recusada"
-        return False, f"sem resposta em {STATUS_TIMEOUT}s"
+            return False, "sem resposta: conexão recusada", False
+        return False, f"sem resposta em {STATUS_TIMEOUT}s", True
     except ValueError:
-        return False, "resposta sem JSON"
+        return False, "resposta sem JSON", False
     if isinstance(body, dict) and body.get("healthy") is True:
-        return True, ""
+        return True, "", False
     if isinstance(body, dict) and body.get("logged_in") is False:
-        return False, "deslogada"
-    return False, "healthy:false"
+        return False, "deslogada", False
+    return False, "healthy:false", False
 
 
 def load_state(state_path):
@@ -205,13 +213,16 @@ def run(args, out=None):
     pending, last_new, failures = [], 0.0, 0
     # Assume healthy at start: the caller only arms the watch after checking
     # the bridge, so the first line worth printing is the first drop.
-    last_healthy, last_status_check = True, None
+    last_healthy, last_status_check, timeouts = True, None, 0
     while True:
         if args.status_url and (
             last_status_check is None or time.time() - last_status_check >= args.status_interval
         ):
             last_status_check = time.time()
-            healthy, reason = bridge_health(args.status_url)
+            healthy, reason, timed_out = bridge_health(args.status_url)
+            timeouts = timeouts + 1 if timed_out else 0
+            if timed_out and timeouts < STATUS_STRIKES:
+                healthy = last_healthy  # one slow answer is not news yet
             if healthy != last_healthy:
                 if healthy:
                     print("BRIDGE: conectada — a espera voltou a valer", file=out, flush=True)
