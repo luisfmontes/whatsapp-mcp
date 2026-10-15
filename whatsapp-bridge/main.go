@@ -550,23 +550,28 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	// Persist outbounds (text and media) so own-sends appear in the local store.
 	// Multi-device echo via handleMessage doesn't fire on single-device accounts.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-		chatJID := recipientJID.String()
-		sender := client.Store.ID.User
-		if ensureErr := messageStore.EnsureChat(chatJID, resp.Timestamp); ensureErr != nil {
-			fmt.Printf("Failed to ensure chat row: %v\n", ensureErr)
-		}
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
-		if storeErr := messageStore.StoreMessage(
-			resp.ID, chatJID, sender, message, resp.Timestamp, true,
-			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
-		); storeErr != nil {
-			fmt.Printf("Failed to persist outbound: %v\n", storeErr)
-		} else {
-			_ = messageStore.TouchChatLastMessageTime(chatJID, resp.Timestamp)
-		}
+		persistOutbound(messageStore, recipientJID.String(), client.Store.ID.User, resp.ID, message, resp.Timestamp, msg)
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
+}
+
+// persistOutbound writes a message we just sent (text or media) to the local
+// store, media metadata included. Split out of sendWhatsAppMessage so the
+// stored row can be tested without a live WhatsApp client.
+func persistOutbound(store *MessageStore, chatJID, sender, id, content string, ts time.Time, msg *waProto.Message) {
+	if ensureErr := store.EnsureChat(chatJID, ts); ensureErr != nil {
+		fmt.Printf("Failed to ensure chat row: %v\n", ensureErr)
+	}
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
+	if storeErr := store.StoreMessage(
+		id, chatJID, sender, content, ts, true,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+	); storeErr != nil {
+		fmt.Printf("Failed to persist outbound: %v\n", storeErr)
+	} else {
+		_ = store.TouchChatLastMessageTime(chatJID, ts)
+	}
 }
 
 // Extract media info from a message
