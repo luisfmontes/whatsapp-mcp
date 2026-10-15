@@ -24,7 +24,7 @@ if record:
     with open(record, "w", encoding="utf-8") as f:
         f.write(text)
 if os.environ.get("FAKE_TTS_FAIL"):
-    sys.stderr.write("voice model exploded")
+    sys.stderr.write(os.environ.get("FAKE_TTS_STDERR", "voice model exploded"))
     sys.exit(3)
 with wave.open(out, "wb") as w:
     w.setnchannels(1)
@@ -172,7 +172,18 @@ class TestLocalEngine(TTSTestCase):
             with self.assertRaises(tts.TTSError) as cm:
                 tts.synthesize("Olá")
         self.assertIn("code 3", str(cm.exception))
-        self.assertIn("voice model exploded", str(cm.exception))
+        self.assertNotIn("voice model exploded", str(cm.exception))
+        self.assertNoLeftovers()
+
+    def test_local_cli_failure_does_not_echo_stderr(self):
+        leak = r"C:\private\tts-model-dir"
+        with self.local(), patch.dict(os.environ, {"FAKE_TTS_FAIL": "1", "FAKE_TTS_STDERR": leak}):
+            with self.assertLogs("tts", level="ERROR") as logs:
+                with self.assertRaises(tts.TTSError) as cm:
+                    tts.synthesize("Olá")
+        self.assertIn("exit code 3", str(cm.exception))
+        self.assertNotIn(leak, str(cm.exception))
+        self.assertIn(leak, "".join(logs.output))
         self.assertNoLeftovers()
 
     def test_local_missing_ffmpeg_is_clear_error_and_leaves_nothing(self):
@@ -224,6 +235,18 @@ class TestApiEngine(TTSTestCase):
                             tts.synthesize("Olá")
                 self.assertIn(str(status), str(cm.exception))
                 self.assertNoLeftovers()
+
+    def test_api_error_does_not_echo_body(self):
+        body = b'{"error":"secret-proxy-header: upstream-proxy-7"}'
+        with FakeServer(lambda req: (502, "text/plain", body)) as server:
+            with self.api(server.url):
+                with self.assertLogs("tts", level="ERROR") as logs:
+                    with self.assertRaises(tts.TTSError) as cm:
+                        tts.synthesize("Olá")
+        self.assertIn("502", str(cm.exception))
+        self.assertNotIn("secret-proxy-header", str(cm.exception))
+        self.assertIn("secret-proxy-header", "".join(logs.output))
+        self.assertNoLeftovers()
 
     def test_api_without_key_is_not_configured(self):
         with patch.multiple(tts, TTS_ENGINE="api", TTS_API_KEY=""):
@@ -330,7 +353,8 @@ class TestSendVoiceMessage(TTSTestCase):
         with self.bridge() as server, self.local(), patch.dict(os.environ, {"FAKE_TTS_FAIL": "1"}):
             success, message = self.call(server, "Olá")
         self.assertFalse(success)
-        self.assertIn("voice model exploded", message)
+        self.assertIn("exit code 3", message)
+        self.assertNotIn("voice model exploded", message)
         self.assertEqual(server.requests, [])
         self.assertNoLeftovers()
 

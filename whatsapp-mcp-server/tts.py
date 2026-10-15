@@ -12,6 +12,7 @@ Either engine's output is converted to Opus in an Ogg container (ffmpeg) so the
 bridge can send it as a WhatsApp voice message.
 """
 
+import logging
 import os
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ import tempfile
 import requests
 
 import audio
+
+log = logging.getLogger(__name__)
 
 # Engine selection: "local" | "api". Empty means not configured.
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "").lower()
@@ -40,16 +43,18 @@ TTS_TIMEOUT = 120
 
 
 class TTSError(Exception):
-    """Synthesis failed; the message says why."""
+    """Synthesis failed. The message reaches MCP clients (possibly remote ones), so it is a
+    generic reason plus a status/exit code only: never upstream bodies, stderr, paths or
+    exception text. Detail goes to the server-side log."""
 
 
 def engine_ready():
     """Return (ok, reason). Every not-ready reason starts with "TTS not configured"."""
     if TTS_ENGINE == "local":
         if not TTS_CLI or not os.path.exists(TTS_CLI):
-            return False, f"TTS not configured: local engine CLI not found (set TTS_CLI; got {TTS_CLI!r})"
+            return False, f"TTS not configured: local engine CLI not found (set TTS_CLI)"
         if not TTS_MODEL or not os.path.exists(TTS_MODEL):
-            return False, f"TTS not configured: local engine model not found (set TTS_MODEL; got {TTS_MODEL!r})"
+            return False, f"TTS not configured: local engine model not found (set TTS_MODEL)"
         if not shutil.which("ffmpeg"):
             return False, "TTS not configured: ffmpeg not found"
         return True, "local"
@@ -61,7 +66,7 @@ def engine_ready():
         return True, "api"
     if not TTS_ENGINE:
         return False, "TTS not configured: set TTS_ENGINE to 'local' or 'api'"
-    return False, f"TTS not configured: unknown TTS_ENGINE={TTS_ENGINE!r} (use 'local' or 'api')"
+    return False, f"TTS not configured: unknown TTS_ENGINE (use 'local' or 'api')"
 
 
 def synthesize(text):
@@ -87,7 +92,8 @@ def synthesize(text):
         try:
             return audio.convert_to_opus_ogg_temp(raw)
         except Exception as e:
-            raise TTSError(f"audio conversion failed (is ffmpeg installed?): {e}")
+            log.error("TTS audio conversion failed: %s", e)
+            raise TTSError("audio conversion failed (is ffmpeg installed?)")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -100,10 +106,12 @@ def _synthesize_local(text, tmpdir):
             input=text.encode("utf-8"), capture_output=True, timeout=TTS_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise TTSError(f"TTS CLI could not run: {e}")
+        log.error("TTS CLI could not run: %s", e)
+        raise TTSError("TTS CLI could not run (failed to start or timed out)")
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", "ignore")[-300:].strip()
-        raise TTSError(f"TTS CLI exited with code {proc.returncode}: {stderr}")
+        log.error("TTS CLI exited with code %s: %s", proc.returncode, stderr)
+        raise TTSError(f"TTS CLI failed (exit code {proc.returncode})")
     if not os.path.isfile(wav) or os.path.getsize(wav) == 0:
         raise TTSError("TTS CLI produced no audio")
     return wav
@@ -119,12 +127,14 @@ def _synthesize_api(text, tmpdir):
             timeout=TTS_TIMEOUT,
         )
     except requests.RequestException as e:
-        raise TTSError(f"TTS API request failed: {e}")
+        log.error("TTS API request failed: %s", e)
+        raise TTSError("TTS API request failed (network error or timeout)")
     if r.status_code in (401, 403):
         # The body can echo the (masked) key, so it is deliberately left out.
         raise TTSError(f"TTS API rejected the credentials (HTTP {r.status_code}); check TTS_API_KEY")
     if r.status_code != 200:
-        raise TTSError(f"TTS API returned HTTP {r.status_code}: {r.text[:200]}")
+        log.error("TTS API returned HTTP %s: %s", r.status_code, r.text[:200])
+        raise TTSError(f"TTS API returned an error (HTTP {r.status_code})")
     if not r.content:
         raise TTSError("TTS API returned no audio")
     wav = os.path.join(tmpdir, "speech.wav")

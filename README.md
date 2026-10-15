@@ -111,7 +111,7 @@ The optional `notice` is a text message sent right before the voice note, and on
   export TTS_CLI=/path/to/piper
   export TTS_MODEL=/path/to/pt_BR-cadu-medium.onnx
   ```
-- **API (any OpenAI-compatible `/audio/speech` endpoint)** — audio is generated remotely:
+- **API (any OpenAI-compatible `/audio/speech` endpoint)** — audio is generated remotely. **With `TTS_ENGINE=api` the text of every voice message leaves your machine and is sent to a third-party service (OpenAI by default, or whatever `TTS_API_BASE` points at).** Use `local` if the text must not leave the machine. Error messages returned to MCP clients carry only an HTTP status or exit code; details go to the server log.
   ```sh
   export TTS_ENGINE=api
   export TTS_API_KEY=sk-...
