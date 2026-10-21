@@ -109,18 +109,37 @@ codesign -dv ~/.local/bin/ffmpeg 2>&1 | grep -E 'Authority=Developer ID|TeamIden
 ffmpeg -version | head -1
 ```
 
-**Wire it up.** launchd does not see your shell, so the vars (including `PATH` for `ffmpeg`) go in `transcription.env`, created owner-only:
+If that host is down (it returns HTTP 521 at times), take the arm64/x86_64 binary shipped in the `imageio-ffmpeg` wheel on PyPI instead:
+
+```bash
+P=$(uvx -q --from imageio-ffmpeg python -I -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+cp "$P" ~/.local/bin/ffmpeg && chmod +x ~/.local/bin/ffmpeg
+```
+
+Either way, confirm it decodes Opus: `ffmpeg -hide_banner -decoders | grep -i opus`.
+
+**Wire it up.** launchd does not see your shell, so the vars go in `transcription.env`, created owner-only. Point `FFMPEG_BIN` at the binary — `transcribe.py` otherwise looks for `ffmpeg` on a `PATH` launchd does not have:
 
 ```bash
 (umask 077; cat > ~/.whatsapp-mcp/transcription.env <<EOF
-export PATH="$HOME/.local/bin:\$PATH"
 export TRANSCRIPTION_ENGINE=local
 export WHISPER_CLI=$HOME/.local/share/whisper.cpp/build/bin/whisper-cli
 export WHISPER_MODEL=$HOME/.local/share/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
+export FFMPEG_BIN=$HOME/.local/bin/ffmpeg
 export TRANSCRIPTION_PROMPT="<names, products and jargon the user says often>"
 EOF
 )
 launchctl kickstart -k gui/$(id -u)/com.whatsapp-mcp.bridge
+grep -i "transcription sweep started" ~/.whatsapp-mcp/bridge.log | tail -1
+```
+
+Smoke test the engine without waiting for a real voice note:
+
+```bash
+say "Olá, este é um teste de transcrição." -o /tmp/t.aiff
+ffmpeg -loglevel error -y -i /tmp/t.aiff -c:a libopus /tmp/t.ogg
+ffmpeg -loglevel error -y -i /tmp/t.ogg -ar 16000 -ac 1 /tmp/t.wav
+~/.local/share/whisper.cpp/build/bin/whisper-cli -m ~/.local/share/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin -l pt -nt -np -f /tmp/t.wav
 ```
 
 Offer a `TRANSCRIPTION_PROMPT` draft built from what you already know about the user's work (client names, product names, acronyms) and let them edit it.
