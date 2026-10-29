@@ -1,0 +1,9 @@
+{
+  "slug": "2026-10-29-49-bind-antes-de-conectar",
+  "titulo": "fix/49-bind-antes-de-conectar",
+  "criado_em": "2026-10-29",
+  "leve": {
+    "motivo": "Issue #49 traz causa medida e proposta; usuario pediu resolver issues no automatico. Escopo: bridge faz bind da porta REST antes de abrir store/conectar e sai se falhar.",
+    "data": "2026-10-29"
+  }
+}
