@@ -1,0 +1,9 @@
+{
+  "slug": "2026-10-29-48-launcher-watchdog",
+  "titulo": "fix/48-launcher-watchdog",
+  "criado_em": "2026-10-29",
+  "leve": {
+    "motivo": "Issue #48 ja traz proposta e criterio de pronto; usuario pediu resolver issues no automatico. Escopo: supervisor do launcher no install.ps1 (Windows), sem mudanca no bridge.",
+    "data": "2026-10-29"
+  }
+}

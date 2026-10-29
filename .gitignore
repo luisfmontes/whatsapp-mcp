@@ -43,6 +43,8 @@ start-bridge-hidden.vbs
 # proprio clone. As entradas antigas so cobriam whatsapp-bridge/.
 bridge.log
 bridge.err.log
+# Log do bridge-watchdog.ps1, no mesmo lugar do bridge.log.
+watchdog.log
 
 # Mapa de contas e o store de cada conta da multiconta. O accounts.json tem
 # caminhos e portas da maquina; accounts/<apelido>/store/ tem a sessao do
