@@ -56,9 +56,18 @@ if (Test-PortListening) {
 }
 
 for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    # Someone else may have brought the port up since the last attempt; the
+    # bridge then refuses to start a second copy, so do not try.
+    if ($attempt -gt 1 -and (Test-PortListening)) {
+        Write-WatchdogLog "port up before attempt $attempt, nothing more to start"
+        exit 0
+    }
     # -NoNewWindow keeps the launcher in this hidden console. -WindowStyle
     # Hidden would not: Windows Terminal ignores it (see install.ps1).
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Launcher`"") -NoNewWindow -PassThru
+    # Opening the handle now is what makes ExitCode readable after the
+    # launcher exits; without it PowerShell 5.1 reports an empty code.
+    $null = $proc.Handle
     Write-WatchdogLog "attempt $attempt/$MaxAttempts started launcher pid $($proc.Id)"
 
     $deadline = (Get-Date).AddSeconds($GraceSeconds)

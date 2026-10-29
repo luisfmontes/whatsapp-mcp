@@ -136,6 +136,15 @@ class BridgeWatchdogTest(unittest.TestCase):
         self.assertNotIn("stopping it", log)
         self.assertNotIn("attempt 2/", log)
 
+    def test_launcher_exit_code_is_logged_and_retried(self):
+        launcher = self.launcher("exit 7\n")
+        result = self.run_watchdog(launcher, attempts=2)
+        log = self.log_text()
+
+        self.assertEqual(result.returncode, 1, log)
+        self.assertEqual(log.count("exited with code 7 before the port came up"), 2, log)
+        self.assertIn("gave up after 2 attempts", log)
+
     def test_nothing_started_when_port_already_listening(self):
         marker = self.dir / "launcher-ran"
         launcher = self.launcher(f"New-Item -ItemType File '{marker}' | Out-Null\n")
