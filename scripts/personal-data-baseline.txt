@@ -1,12 +1,22 @@
 # Identificadores com forma de telefone/JID que JA existem neste repositorio, todos
-# sinteticos, conferidos um a um em 2026-08-24. A trava (scripts/check-personal-data.py)
-# falha quando aparece um que nao esta nesta lista.
+# sinteticos, conferidos um a um em 2026-08-24 e reconferidos em 2026-09-02. A trava
+# (scripts/check-personal-data.py) falha quando aparece um que nao esta nesta lista.
 #
 # Para acrescentar: olhe o numero e decida se e de uma pessoa de verdade. Se for,
 # nao adicione aqui -- tire do arquivo. A lista existe para que a decisao seja
 # consciente e apareca no diff, nao para silenciar a trava.
 #
 # Nenhuma entrada aqui pode ser um numero real de alguem.
+#
+# 2026-09-02: a conferencia de 2026-08-24 deixou passar um. O numero 55 62 9178-88xx
+# estava nesta lista como sintetico e era real, do dono do upstream -- 274 ocorrencias
+# nos stores locais do WhatsApp, com nome de contato. O que separou os dois casos nao
+# foi olhar o numero, foi cruzar cada entrada da lista com os stores reais: dos 13
+# numeros, esse foi o unico com ocorrencia. Os outros 12 deram zero. Antes de declarar
+# um numero sintetico, faca esse cruzamento -- olhar "parece sintetico" nao basta,
+# 9178-88xx parece. (O numero sai daqui mascarado de proposito: escrito inteiro,
+# ele voltaria a ser um numero real num arquivo rastreado -- foi a propria trava que
+# apontou isso quando este comentario o trazia por extenso.)
 jid:55111234567@s.whatsapp.net
 jid:5511999999999:26@s.whatsapp.net
 jid:5511999999999@s.whatsapp.net
@@ -15,8 +25,8 @@ jid:5562000000001:26@s.whatsapp.net
 jid:5562000000001@s.whatsapp.net
 jid:5562000000002@s.whatsapp.net
 jid:5562000000003@s.whatsapp.net
+jid:5562000000004@s.whatsapp.net
 jid:5562123456789@s.whatsapp.net
-jid:556291788888@s.whatsapp.net
 jid:5562988887777@s.whatsapp.net
 jid:5562988888888:1@s.whatsapp.net
 jid:5562999999999@s.whatsapp.net
@@ -25,8 +35,8 @@ telefone:5562000000000
 telefone:5562000000001
 telefone:5562000000002
 telefone:5562000000003
+telefone:5562000000004
 telefone:5562123456789
-telefone:556291788888
 telefone:5562988887777
 telefone:5562988888888
 telefone:5562999997777

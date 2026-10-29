@@ -8,7 +8,7 @@
 POST /api/is_on_whatsapp
 Content-Type: application/json
 
-{"phones": ["556291788888", "+5562988887777"]}
+{"phones": ["5562000000004", "+5562988887777"]}
 ```
 
 - `phones` (array string, obrigatório, ≥1): números em formato internacional. `+` opcional na entrada — a bridge prefixa `+` se ausente (D-08), pois a lib exige.
@@ -20,7 +20,7 @@ Content-Type: application/json
   "success": true,
   "message": "2 number(s) checked",
   "results": [
-    {"query": "+556291788888", "jid": "556291788888@s.whatsapp.net", "is_in": true},
+    {"query": "+5562000000004", "jid": "5562000000004@s.whatsapp.net", "is_in": true},
     {"query": "+5562988887777", "jid": "", "is_in": false}
   ]
 }
