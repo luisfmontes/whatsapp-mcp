@@ -51,7 +51,16 @@ então isso passou a ser suportado sem inventar nada além do que já existia:
   3 dias, o que num bridge de longa duração é morte silenciosa no meio da semana.
 - O Task Scheduler **não guarda saída** — diagnóstico só existe se o launcher redirecionar. O
   `start-bridge.ps1` gerado faz `& '.\whatsapp-bridge.exe' *>> bridge.log` e seta
-  `WHATSAPP_BRIDGE_LOG` (o `recover_audios.py` lê esse arquivo).
+  `WHATSAPP_BRIDGE_LOG` (o `recover_audios.py` lê esse arquivo). Antes do exe ele grava
+  `launcher: starting <hora> pid <n>`: partida sem essa linha travou antes de chegar ali.
+- A tarefa chama `start-bridge-hidden.vbs` → `bridge-watchdog.ps1` → `start-bridge.ps1`. O `.vbs`
+  volta na hora, então a tarefa dá sucesso e o `-RestartCount` nunca age; quem supervisiona é o
+  watchdog (#48). Ele é dono do PID do launcher: porta fora após 90 s e nenhum
+  `whatsapp-bridge.exe` filho = travado → mata **aquele PID** e relança (até 3 vezes). Com o
+  filho vivo, só registra e sai. Log em `watchdog.log`, ao lado do `bridge.log`. Instalação
+  antiga só ganha o watchdog com o `.vbs` novo; a tarefa não muda. A conta padrão regera ao rodar o
+  `install.ps1` de novo; conta extra não (o `-AddAccount` recusa conta existente), e o `.vbs` dela
+  se troca à mão, no formato que o instalador gera.
 - Como no launchd, **o agendador não herda env da shell** → transcrição vem de `transcription.env`,
   carregado pelo launcher. As linhas do arquivo começam com `export` (é escrito para `source` no
   POSIX); o launcher remove esse prefixo antes de setar a variável. **Em modo multi-account,

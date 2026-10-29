@@ -316,16 +316,21 @@ if (Test-Path `$EnvFile) {
 `$env:WHATSAPP_BRIDGE_PORT = '$port'
 `$env:WHATSAPP_BRIDGE_LOG = `$BridgeLog
 
+# One line per start, before the exe (see the default launcher for why).
+"launcher: starting `$(Get-Date -Format s) pid `$PID" >> `$BridgeLog
 & `$BridgeExe *>> `$BridgeLog
 "@
     Set-Content -Path $launchScript -Value $launchScriptContent -Encoding Ascii
     Write-Ok "Launch script: $launchScript"
 
-    # Generate hidden launcher for Task Scheduler
+    # Generate hidden launcher for Task Scheduler. It starts the watchdog, which
+    # starts the launcher (see bridge-watchdog.ps1 for why).
     $launchScriptHidden = Join-Path $accountDir "start-bridge-hidden.vbs"
+    $watchdogScript = Join-Path $InstallDir "bridge-watchdog.ps1"
+    $watchdogLog = Join-Path $accountDir "watchdog.log"
     $vbsContent = @"
 Set objShell = CreateObject("WScript.Shell")
-objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$launchScript""", 0, False
+objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$watchdogScript"" -Launcher ""$launchScript"" -Port $port -Log ""$watchdogLog""", 0, False
 "@
     Set-Content -Path $launchScriptHidden -Value $vbsContent -Encoding Ascii
     Write-Ok "Hidden launcher: $launchScriptHidden"
@@ -532,6 +537,10 @@ if (Test-Path `$EnvFile) {
 # at the same file this launcher writes.
 `$env:WHATSAPP_BRIDGE_LOG = `$BridgeLog
 
+# One line per start, before the exe: if a start ever hangs again (issue #48),
+# the log shows whether this script got this far.
+"launcher: starting `$(Get-Date -Format s) pid `$PID" >> `$BridgeLog
+
 # Append stdout AND stderr. Pumping the two pipes by hand (read stdout to EOF,
 # then stderr) deadlocks a long-running process as soon as the unread pipe fills
 # its buffer - the bridge would freeze mid-sync with nothing explaining why.
@@ -544,10 +553,14 @@ Write-Ok "Launch script: $launchScript"
 # -WindowStyle Hidden the way classic conhost.exe does - a visible blank window
 # pops up anyway. Wrap the launch in a VBScript that uses WScript.Shell.Run with
 # window style 0 (truly hidden), since wscript.exe is not a console host.
+# The VBScript starts bridge-watchdog.ps1, which starts the launcher and
+# restarts it if it hangs before the bridge binds its port (issue #48).
 $launchScriptHidden = Join-Path $InstallDir 'start-bridge-hidden.vbs'
+$watchdogScript = Join-Path $InstallDir 'bridge-watchdog.ps1'
+$watchdogLog = Join-Path $InstallDir 'watchdog.log'
 $vbsContent = @"
 Set objShell = CreateObject("WScript.Shell")
-objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$launchScript""", 0, False
+objShell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$watchdogScript"" -Launcher ""$launchScript"" -Port $BridgePort -Log ""$watchdogLog""", 0, False
 "@
 Set-Content -Path $launchScriptHidden -Value $vbsContent -Encoding Ascii
 Write-Ok "Hidden launcher: $launchScriptHidden"
