@@ -227,8 +227,8 @@ Three things differ from macOS/Linux and will bite if ignored:
 - **Port.** Windows reserves TCP ranges for Hyper-V/WSL, and the project default
   8080 frequently lands inside one. The bind then fails with *"an attempt was
   made to access a socket in a way forbidden by its access permissions"* — and
-  the bridge only logs it and keeps running, so you get a live process with no
-  port open. Check with `netsh interface ipv4 show excludedportrange protocol=tcp`
+  the bridge logs it and exits before connecting to WhatsApp (the same happens
+  when another bridge already holds the port). Check with `netsh interface ipv4 show excludedportrange protocol=tcp`
   and pick a port outside those ranges (`install.ps1` does this automatically and
   defaults to 8081).
 - **Auto-start** is a Task Scheduler task named `WhatsAppMCPBridge`, triggered at

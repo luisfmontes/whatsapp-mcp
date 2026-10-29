@@ -71,8 +71,8 @@ function Write-TextNoBom {
 
 # Windows reserves TCP ranges for Hyper-V/WSL/NAT. Binding inside one fails with
 # "an attempt was made to access a socket in a way forbidden by its access
-# permissions" - and the bridge only logs that and keeps running, so the service
-# looks healthy while no port is open. Catch it here instead.
+# permissions" - and the bridge exits at once (#49), so auto-start would fail on
+# every logon with only a line in bridge.log to say why. Catch it here instead.
 function Test-PortExcluded {
     param([int]$Port)
     $out = & netsh interface ipv4 show excludedportrange protocol=tcp 2>$null

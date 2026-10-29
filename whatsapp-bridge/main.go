@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/rand"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -6026,7 +6027,25 @@ func renderWaitingPage(accountAlias string, port int) string {
 		accountTitle(accountAlias, port), accountHeading(accountAlias, port))
 }
 
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+// restBindAddr is where the REST API listens. Loopback only by default — there is
+// no auth on the REST API, and anyone on the LAN could send messages.
+// Set BIND_ADDR=0.0.0.0 (or a specific interface IP, e.g. a Tailscale address) to opt into wider exposure.
+func restBindAddr() string {
+	if bindAddr := os.Getenv("BIND_ADDR"); bindAddr != "" {
+		return bindAddr
+	}
+	return "127.0.0.1"
+}
+
+// listenREST binds the REST port. main calls it before opening any store or
+// connecting: a second bridge for the same account cannot serve the API, but it
+// would still open the WhatsApp session, and the two would replace each other's
+// stream every few minutes (#49). Failing here keeps the extra copy off the network.
+func listenREST(port int) (net.Listener, error) {
+	return net.Listen("tcp", fmt.Sprintf("%s:%d", restBindAddr(), port))
+}
+
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, listener net.Listener) {
 	// /qr — serves the current QR code as PNG (during pairing) or a status page (when connected).
 	// Open http://localhost:8080/qr in a browser to scan the QR code on first setup.
 	// If WHATSAPP_ACCOUNT is set, includes the account name and port in the page (D8, D3).
@@ -6723,14 +6742,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		json.NewEncoder(w).Encode(SearchContactsResponse{Success: true, Message: msg, Contacts: hits})
 	})
 
-	// Bind to loopback only — no auth on REST API, anyone on LAN could send messages.
-	// Set BIND_ADDR=0.0.0.0 (or a specific interface IP, e.g. a Tailscale address) to opt into wider exposure.
-	bindAddr := os.Getenv("BIND_ADDR")
-	if bindAddr == "" {
-		bindAddr = "127.0.0.1"
-	}
-	serverAddr := fmt.Sprintf("%s:%d", bindAddr, port)
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
+	bindAddr := restBindAddr()
+	fmt.Printf("Starting REST API server on %s...\n", listener.Addr())
 
 	// If BIND_ADDR is not loopback, an auth token is required — the /api/* routes
 	// can send messages and read message history, so anyone who can reach the port
@@ -6749,7 +6762,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, finalHandler); err != nil {
+		if err := http.Serve(listener, finalHandler); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
@@ -6882,6 +6895,19 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
+	bridgePort := 8080
+	if portStr := os.Getenv("WHATSAPP_BRIDGE_PORT"); portStr != "" {
+		if p, err := fmt.Sscanf(portStr, "%d", &bridgePort); p != 1 || err != nil {
+			bridgePort = 8080
+		}
+	}
+	// First thing, before any store is opened: see listenREST.
+	restListener, err := listenREST(bridgePort)
+	if err != nil {
+		logger.Errorf("Exiting without connecting to WhatsApp: cannot bind the REST API port %d (another bridge may already be running for this account): %v", bridgePort, err)
+		os.Exit(1)
+	}
+
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
@@ -6975,13 +7001,7 @@ func main() {
 	connected := make(chan bool, 1)
 
 	// Start REST API server early so /qr is available during the QR pairing flow.
-	bridgePort := 8080
-	if portStr := os.Getenv("WHATSAPP_BRIDGE_PORT"); portStr != "" {
-		if p, err := fmt.Sscanf(portStr, "%d", &bridgePort); p != 1 || err != nil {
-			bridgePort = 8080
-		}
-	}
-	startRESTServer(client, messageStore, bridgePort)
+	startRESTServer(client, messageStore, bridgePort, restListener)
 
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
