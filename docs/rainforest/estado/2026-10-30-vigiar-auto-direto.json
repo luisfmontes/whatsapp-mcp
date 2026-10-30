@@ -31,7 +31,12 @@
     "em": "2026-10-30"
   },
   "revisar": {
-    "status": "pendente"
+    "status": "pendente",
+    "snapshot": {
+      "head": "eaa6098721f327645b184bdeeb79034e452e55a8",
+      "caminhos_sujos": []
+    },
+    "vereditos": []
   },
   "verificar": {
     "status": "pendente"
@@ -46,6 +51,20 @@
       "porque": "a versao nunca foi bumpada neste fork desde a 1.1.0, e o vigiar.md e lido do checkout principal pelo caminho que o vigiar-checar.cjs devolve, nao de um cache por versao",
       "estagio": "executar",
       "em": "2026-10-30T20:42:10.714Z"
+    },
+    {
+      "pergunta": "message-standards (Issue #2 de la) entra com fluxo proprio?",
+      "escolha": "branch + PR sem estado de fluxo, revisado junto com este",
+      "porque": "repo de 2 arquivos que e a propria pasta da skill viva; nunca usou fluxo (historico so de branch+PR); docs/rainforest ali poluiria a skill",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:44:54.305Z"
+    },
+    {
+      "pergunta": "achados da revisao 1 (media: lista completa engolia paradas do passo 4; baixa: mensagem do arme fora das excecoes; baixa: escopo do contato)",
+      "escolha": "os tres corrigidos na secao 6 e espelhados no message-standards",
+      "porque": "escopo fixado no contato vigiado (respostas e a mensagem do arme a ele), excecoes valem para a mensagem e nao so a reply, paradas do passo 4 nomeadas; a premissa do design sobre a regra 3 estava incompleta (a 1a ja isentava o modo), D1 segue valido",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:48:48.784Z"
     }
   ]
 }
