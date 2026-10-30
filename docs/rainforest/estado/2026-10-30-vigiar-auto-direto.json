@@ -15,7 +15,20 @@
     "em": "2026-10-30"
   },
   "executar": {
-    "status": "pendente"
+    "status": "ok",
+    "catraca_mutacao": "2026-10-30",
+    "tarefas_ok": 1,
+    "tarefas": 1,
+    "comando": "node crit-va.cjs commands/vigiar.md vigiar-main.md (secoes 5 e 6 contra origin/main)",
+    "saida": "4/4 ; secao 5 igual ; exit 0. Controle: o mesmo script sobre o arquivo de origin/main da 1/4, exit 1",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "n/a",
+        "motivo": "so instrucao em texto; nenhum codigo le a secao 6"
+      }
+    ],
+    "em": "2026-10-30"
   },
   "revisar": {
     "status": "pendente"
