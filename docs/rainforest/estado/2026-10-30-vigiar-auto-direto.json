@@ -1,0 +1,38 @@
+{
+  "slug": "2026-10-30-vigiar-auto-direto",
+  "titulo": "vigiar --auto envia direto fora das excecoes",
+  "criado_em": "2026-10-30",
+  "arqueologia": {
+    "status": "dispensada",
+    "em": "2026-10-30"
+  },
+  "design": {
+    "status": "aprovado",
+    "em": "2026-10-30"
+  },
+  "plano": {
+    "status": "ok",
+    "em": "2026-10-30"
+  },
+  "executar": {
+    "status": "pendente"
+  },
+  "revisar": {
+    "status": "pendente"
+  },
+  "verificar": {
+    "status": "pendente"
+  },
+  "fechar": {
+    "status": "pendente"
+  },
+  "decididos": [
+    {
+      "pergunta": "sobe a versao do plugin.json (1.1.0)?",
+      "escolha": "nao",
+      "porque": "a versao nunca foi bumpada neste fork desde a 1.1.0, e o vigiar.md e lido do checkout principal pelo caminho que o vigiar-checar.cjs devolve, nao de um cache por versao",
+      "estagio": "executar",
+      "em": "2026-10-30T20:42:10.714Z"
+    }
+  ]
+}
