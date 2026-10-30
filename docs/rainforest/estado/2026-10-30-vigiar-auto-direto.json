@@ -33,7 +33,7 @@
   "revisar": {
     "status": "pendente",
     "snapshot": {
-      "head": "eaa6098721f327645b184bdeeb79034e452e55a8",
+      "head": "ab64fddc4905d118cb18d79297eb265cf502e529",
       "caminhos_sujos": []
     },
     "vereditos": []
@@ -65,6 +65,13 @@
       "porque": "escopo fixado no contato vigiado (respostas e a mensagem do arme a ele), excecoes valem para a mensagem e nao so a reply, paradas do passo 4 nomeadas; a premissa do design sobre a regra 3 estava incompleta (a 1a ja isentava o modo), D1 segue valido",
       "estagio": "revisar",
       "em": "2026-10-30T20:48:48.784Z"
+    },
+    {
+      "pergunta": "revisao 2: escopo da skill mais estreito que o vigiar.md, e voz (regra 1b) sem reconciliar",
+      "escolha": "override = toda mensagem de texto ou arquivo ao contato vigiado enquanto armada; audio fica fora e segue a 1b nos dois textos",
+      "porque": "o envio posterior ao contato vigiado era o defeito original repetido; voz sintetica e o caso de maior risco que a 1b descreve, e deixa-la fora e a direcao segura",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:53:19.382Z"
     }
   ]
 }
