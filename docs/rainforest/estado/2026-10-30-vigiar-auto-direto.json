@@ -33,7 +33,7 @@
   "revisar": {
     "status": "pendente",
     "snapshot": {
-      "head": "ab64fddc4905d118cb18d79297eb265cf502e529",
+      "head": "37c7f4a89e81147593dea445a87e0bb0e35c7ace",
       "caminhos_sujos": []
     },
     "vereditos": []
@@ -72,6 +72,13 @@
       "porque": "o envio posterior ao contato vigiado era o defeito original repetido; voz sintetica e o caso de maior risco que a 1b descreve, e deixa-la fora e a direcao segura",
       "estagio": "revisar",
       "em": "2026-10-30T20:53:19.382Z"
+    },
+    {
+      "pergunta": "revisao 3: voz fora da lista completa de excecoes, 1a sem ressalva de voz, canal nao preso ao WhatsApp",
+      "escolha": "voz entra na lista da secao 6; 1a ganha a ressalva de voz; override preso ao WhatsApp nos dois textos",
+      "porque": "as tres sao a mesma classe da rodada 2 (escopo do override), correcao de uma linha cada, sem decisao nova",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:55:59.301Z"
     }
   ]
 }
