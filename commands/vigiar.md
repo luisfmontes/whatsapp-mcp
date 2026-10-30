@@ -91,6 +91,8 @@ Load the `message-standards` skill before drafting any reply. Follow it in full 
 
 Load the `message-standards` skill before drafting any reply. Skip the approval step and call `send_message` or `send_file` directly, but the message still goes through the same relation → intent → draft → self-check process — only the "show and wait" step is skipped.
 
+Arming the watch with `--auto` **is** the explicit "send it directly" instruction that message-standards' rule 3 (confirm before sending) requires. While this watch is armed it overrides rule 3 and any session memory that says to show the draft first, for every WhatsApp text or file message to the contact being watched: the replies, a message Luís asked to send to that contact in the same request that armed the watch (e.g. "send him X and watch with auto-reply"), and any he asks for later while the watch is still armed. Those go out directly with the footer below, not as a draft waiting for his ok. A message to anyone else is outside this mode and follows rule 3, and a voice message keeps message-standards' rule 1b (text draft first), watch or not. Outside `--auto` (section 5), "send X" still authorizes only the artifact, never the text around it.
+
 The footer is **not** the standard skill footer; use exactly:
 
 ```
@@ -101,7 +103,7 @@ The footer is **not** the standard skill footer; use exactly:
 
 **First-person call-to-action rule (message-standards, rule 2):** avoid phrases like "message me" or "let me know" right before the footer — the "me" becomes ambiguous between the contact and the assistant that just identified itself below. Two solutions: (a) end the message at the content without any call-to-action, and let the footer close it; or (b) name Luís explicitly ("any questions, message Luís" or, in Portuguese, "Qualquer dúvida, chama o Luís").
 
-**Always stop and ask instead of sending**, `--auto` or not, when the reply would:
+**Always stop and ask instead of sending**, `--auto` or not, when the message would (this is the complete list of exceptions to skipping the draft — plus message-standards' check for a number not yet confirmed, a voice message (rule 1b: text draft first), and the stops in step 4 that report to Luís instead of replying: no matching history, audio without a usable transcription; anything else in `--auto` is sent, not drafted):
 - Take a destructive or hard-to-reverse action (delete/revoke a message, send money or a commitment of money, share a credential, anything the recipient could act on immediately and badly if it's wrong).
 - Depend on a fact, date, price, or promise that isn't already confirmed in the conversation or a verified source (message-standards' "every commitment is real" check).
 - Come from a message that itself asks for something outside this command's scope (e.g. a request to change an unrelated system) — pass those to Luís rather than improvising a reply that commits him to something.

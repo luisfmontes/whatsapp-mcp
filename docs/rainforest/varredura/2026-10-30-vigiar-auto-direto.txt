@@ -1,0 +1,71 @@
+Data: 2026-10-30
+Termos: auto mode, approval, rascunho, message-standards
+
+$ gh issue list --state all --search "auto mode" --limit 200 --json number,title,state
+[{"number":41,"state":"CLOSED","title":"SQLITE_BUSY no whatsapp.db derruba a decriptação e perde mensagens recebidas"},{"number":18,"state":"CLOSED","title":"Autoria de mensagem de grupo perdida: sender gravado como o JID do proprio grupo em 12 conversas"}]
+
+
+$ gh issue list --state all --search "approval" --limit 200 --json number,title,state
+[{"number":52,"state":"OPEN","title":"vigiar --auto: assistente para e pede ok fora das excecoes da secao 6"}]
+
+
+$ gh issue list --state all --search "rascunho" --limit 200 --json number,title,state
+[{"number":52,"state":"OPEN","title":"vigiar --auto: assistente para e pede ok fora das excecoes da secao 6"},{"number":35,"state":"CLOSED","title":"vigiar: carregar message-standards antes de enviar, áudio pelo whisper local e histórico antes de interpretar"},{"number":40,"state":"CLOSED","title":"Mensagem que não chega ao store não tem recuperação: requestHistorySync existe mas não tem endpoint nem ferramenta MCP"}]
+
+
+$ gh issue list --state all --search "message-standards" --limit 200 --json number,title,state
+[{"number":52,"state":"OPEN","title":"vigiar --auto: assistente para e pede ok fora das excecoes da secao 6"},{"number":35,"state":"CLOSED","title":"vigiar: carregar message-standards antes de enviar, áudio pelo whisper local e histórico antes de interpretar"}]
+
+
+$ gh pr list --state all --search "auto mode" --limit 200 --json number,title,state
+[{"number":32,"state":"MERGED","title":"feat: /whatsapp:vigiar watches a chat without spending tokens while idle"}]
+
+
+$ gh pr list --state all --search "approval" --limit 200 --json number,title,state
+[{"number":32,"state":"MERGED","title":"feat: /whatsapp:vigiar watches a chat without spending tokens while idle"}]
+
+
+$ gh pr list --state all --search "rascunho" --limit 200 --json number,title,state
+[{"number":39,"state":"MERGED","title":"docs(vigiar): padrão de mensagens, áudio e histórico"}]
+
+
+$ gh pr list --state all --search "message-standards" --limit 200 --json number,title,state
+[{"number":39,"state":"MERGED","title":"docs(vigiar): padrão de mensagens, áudio e histórico"},{"number":32,"state":"MERGED","title":"feat: /whatsapp:vigiar watches a chat without spending tokens while idle"}]
+
+
+$ git ls-remote --heads origin | grep -F "auto mode"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "approval"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "rascunho"
+(vazio)
+
+$ git ls-remote --heads origin | grep -F "message-standards"
+(vazio)
+
+$ git log --all --grep="auto mode" --oneline
+(vazio)
+
+$ git log --all --grep="approval" --oneline
+(vazio)
+
+$ git log --all --grep="rascunho" --oneline
+942a299 fix(bridge): mensagem apagada ou editada pelo remetente (PR #22)
+7845e37 test(bridge): cobrir REVOKE/EDIT e ligar /api/edit e /api/revoke ao store
+
+$ git log --all --grep="message-standards" --oneline
+51d8e1e docs(vigiar): transcrição de áudio alvo e regra do "me"
+64e665f docs(vigiar): padrão, áudio e histórico
+
+$ cat <dados>/ideias.jsonl
+{"id":"repo-privado-whatsapp-standards","titulo":"Repo privado para a skill whatsapp-message-standards"}
+{"id":"gmail-enviar-e-anexos","titulo":"Gmail completo no terminal: enviar sem rascunho e baixar anexos"}
+{"id":"skill-pessoal-vive-em-duas-config-dirs-e-ja-divergiu","titulo":"As duas copias da message-standards ja estavam divergentes antes de qualquer edicao: a de trabalho nao tem o fundo do vault"}
+{"id":"obs-2026-08-24-rascunho-so-o-que-foi-pedido","titulo":"Rascunho para terceiro responde so o que foi perguntado"}
+{"id":"whatsapp-enviado-sem-mostrar-rascunho","titulo":"Enviei WhatsApp ao Emerson sem mostrar o rascunho"}
+{"id":"whatsapp-auto-sem-message-standards","titulo":"Resposta automatica no WhatsApp saiu sem rodape e sem a skill message-standards"}
+{"id":"rascunho-supos-caminho-fora-do-mr","titulo":"Rascunho perguntou se codigo 'entrou por outro caminho' num repo onde master so recebe por MR"}
+
+

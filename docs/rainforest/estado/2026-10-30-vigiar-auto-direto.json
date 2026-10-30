@@ -1,0 +1,103 @@
+{
+  "slug": "2026-10-30-vigiar-auto-direto",
+  "titulo": "vigiar --auto envia direto fora das excecoes",
+  "criado_em": "2026-10-30",
+  "arqueologia": {
+    "status": "dispensada",
+    "em": "2026-10-30"
+  },
+  "design": {
+    "status": "aprovado",
+    "em": "2026-10-30"
+  },
+  "plano": {
+    "status": "ok",
+    "em": "2026-10-30"
+  },
+  "executar": {
+    "status": "ok",
+    "catraca_mutacao": "2026-10-30",
+    "tarefas_ok": 1,
+    "tarefas": 1,
+    "comando": "node crit-va.cjs commands/vigiar.md vigiar-main.md (secoes 5 e 6 contra origin/main)",
+    "saida": "4/4 ; secao 5 igual ; exit 0. Controle: o mesmo script sobre o arquivo de origin/main da 1/4, exit 1",
+    "mutacao": [
+      {
+        "tarefa": 1,
+        "resultado": "n/a",
+        "motivo": "so instrucao em texto; nenhum codigo le a secao 6"
+      }
+    ],
+    "em": "2026-10-30"
+  },
+  "revisar": {
+    "status": "ok",
+    "snapshot": {
+      "head": "60c5bf1f5881070cab565b27121387979313ee38",
+      "caminhos_sujos": []
+    },
+    "vereditos": [
+      {
+        "agente": "rainforest-mind:revisor",
+        "agente_id": "ad3b54d40d2a664eb",
+        "veredito": "ok",
+        "em": "2026-10-30",
+        "transcrito": "~/.claude/projects/C--Projetos-rainforest-mind/4afb8320-f076-402f-8e7d-8f71f64b7cd2/subagents/agent-ad3b54d40d2a664eb.jsonl"
+      }
+    ],
+    "base": "2a8d4d73205e1520d21165bf6f663997be68f44b",
+    "head": "60c5bf1f5881070cab565b27121387979313ee38",
+    "achados": [],
+    "em": "2026-10-30"
+  },
+  "verificar": {
+    "status": "ok",
+    "tarefas_ok": 1,
+    "tarefas": 1,
+    "comando": "node crit-va.cjs commands/vigiar.md vigiar-main.md",
+    "saida": "4/4 ; secao 5 igual ; exit 0 no HEAD 60c5bf1. Controle sobre origin/main: 1/4, exit 1. Revisao 4 com VEREDITO ok confirma secao 5 com sha256 igual a 2a8d4d7",
+    "sensor_externo": "node crit-va.cjs",
+    "em": "2026-10-30",
+    "head": "60c5bf1f5881070cab565b27121387979313ee38"
+  },
+  "fechar": {
+    "status": "pendente"
+  },
+  "decididos": [
+    {
+      "pergunta": "sobe a versao do plugin.json (1.1.0)?",
+      "escolha": "nao",
+      "porque": "a versao nunca foi bumpada neste fork desde a 1.1.0, e o vigiar.md e lido do checkout principal pelo caminho que o vigiar-checar.cjs devolve, nao de um cache por versao",
+      "estagio": "executar",
+      "em": "2026-10-30T20:42:10.714Z"
+    },
+    {
+      "pergunta": "message-standards (Issue #2 de la) entra com fluxo proprio?",
+      "escolha": "branch + PR sem estado de fluxo, revisado junto com este",
+      "porque": "repo de 2 arquivos que e a propria pasta da skill viva; nunca usou fluxo (historico so de branch+PR); docs/rainforest ali poluiria a skill",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:44:54.305Z"
+    },
+    {
+      "pergunta": "achados da revisao 1 (media: lista completa engolia paradas do passo 4; baixa: mensagem do arme fora das excecoes; baixa: escopo do contato)",
+      "escolha": "os tres corrigidos na secao 6 e espelhados no message-standards",
+      "porque": "escopo fixado no contato vigiado (respostas e a mensagem do arme a ele), excecoes valem para a mensagem e nao so a reply, paradas do passo 4 nomeadas; a premissa do design sobre a regra 3 estava incompleta (a 1a ja isentava o modo), D1 segue valido",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:48:48.784Z"
+    },
+    {
+      "pergunta": "revisao 2: escopo da skill mais estreito que o vigiar.md, e voz (regra 1b) sem reconciliar",
+      "escolha": "override = toda mensagem de texto ou arquivo ao contato vigiado enquanto armada; audio fica fora e segue a 1b nos dois textos",
+      "porque": "o envio posterior ao contato vigiado era o defeito original repetido; voz sintetica e o caso de maior risco que a 1b descreve, e deixa-la fora e a direcao segura",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:53:19.382Z"
+    },
+    {
+      "pergunta": "revisao 3: voz fora da lista completa de excecoes, 1a sem ressalva de voz, canal nao preso ao WhatsApp",
+      "escolha": "voz entra na lista da secao 6; 1a ganha a ressalva de voz; override preso ao WhatsApp nos dois textos",
+      "porque": "as tres sao a mesma classe da rodada 2 (escopo do override), correcao de uma linha cada, sem decisao nova",
+      "estagio": "revisar",
+      "em": "2026-10-30T20:55:59.301Z"
+    }
+  ]
+}
