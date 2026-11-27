@@ -75,7 +75,10 @@ class FormatMessageCitacaoTest(unittest.TestCase):
         with mock.patch("whatsapp.get_sender_name", return_value="Fulano"):
             output = format_message(msg, show_chat_info=False)
 
-        self.assertEqual(output, "[2026-09-08 10:00:00] From: Fulano: respondendo\n")
+        # Desde test_message_id_texto.py a linha de texto traz o id opaco; o
+        # que este teste guarda continua valendo: sem linha de citacao nem de
+        # mencao quando nao ha nenhuma das duas.
+        self.assertEqual(output, "[2026-09-08 10:00:00] From: Fulano: [Message ID: MSG-2] respondendo\n")
         self.assertNotIn("↳", output)
         self.assertNotIn("@ mentions", output)
 
