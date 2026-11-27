@@ -552,6 +552,14 @@ def format_message(message: Message, show_chat_info: bool = True, account: Optio
         # é opaco, e é o que `download_media` precisa junto do `chat_jid` que
         # quem chama já tem — foi ele que pediu a listagem deste chat.
         content_prefix = f"[{message.media_type} - Message ID: {message.id}] "
+    elif message.id:
+        # Texto também leva o id: `mark_chat_as_read`, `react_to_message`,
+        # `edit_message` e responder citando pedem o `message_id`, e a prosa
+        # era o único lugar onde a mensagem de texto aparecia sem ele — quem
+        # lia por `list_messages` não tinha como marcar como lida. Mesmo
+        # argumento da linha de mídia acima: o id é opaco, não é telefone nem
+        # JID, então não fere a D3.
+        content_prefix = f"[Message ID: {message.id}] "
 
     try:
         # `get_sender_name` devolve o PROPRIO identificador quando nao acha
